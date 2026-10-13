@@ -1,0 +1,8 @@
+[risk]
+paper_only = true
+max_leverage = 2
+
+# OKX perpetual fees for regular users (VIP 0), per side.
+[venues.okx]
+maker_fee_bps = 2.0
+taker_fee_bps = 5.0

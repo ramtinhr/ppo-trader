@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Walk-forward by trades</title>
+<style>
+  :root {
+    --bg: #0b0f17; --panel: #121826; --panel-2: #172033; --border: #24304a;
+    --text: #e6ebf5; --muted: #8b97ad; --accent: #4f8cff;
+    --green: #22c55e; --red: #ef4444; --amber: #f59e0b;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { border-bottom: 1px solid var(--border); padding: 14px 24px; display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; font-weight: 650; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  main { padding: 20px 24px 48px; max-width: 1500px; margin: 0 auto; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 16px; }
+  .card-head { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .card-head h2 { font-size: 15px; margin: 0; font-weight: 620; }
+  .card-body { padding: 14px 16px; }
+  .verdict { font-size: 15px; padding: 14px 16px; border-left: 4px solid var(--amber); }
+  .verdict.good { border-left-color: var(--green); } .verdict.bad { border-left-color: var(--red); }
+  .muted { color: var(--muted); }
+  .pos { color: var(--green); } .neg { color: var(--red); }
+  .table-wrap { overflow: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { padding: 7px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--border); }
+  th:first-child, td:first-child, td.left, th.left { text-align: left; }
+  th { background: var(--panel-2); color: var(--muted); font-weight: 600; font-size: 12px; }
+  tbody tr:hover { background: rgba(79,140,255,.08); }
+  ul.plain { margin: 6px 0; padding-left: 20px; } ul.plain li { margin: 3px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Walk-forward by trades: choose the best window pair again and again</h1>
+  <span class="sub" id="sub"></span>
+</header>
+<main>
+  <div class="card"><div class="card-body" id="explain"></div></div>
+  <div class="card"><div class="verdict" id="verdict"></div></div>
+  <div class="card">
+    <div class="card-head"><h2>Step 2: the chosen window pairs, one after another</h2>
+      <span class="muted">Each row is one choice and the trades that followed it. This is the bot's real result.</span></div>
+    <div class="card-body table-wrap"><table id="chosen"></table></div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>Step 1: every window pair on its own</h2>
+      <span class="muted">Each window pair's own walk-forward, from the first pick to the end. Click a column to sort.</span></div>
+    <div class="card-body table-wrap"><table id="pairs"></table></div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>NautilusTrader check</h2>
+      <span class="muted">The pick replayed over the whole period in NautilusTrader, compared fill by fill with the scanner.</span></div>
+    <div class="card-body table-wrap"><table id="verify"></table></div>
+  </div>
+</main>
+<script>
+const R = /*__REPORT__*/null;
+const $ = (s) => document.querySelector(s);
+const fmt = (x, d = 2) => Number.isFinite(x) ? x.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }) : '–';
+const signed = (x, d = 2) => (x > 0 ? '+' : '') + fmt(x, d);
+const cls = (x) => x > 0 ? 'pos' : x < 0 ? 'neg' : '';
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const money = (x) => `<span class="${cls(x)}">${signed(x)}</span>`;
+const M = R.meta;
+
+$('#sub').textContent = `${M.instrument} · ${M.timeframe_minutes}m candles · ${M.start} to ${M.end} (end excluded) · ${M.window_pairs} window pairs · ${M.combinations.toLocaleString()} combinations · ${M.size_btc} BTC per trade · fees taker ${M.taker_fee_bps} / maker ${M.maker_fee_bps} bps · generated ${M.generated_utc} UTC`;
+$('#explain').innerHTML = `
+  <b>How it works</b>
+  <ul class="plain">
+    <li>A <b>trade</b> is one position from its entry until it is fully closed, with all its fees.</li>
+    <li>A <b>window pair</b> N/M is a training window of N trades and a test window of M trades, with M from N/3 down to 1: 100/33 … 100/1, 90/30 … 90/1, …, 10/3 … 10/1.</li>
+    <li><b>Step 1</b>, from ${M.first_pick} UTC: every window pair runs its own walk-forward. It picks the combination with the best <b>score</b> (profit after fees ÷ the largest drop) on its last N trades, trades it for its next M trades, then picks again.</li>
+    <li><b>Step 2</b>, from ${M.first_choice} UTC: the window pair whose own last N trades have the best score is followed for its next M trades, then the choice is made again, and so on. Nothing after a pick or a choice is used to make it.</li>
+    <li>The account starts with ${fmt(M.balance_usdt, 0)} USDT. <b>Buy-and-hold</b> means buying the same ${M.size_btc} BTC when each choice starts and selling when it ends, with fees.</li>
+  </ul>`;
+
+const C = R.chosen;
+const good = C.total > 0 && C.total > C.buy_and_hold_total && C.positive > C.windows.length / 2;
+$('#verdict').className = `verdict ${good ? 'good' : 'bad'}`;
+$('#verdict').innerHTML = `Choosing the window pair again and again made <b class="${cls(C.total)}">${signed(C.total)} USDT</b> after fees over ${C.windows.length} choices (${C.positive} profitable); buy-and-hold over the same time: ${money(C.buy_and_hold_total)} USDT; in choices where BTC fell: ${money(C.in_falling_windows)} USDT. ${good ? 'It made money in most choices and beat buy-and-hold. Check it on more data before trusting it.' : 'It did not make money reliably.'} <span class="muted">Stopped because ${esc(C.stop_reason)}.</span>`;
+
+$('#chosen').innerHTML = `<thead><tr><th>#</th><th class="left">Chosen at (UTC)</th><th>Window pair</th><th>Its last N trades</th><th>Drop</th><th>Score</th><th class="left">Traded (UTC)</th><th class="left">Combination</th><th>Result</th><th>Won</th><th>Balance after</th><th>Buy-and-hold</th><th>Pairs eligible</th></tr></thead><tbody>${
+  C.windows.map((w, i) => `<tr><td>${i + 1}</td><td class="left">${w.pick_at}</td><td>${w.train_trades} / ${w.test_trades}</td><td>${money(w.train_profit)}</td><td>${fmt(w.train_drop)}</td><td>${fmt(w.train_score)}</td>
+    <td class="left">${w.test_from} → ${w.test_to}</td><td class="left">${esc(w.label)}</td><td><b>${money(w.test_net)}</b></td><td>${w.test_wins} / ${w.test_trades}</td><td>${fmt(w.balance)}</td><td>${money(w.buy_and_hold)}</td><td>${w.eligible}</td></tr>`).join('')}</tbody>`;
+
+const PAIRS = R.window_pairs;
+let sortKey = 'total', sortDir = -1;
+const COLS = [['train_trades', 'Training (N)'], ['test_trades', 'Test (M)'], ['total', 'Total after fees'], ['windows', 'Test windows'], ['positive', 'Profitable windows'], ['trades', 'Trades'], ['until', 'Last trade (UTC)'], ['stop_reason', 'Stopped because']];
+function drawPairs() {
+  const rows = [...PAIRS].sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : a[sortKey] < b[sortKey] ? -1 : 0) * sortDir);
+  $('#pairs').innerHTML = `<thead><tr>${COLS.map(([k, l]) => `<th data-k="${k}" style="cursor:pointer" class="${k === 'until' || k === 'stop_reason' ? 'left' : ''}">${l}${k === sortKey ? (sortDir > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('')}</tr></thead><tbody>${
+    rows.map((p) => `<tr><td>${p.train_trades}</td><td>${p.test_trades}</td><td><b>${money(p.total)}</b></td><td>${p.windows}</td><td>${p.positive} of ${p.windows}</td><td>${p.trades}</td><td class="left">${p.until}</td><td class="left muted">${esc(p.stop_reason)}</td></tr>`).join('')}</tbody>`;
+  document.querySelectorAll('#pairs th').forEach((th) => th.addEventListener('click', () => { const k = th.dataset.k; sortDir = k === sortKey ? -sortDir : -1; sortKey = k; drawPairs(); }));
+}
+drawPairs();
+
+$('#verify').innerHTML = R.verify.length
+  ? `<thead><tr><th class="left">Combination</th><th>Fills</th><th>Fills that differ</th><th>Time</th><th>Result</th></tr></thead><tbody>${
+    R.verify.map((v) => `<tr><td class="left">${esc(v.pair)}</td><td>${v.fills}</td><td class="${v.differ ? 'neg' : 'pos'}">${v.differ}</td><td>${fmt(v.seconds, 0)} s</td><td class="${v.ok ? 'pos' : 'neg'}">${v.ok ? 'match' : 'MISMATCH'}</td></tr>`).join('')}</tbody>`
+  : '<tbody><tr><td class="muted">Skipped (--verify 0).</td></tr></tbody>';
+</script>
+</body>
+</html>
