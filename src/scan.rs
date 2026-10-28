@@ -22,7 +22,16 @@ const MAX_TARGETS: usize = 8;
 pub struct Market<'a> {
     pub candles: &'a [Candle],
     pub tape: &'a Tape,
+    /// Tape step of each candle's first trade; the tape may have been read with smaller candles.
+    pub bar_start: &'a [u32],
     pub closes: &'a CloseRanges,
+}
+
+impl Market<'_> {
+    /// Candle holding tape step `step`.
+    fn bar_of(&self, step: usize) -> usize {
+        self.bar_start.partition_point(|&s| s as usize <= step) - 1
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -63,7 +72,11 @@ impl Outcome {
     }
 
     pub fn win_rate(&self) -> f64 {
-        if self.closed_trades == 0 { 0.0 } else { f64::from(self.wins) / f64::from(self.closed_trades) * 100.0 }
+        if self.closed_trades == 0 {
+            0.0
+        } else {
+            f64::from(self.wins) / f64::from(self.closed_trades) * 100.0
+        }
     }
 }
 
@@ -124,12 +137,25 @@ pub fn signals(x: &[f64], y: &[f64]) -> Vec<(u32, i8)> {
 
 /// `signals` through `filter`, judged on the crossing bar's close: a rejected cross becomes 0,
 /// which closes the position without opening one.
-pub fn filtered(signals: &[(u32, i8)], filter: &Filter, candles: &[Candle], ema: &[f64], atr: &[f64]) -> Vec<(u32, i8)> {
+pub fn filtered(
+    signals: &[(u32, i8)],
+    filter: &Filter,
+    candles: &[Candle],
+    ema: &[f64],
+    atr: &[f64],
+) -> Vec<(u32, i8)> {
     signals
         .iter()
         .map(|&(bar, dir)| {
             let i = bar as usize - 1;
-            (bar, if filter.allows(dir, candles[i].close, ema[i], atr[i]) { dir } else { 0 })
+            (
+                bar,
+                if filter.allows(dir, candles[i].close, ema[i], atr[i]) {
+                    dir
+                } else {
+                    0
+                },
+            )
         })
         .collect()
 }
@@ -206,7 +232,10 @@ fn replay<'a>(
     let mut target_steps = [0; MAX_TARGETS];
     let mut n_targets = 0;
     if let Some(e) = exits {
-        assert!(e.targets.len() <= MAX_TARGETS, "at most {MAX_TARGETS} take-profits");
+        assert!(
+            e.targets.len() <= MAX_TARGETS,
+            "at most {MAX_TARGETS} take-profits"
+        );
         for (k, s) in e.target_steps(costs.steps).into_iter().enumerate() {
             target_steps[k] = s;
         }
@@ -216,7 +245,12 @@ fn replay<'a>(
         market,
         costs,
         exits,
-        o: Outcome { fast, slow, setting, ..Default::default() },
+        o: Outcome {
+            fast,
+            slow,
+            setting,
+            ..Default::default()
+        },
         pos: 0,
         entry: 0.0,
         entry_ticks: 0,
@@ -237,11 +271,14 @@ fn replay<'a>(
         log,
     };
     let fills = bars.start + 1..bars.end;
-    for &(bar, dir) in signals.iter().filter(|(bar, _)| fills.contains(&(*bar as usize))) {
+    for &(bar, dir) in signals
+        .iter()
+        .filter(|(bar, _)| fills.contains(&(*bar as usize)))
+    {
         sim.on_signal(bar as usize, dir);
     }
     let tape = market.tape;
-    let last_step = match tape.bar_start.get(bars.end) {
+    let last_step = match market.bar_start.get(bars.end) {
         Some(&next) => next as usize - 1,
         None => tape.price.len().saturating_sub(1),
     };
@@ -255,7 +292,13 @@ fn replay<'a>(
             && let Some(record) = sim.record.as_mut()
             && let Some(trade) = record.trades.last_mut()
         {
-            trade.exits.push(Exit { time_ms: last.time_ms, price: last.close, steps: sim.pos.abs(), fee: 0.0, kind: "open".into() });
+            trade.exits.push(Exit {
+                time_ms: last.time_ms,
+                price: last.close,
+                steps: sim.pos.abs(),
+                fee: 0.0,
+                kind: "open".into(),
+            });
             trade.open = true;
         }
     }
@@ -268,7 +311,7 @@ impl Sim<'_> {
     }
 
     fn on_signal(&mut self, bar: usize, dir: i8) {
-        let step = self.market.tape.bar_start[bar] as usize;
+        let step = self.market.bar_start[bar] as usize;
         self.run_exits(step);
         if (dir > 0 && self.pos > 0) || (dir < 0 && self.pos < 0) || (dir == 0 && self.pos == 0) {
             return;
@@ -312,7 +355,15 @@ impl Sim<'_> {
         self.entry = price;
         self.entry_bar = bar as u32;
         if let Some(record) = self.record.as_mut() {
-            record.trades.push(Trade { long: dir > 0, entry_ms: time_ms, entry_price: price, steps: size, entry_fee: fee, exits: Vec::new(), open: false });
+            record.trades.push(Trade {
+                long: dir > 0,
+                entry_ms: time_ms,
+                entry_price: price,
+                steps: size,
+                entry_fee: fee,
+                exits: Vec::new(),
+                open: false,
+            });
         }
         if let Some(exits) = self.exits {
             let long = dir > 0;
@@ -344,14 +395,26 @@ impl Sim<'_> {
             match (target, stop) {
                 (_, Some(k)) => {
                     let kind = if self.at_breakeven { "BE" } else { "SL" };
-                    self.exit_fill(k, self.pos.abs(), self.costs.taker, FillKind::StopLoss, kind);
+                    self.exit_fill(
+                        k,
+                        self.pos.abs(),
+                        self.costs.taker,
+                        FillKind::StopLoss,
+                        kind,
+                    );
                     self.o.stop_fills += 1;
                     self.active = false;
                 }
                 (Some(k), _) => {
                     let steps = self.target_steps[self.next].min(self.pos.abs());
                     self.next += 1;
-                    self.exit_fill(k, steps, self.costs.maker, FillKind::TakeProfit, &format!("TP{}", self.next));
+                    self.exit_fill(
+                        k,
+                        steps,
+                        self.costs.maker,
+                        FillKind::TakeProfit,
+                        &format!("TP{}", self.next),
+                    );
                     self.o.target_fills += 1;
                     // Other take-profits can fill on the same trade; the stop changes after it.
                     self.from_target = k;
@@ -377,7 +440,7 @@ impl Sim<'_> {
         let tape = self.market.tape;
         let price = f64::from(tape.price[step]) / 10.0;
         let time_ms = tape.time_ms(step);
-        self.mark_to(tape.bar_of(step));
+        self.mark_to(self.market.bar_of(step));
         let long = self.pos > 0;
         self.close(time_ms, steps, price, rate, label);
         self.o.orders += 1;
@@ -404,13 +467,23 @@ impl Sim<'_> {
         self.trade_net += gain - fee;
         self.pos -= self.pos.signum() * steps;
         if let Some(trade) = self.record.as_mut().and_then(|r| r.trades.last_mut()) {
-            trade.exits.push(Exit { time_ms, price, steps, fee, kind: kind.into() });
+            trade.exits.push(Exit {
+                time_ms,
+                price,
+                steps,
+                fee,
+                kind: kind.into(),
+            });
         }
         if self.pos == 0 {
             self.o.closed_trades += 1;
             self.o.wins += u32::from(self.trade_net > 0.0);
             if let Some(log) = self.log.as_mut() {
-                log.push(ClosedTrade { exit_ms: time_ms, entry_bar: self.entry_bar, net: self.trade_net as f32 });
+                log.push(ClosedTrade {
+                    exit_ms: time_ms,
+                    entry_bar: self.entry_bar,
+                    net: self.trade_net as f32,
+                });
             }
         }
     }
@@ -430,9 +503,17 @@ impl Sim<'_> {
             let span = self.market.closes.span(self.marked, bar);
             let base = closed - held * self.entry;
             let (low, high, inner) = if held > 0.0 {
-                (base + held * span.min, base + held * span.max, held * span.fall)
+                (
+                    base + held * span.min,
+                    base + held * span.max,
+                    held * span.fall,
+                )
             } else {
-                (base + held * span.max, base + held * span.min, -held * span.rise)
+                (
+                    base + held * span.max,
+                    base + held * span.min,
+                    -held * span.rise,
+                )
             };
             self.o.max_drawdown = self.o.max_drawdown.max(self.peak - low).max(inner);
             self.peak = self.peak.max(high);

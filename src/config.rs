@@ -45,8 +45,8 @@ impl AppConfig {
         if !self.risk.paper_only {
             bail!("live trading is disabled; risk.paper_only must be true");
         }
-        if !(1..=3).contains(&self.risk.max_leverage) {
-            bail!("initial max_leverage must be between 1 and 3");
+        if !(1..=10).contains(&self.risk.max_leverage) {
+            bail!("initial max_leverage must be between 1 and 10");
         }
         let okx = &self.venues.okx;
         if okx.maker_fee_bps < 0.0 || okx.taker_fee_bps < 0.0 {
@@ -81,6 +81,8 @@ taker_fee_bps = 5.0
     fn rejects_unsafe_leverage_and_live_trading() {
         let mut config: AppConfig = toml::from_str(VALID_CONFIG).unwrap();
         config.risk.max_leverage = 10;
+        assert!(config.validate().is_ok());
+        config.risk.max_leverage = 11;
         assert!(config.validate().is_err());
         let mut config: AppConfig = toml::from_str(VALID_CONFIG).unwrap();
         config.risk.paper_only = false;

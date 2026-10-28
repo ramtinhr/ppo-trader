@@ -24,8 +24,8 @@ use chrono::DateTime;
 use dynamic_trader::{
     okx_history::{self, Candle},
     pine_rsi::{PineRsiParams, PineRsiSignals},
-    strategy::Signal,
     rsi::Rsi,
+    strategy::Signal,
     tradingview::{ChartSession, PineScript, TvBar, auth_token},
 };
 use serde_json::{Value, json};
@@ -73,7 +73,9 @@ fn parse_args() -> Result<Args> {
             println!("{USAGE}");
             std::process::exit(0);
         }
-        let value = it.next().with_context(|| format!("{flag} needs a value\n\n{USAGE}"))?;
+        let value = it
+            .next()
+            .with_context(|| format!("{flag} needs a value\n\n{USAGE}"))?;
         match flag.as_str() {
             "--timeframe" => args.minutes = value.parse()?,
             "--periods" => {
@@ -90,8 +92,14 @@ fn parse_args() -> Result<Args> {
             _ => bail!("unknown option {flag}\n\n{USAGE}"),
         }
     }
-    ensure!(args.minutes > 0, "--timeframe must be a positive number of minutes");
-    ensure!(args.periods.iter().all(|p| *p > 0), "RSI periods must be positive");
+    ensure!(
+        args.minutes > 0,
+        "--timeframe must be a positive number of minutes"
+    );
+    ensure!(
+        args.periods.iter().all(|p| *p > 0),
+        "RSI periods must be positive"
+    );
     args.strategy.validate()?;
     Ok(args)
 }
@@ -136,7 +144,11 @@ fn main() -> Result<()> {
         utc(tv[tv.len() - 1].time * 1000),
         utc(ours_end_ms)
     );
-    let series = Series { tv, ours, ours_end_ms };
+    let series = Series {
+        tv,
+        ours,
+        ours_end_ms,
+    };
 
     let mut passed = check_candles(&args, &series)?;
     let rsi_script = PineScript::fetch("STD;RSI")?;
@@ -200,16 +212,31 @@ fn check_candles(args: &Args, s: &Series) -> Result<bool> {
                 verdict = "ours";
             } else {
                 ours_wrong += 1;
-                verdict = if same_prices(tv, okx) { "tradingview" } else { "neither" };
+                verdict = if same_prices(tv, okx) {
+                    "tradingview"
+                } else {
+                    "neither"
+                };
             }
-            println!("   {} TradingView {tv:?} | ours {:?} | OKX official {okx:?}", utc(t), our.map(prices));
+            println!(
+                "   {} TradingView {tv:?} | ours {:?} | OKX official {okx:?}",
+                utc(t),
+                our.map(prices)
+            );
         }
         let o = |i: usize| our.map(|c| prices(c)[i].to_string()).unwrap_or_default();
         writeln!(
             out,
             "{},{},{},{},{},{},{},{},{},{},{verdict}",
             utc(t),
-            tv[0], o(0), tv[1], o(1), tv[2], o(2), tv[3], o(3),
+            tv[0],
+            o(0),
+            tv[1],
+            o(1),
+            tv[2],
+            o(2),
+            tv[3],
+            o(3),
             u8::from(same)
         )?;
     }
@@ -233,7 +260,11 @@ fn our_closes(s: &Series) -> Vec<(i64, Option<f64>)> {
 }
 
 fn pct_diff(tv: f64, ours: f64) -> f64 {
-    if tv == 0.0 { (ours - tv).abs() * 100.0 } else { ((ours - tv) / tv).abs() * 100.0 }
+    if tv == 0.0 {
+        (ours - tv).abs() * 100.0
+    } else {
+        ((ours - tv) / tv).abs() * 100.0
+    }
 }
 
 /// Largest RSI difference and the number of bars over `tolerance`, comparing TradingView's RSI
@@ -249,7 +280,9 @@ fn compare_rsi(
     let (mut compared, mut mismatches, mut worst, mut worst_at) = (0, 0, 0.0_f64, 0);
     for &(t, close) in closes {
         let ours = rsi.update(close);
-        let tv = study.get(&(t / 1000)).and_then(|p| p.first().copied().flatten());
+        let tv = study
+            .get(&(t / 1000))
+            .and_then(|p| p.first().copied().flatten());
         if tv.is_none() && ours.is_none() {
             continue;
         }
@@ -265,7 +298,14 @@ fn compare_rsi(
         }
         if let Some(file) = out.as_mut() {
             let f = |x: Option<f64>| x.map(|x| format!("{x:.10}")).unwrap_or_default();
-            writeln!(file, "{period},{},{close},{},{},{diff:.10},{}", utc(t), f(tv), f(ours), u8::from(bad))?;
+            writeln!(
+                file,
+                "{period},{},{close},{},{},{diff:.10},{}",
+                utc(t),
+                f(tv),
+                f(ours),
+                u8::from(bad)
+            )?;
         }
     }
     Ok((compared, mismatches, worst, worst_at))
@@ -275,11 +315,23 @@ fn compare_rsi(
 /// candles TradingView used (tests the converted formula) and on our candles (tests our data
 /// too). TradingView serves each chart from one of several servers whose candles can differ, so
 /// every candle where that chart differs from ours is checked against OKX's official candle.
-fn check_rsi(args: &Args, s: &Series, script: &PineScript, token: &str, timeframe: &str) -> Result<bool> {
-    println!("\n2. RSI: TradingView's RSI vs our Rust Rsi (limit {}%)", args.tolerance);
+fn check_rsi(
+    args: &Args,
+    s: &Series,
+    script: &PineScript,
+    token: &str,
+    timeframe: &str,
+) -> Result<bool> {
+    println!(
+        "\n2. RSI: TradingView's RSI vs our Rust Rsi (limit {}%)",
+        args.tolerance
+    );
     let mut out = fs::File::create(args.out.join("rsi.csv"))?;
     let mut summary = fs::File::create(args.out.join("rsi_summary.csv"))?;
-    writeln!(out, "period,time_utc,our_close,tv_rsi,our_rsi,diff_pct,mismatch")?;
+    writeln!(
+        out,
+        "period,time_utc,our_close,tv_rsi,our_rsi,diff_pct,mismatch"
+    )?;
     writeln!(
         summary,
         "period,formula_bars,formula_mismatches,formula_max_diff_pct,data_bars,data_mismatches,data_max_diff_pct,data_max_at_utc,tv_candles_wrong"
@@ -287,7 +339,10 @@ fn check_rsi(args: &Args, s: &Series, script: &PineScript, token: &str, timefram
     let bar_ms = args.minutes * 60_000;
     let ours: Vec<(i64, f64)> = our_closes(s)
         .into_iter()
-        .map(|(t, c)| c.map(|c| (t, c)).with_context(|| format!("our candle at {} is missing", utc(t))))
+        .map(|(t, c)| {
+            c.map(|c| (t, c))
+                .with_context(|| format!("our candle at {} is missing", utc(t)))
+        })
         .collect::<Result<_>>()?;
     let mut all_pass = true;
     for &period in &args.periods {
@@ -302,18 +357,27 @@ fn check_rsi(args: &Args, s: &Series, script: &PineScript, token: &str, timefram
 
         // The last bar is still forming: its close can change between the candle and RSI updates.
         let finished = &bars[..bars.len().saturating_sub(1)];
-        let tv_closes: Vec<(i64, f64)> = finished.iter().map(|b| (b.time * 1000, b.close)).collect();
-        let (f_bars, f_bad, f_worst, f_at) = compare_rsi(period, &tv_closes, &study.plots, args.tolerance, None)?;
+        let tv_closes: Vec<(i64, f64)> =
+            finished.iter().map(|b| (b.time * 1000, b.close)).collect();
+        let (f_bars, f_bad, f_worst, f_at) =
+            compare_rsi(period, &tv_closes, &study.plots, args.tolerance, None)?;
         if f_bad > 0 {
-            println!("   RSI({period}) on TradingView's candles: largest difference at {}", utc(f_at));
+            println!(
+                "   RSI({period}) on TradingView's candles: largest difference at {}",
+                utc(f_at)
+            );
         }
         let (d_bars, d_bad, d_worst, d_at) =
             compare_rsi(period, &ours, &study.plots, args.tolerance, Some(&mut out))?;
 
-        let (tv_wrong, ours_wrong) = judge_chart_candles(&format!("RSI({period})"), &bars, s, bar_ms)?;
+        let (tv_wrong, ours_wrong) =
+            judge_chart_candles(&format!("RSI({period})"), &bars, s, bar_ms)?;
 
         let at = if d_at > 0 { utc(d_at) } else { "-".into() };
-        writeln!(summary, "{period},{f_bars},{f_bad},{f_worst:.10},{d_bars},{d_bad},{d_worst:.10},{at},{tv_wrong}")?;
+        writeln!(
+            summary,
+            "{period},{f_bars},{f_bad},{f_worst:.10},{d_bars},{d_bad},{d_worst:.10},{at},{tv_wrong}"
+        )?;
         println!(
             "   RSI({period:3}) on TradingView's candles: {f_bars} bars, {f_bad} over the limit, largest difference {f_worst:.10}%"
         );
@@ -337,16 +401,28 @@ struct Entry {
 
 /// 3. TradingView's "RSI strategy" trades vs our converted Pine logic on our candles, for every
 /// RSI length in `--periods`.
-fn check_trades(args: &Args, s: &Series, script: &PineScript, token: &str, timeframe: &str) -> Result<bool> {
+fn check_trades(
+    args: &Args,
+    s: &Series,
+    script: &PineScript,
+    token: &str,
+    timeframe: &str,
+) -> Result<bool> {
     println!(
         "\n3. Trades: TradingView's RSI strategy (oversold {}, overbought {}) vs our converted Pine on our candles",
         args.strategy.oversold, args.strategy.overbought
     );
     let mut out = fs::File::create(args.out.join("trades.csv"))?;
-    writeln!(out, "length,tv_time_utc,tv_side,tv_price,our_time_utc,our_side,our_price,match")?;
+    writeln!(
+        out,
+        "length,tv_time_utc,tv_side,tv_price,our_time_utc,our_side,our_price,match"
+    )?;
     let mut all_pass = true;
     for &length in &args.periods {
-        let p = PineRsiParams { length, ..args.strategy };
+        let p = PineRsiParams {
+            length,
+            ..args.strategy
+        };
         all_pass &= check_strategy(args, s, script, token, timeframe, p, &mut out)?;
     }
     Ok(all_pass)
@@ -378,8 +454,13 @@ fn check_strategy(
         ],
     )?;
     let bars = chart.bars();
-    let report = study.report.context("TradingView sent no strategy report")?;
-    fs::write(args.out.join(format!("tv_strategy_report_{length}.json")), serde_json::to_string_pretty(&report)?)?;
+    let report = study
+        .report
+        .context("TradingView sent no strategy report")?;
+    fs::write(
+        args.out.join(format!("tv_strategy_report_{length}.json")),
+        serde_json::to_string_pretty(&report)?,
+    )?;
     let tv_start_ms = report["settings"]["dateRange"]["backtest"]["from"]
         .as_i64()
         .context("strategy report has no backtest start")?
@@ -394,16 +475,44 @@ fn check_strategy(
         .iter()
         .map(|b| {
             let time_ms = b.time * 1000;
-            (time_ms, Candle { time_ms, open: b.open, high: b.high, low: b.low, close: b.close })
+            (
+                time_ms,
+                Candle {
+                    time_ms,
+                    open: b.open,
+                    high: b.high,
+                    low: b.low,
+                    close: b.close,
+                },
+            )
         })
         .collect();
-    let (f_entries, f_bad, _) = compare_entries(length, p, tv_start_ms, &tv_bars, &tv_entries, tv_open, bar_ms, None)?;
+    let (f_entries, f_bad, _) = compare_entries(
+        length,
+        p,
+        tv_start_ms,
+        &tv_bars,
+        &tv_entries,
+        tv_open,
+        bar_ms,
+        None,
+    )?;
 
     // Data check: our strategy on our candles.
     let ours: Vec<(i64, Candle)> = s.ours.iter().map(|(t, c)| (*t, *c)).collect();
-    let (d_entries, d_bad, d_tv) = compare_entries(length, p, tv_start_ms, &ours, &tv_entries, tv_open, bar_ms, Some(out))?;
+    let (d_entries, d_bad, d_tv) = compare_entries(
+        length,
+        p,
+        tv_start_ms,
+        &ours,
+        &tv_entries,
+        tv_open,
+        bar_ms,
+        Some(out),
+    )?;
 
-    let (tv_wrong, ours_wrong) = judge_chart_candles(&format!("RSI({length}) strategy"), &bars, s, bar_ms)?;
+    let (tv_wrong, ours_wrong) =
+        judge_chart_candles(&format!("RSI({length}) strategy"), &bars, s, bar_ms)?;
     println!(
         "   RSI({length:3}) strategy on TradingView's candles: {f_entries} entries, {f_bad} differ from TradingView's trades"
     );
@@ -435,7 +544,9 @@ fn compare_entries(
         tv_start_ms
     } else {
         let warmup = 25 * length;
-        bars.get(warmup).context("not enough candles for the RSI warm-up")?.0
+        bars.get(warmup)
+            .context("not enough candles for the RSI warm-up")?
+            .0
     };
 
     let mut signals = PineRsiSignals::new(p);
@@ -443,7 +554,11 @@ fn compare_entries(
     let mut long: Option<bool> = None;
     for pair in bars.windows(2) {
         let ((time, candle), (next_time, next)) = (pair[0], pair[1]);
-        ensure!(next_time - time == bar_ms, "candle missing after {}", utc(*time));
+        ensure!(
+            next_time - time == bar_ms,
+            "candle missing after {}",
+            utc(*time)
+        );
         let want = match signals.update(candle.close).1 {
             Some(Signal::Long) => Some(true),
             Some(Signal::Short) => Some(false),
@@ -452,7 +567,11 @@ fn compare_entries(
         // pyramiding = 1: an entry in the current direction is ignored.
         if let Some(want) = want.filter(|w| long != Some(*w)) {
             long = Some(want);
-            ours.push(Entry { time_ms: *next_time, long: want, price: next.open });
+            ours.push(Entry {
+                time_ms: *next_time,
+                long: want,
+                price: next.open,
+            });
         }
     }
     let last_bar_ms = bars.last().map(|(t, _)| *t).unwrap_or_default();
@@ -479,12 +598,27 @@ fn compare_entries(
         if !same {
             mismatches += 1;
             if mismatches <= 3 {
-                let label = if out.is_some() { "our" } else { "TradingView's" };
-                println!("   RSI({length}) on {label} candles, trade {}: TradingView {} | ours {}", i + 1, cell(tv), cell(us));
+                let label = if out.is_some() {
+                    "our"
+                } else {
+                    "TradingView's"
+                };
+                println!(
+                    "   RSI({length}) on {label} candles, trade {}: TradingView {} | ours {}",
+                    i + 1,
+                    cell(tv),
+                    cell(us)
+                );
             }
         }
         if let Some(file) = out.as_mut() {
-            writeln!(file, "{length},{},{},{}", cell(tv), cell(us), u8::from(same))?;
+            writeln!(
+                file,
+                "{length},{},{},{}",
+                cell(tv),
+                cell(us),
+                u8::from(same)
+            )?;
         }
     }
     Ok((ours.len(), mismatches, theirs.len()))
@@ -492,7 +626,12 @@ fn compare_entries(
 
 /// Candles of a TradingView chart that differ from ours, judged by OKX's official candle.
 /// Returns (TradingView wrong, ours wrong).
-fn judge_chart_candles(label: &str, bars: &[TvBar], s: &Series, bar_ms: i64) -> Result<(usize, usize)> {
+fn judge_chart_candles(
+    label: &str,
+    bars: &[TvBar],
+    s: &Series,
+    bar_ms: i64,
+) -> Result<(usize, usize)> {
     let (mut tv_wrong, mut ours_wrong) = (0, 0);
     for bar in bars.iter().filter(|b| b.time * 1000 < s.ours_end_ms) {
         let t = bar.time * 1000;
@@ -510,7 +649,10 @@ fn judge_chart_candles(label: &str, bars: &[TvBar], s: &Series, bar_ms: i64) -> 
             );
         } else {
             ours_wrong += 1;
-            println!("   {label} chart: our candle {} {our:?} differs from OKX's official {okx:?}", utc(t));
+            println!(
+                "   {label} chart: our candle {} {our:?} differs from OKX's official {okx:?}",
+                utc(t)
+            );
         }
     }
     Ok((tv_wrong, ours_wrong))

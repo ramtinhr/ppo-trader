@@ -18,7 +18,10 @@ use dynamic_trader::{
     config::AppConfig,
     exits::Exits,
     filters::{Filter, FilteredCross},
-    grid::{Indicators, exit_settings, exits_label, filters, parse_groups, parse_lengths, parse_numbers, parse_options},
+    grid::{
+        Indicators, exit_settings, exits_label, filters, parse_groups, parse_lengths,
+        parse_numbers, parse_options,
+    },
     okx_history::{self, Candle},
     rsi_cross::RsiCrossParams,
     scan::{self, Costs, Market, Outcome, Record, STEP_BTC},
@@ -131,10 +134,15 @@ fn parse_args() -> Result<Args> {
         }
         if flag == "--serve" {
             let port = raw.next_if(|v| !v.starts_with("--"));
-            args.serve = Some(port.map_or(Ok(8080), |p| p.parse()).with_context(|| "--serve takes a port number")?);
+            args.serve = Some(
+                port.map_or(Ok(8080), |p| p.parse())
+                    .with_context(|| "--serve takes a port number")?,
+            );
             continue;
         }
-        let value = raw.next().with_context(|| format!("{flag} needs a value\n\n{USAGE}"))?;
+        let value = raw
+            .next()
+            .with_context(|| format!("{flag} needs a value\n\n{USAGE}"))?;
         let bad = || format!("bad value for {flag}: {value}");
         match flag.as_str() {
             "--start" => args.start = value.parse().with_context(bad)?,
@@ -167,16 +175,34 @@ fn parse_args() -> Result<Args> {
         }
     }
     ensure!(args.start < args.end, "--start must be before --end");
-    ensure!(args.minutes > 0 && 1440 % args.minutes == 0, "--timeframe must divide a day into whole bars");
-    ensure!(args.lengths.len() >= 2, "--lengths needs at least two lengths");
-    ensure!(args.trends.iter().flatten().all(|n| *n > 0), "--trend lengths must be positive");
-    ensure!(args.atrs.iter().flatten().all(|a| *a > 0.0), "--atr minimums must be positive");
-    ensure!(!args.trends.is_empty() && !args.atrs.is_empty(), "--trend and --atr need at least one value");
+    ensure!(
+        args.minutes > 0 && 1440 % args.minutes == 0,
+        "--timeframe must divide a day into whole bars"
+    );
+    ensure!(
+        args.lengths.len() >= 2,
+        "--lengths needs at least two lengths"
+    );
+    ensure!(
+        args.trends.iter().flatten().all(|n| *n > 0),
+        "--trend lengths must be positive"
+    );
+    ensure!(
+        args.atrs.iter().flatten().all(|a| *a > 0.0),
+        "--atr minimums must be positive"
+    );
+    ensure!(
+        !args.trends.is_empty() && !args.atrs.is_empty(),
+        "--trend and --atr need at least one value"
+    );
     let test_from = *args.test_from.get_or_insert_with(|| {
         let days = (args.end - args.start).num_days();
         args.start + chrono::Days::new((days * 2 / 3).max(1) as u64)
     });
-    ensure!(args.start < test_from && test_from < args.end, "--test-from must be inside the period");
+    ensure!(
+        args.start < test_from && test_from < args.end,
+        "--test-from must be inside the period"
+    );
     let steps = args.size_btc * 10_000.0;
     ensure!(
         args.size_btc >= 0.0001 && (steps.round() - steps).abs() < 1e-6,
@@ -216,7 +242,12 @@ struct Data {
 
 impl Data {
     fn market(&self) -> Market<'_> {
-        Market { candles: &self.candles, tape: &self.tape, closes: &self.closes }
+        Market {
+            candles: &self.candles,
+            tape: &self.tape,
+            bar_start: &self.tape.bar_start,
+            closes: &self.closes,
+        }
     }
 
     /// Setting `k`: its filter and its exits.
@@ -242,13 +273,29 @@ impl Data {
     }
 
     /// One combination in one period, with every fill and trade.
-    fn replay(&self, fast: usize, slow: usize, k: usize, period: Period) -> Option<(Outcome, Record)> {
+    fn replay(
+        &self,
+        fast: usize,
+        slow: usize,
+        k: usize,
+        period: Period,
+    ) -> Option<(Outcome, Record)> {
         let (i, j) = (self.ind.index(fast)?, self.ind.index(slow)?);
         let (filter, exits) = self.setting(k)?;
-        let signals = self.ind.filtered(&self.ind.signals(i, j), filter, &self.candles);
+        let signals = self
+            .ind
+            .filtered(&self.ind.signals(i, j), filter, &self.candles);
         let mut record = Record::default();
         let ids = (fast as u16, slow as u16, k as u16);
-        let o = scan::simulate(ids, &signals, exits, &self.market(), self.bars(period), self.costs, Some(&mut record));
+        let o = scan::simulate(
+            ids,
+            &signals,
+            exits,
+            &self.market(),
+            self.bars(period),
+            self.costs,
+            Some(&mut record),
+        );
         Some((o, record))
     }
 
@@ -306,7 +353,8 @@ fn main() -> Result<()> {
     let args = parse_args()?;
     let live = Arc::new(Live::default());
     if let Some(port) = args.serve {
-        let listener = TcpListener::bind(("127.0.0.1", port)).with_context(|| format!("port {port} is busy; try --serve {}", port + 1))?;
+        let listener = TcpListener::bind(("127.0.0.1", port))
+            .with_context(|| format!("port {port} is busy; try --serve {}", port + 1))?;
         println!("Live report: http://127.0.0.1:{port}  (open it in a browser; Ctrl+C to stop)\n");
         let live = live.clone();
         std::thread::spawn(move || {
@@ -336,7 +384,9 @@ fn main() -> Result<()> {
         if let Err(e) = &result {
             eprintln!("Error: {e:#}");
         }
-        println!("\nFinished. The live report stays open at http://127.0.0.1:{port} until you press Ctrl+C.");
+        println!(
+            "\nFinished. The live report stays open at http://127.0.0.1:{port} until you press Ctrl+C."
+        );
         loop {
             std::thread::park();
         }
@@ -348,7 +398,10 @@ fn main() -> Result<()> {
 type Combo = (u32, u16);
 
 fn ms(day: NaiveDate) -> i64 {
-    day.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis()
+    day.and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp_millis()
 }
 
 fn work(args: &Args, live: &Live) -> Result<()> {
@@ -359,13 +412,38 @@ fn work(args: &Args, live: &Live) -> Result<()> {
     let test_from = args.test_from.unwrap();
 
     let started = Instant::now();
-    let (candles, tape) = Tape::load(&args.data, bar_ms, ms(args.start), ms(args.end), |done, total| {
-        live.stage("candles", format!("Reading every OKX trade: archive {} of {total}", (done + 1).min(total)), done, total)
-    })?;
-    ensure!(candles.len() > 2, "no candles between {} and {}", args.start, args.end);
+    let (candles, tape) = Tape::load(
+        &args.data,
+        bar_ms,
+        ms(args.start),
+        ms(args.end),
+        |done, total| {
+            live.stage(
+                "candles",
+                format!(
+                    "Reading every OKX trade: archive {} of {total}",
+                    (done + 1).min(total)
+                ),
+                done,
+                total,
+            )
+        },
+    )?;
+    ensure!(
+        candles.len() > 2,
+        "no candles between {} and {}",
+        args.start,
+        args.end
+    );
     let split = candles.partition_point(|c| c.time_ms < ms(test_from));
-    ensure!(split > 1 && split + 1 < candles.len(), "the training or test part has no candles");
-    let gaps = candles.windows(2).filter(|w| w[1].time_ms - w[0].time_ms != bar_ms).count();
+    ensure!(
+        split > 1 && split + 1 < candles.len(),
+        "the training or test part has no candles"
+    );
+    let gaps = candles
+        .windows(2)
+        .filter(|w| w[1].time_ms - w[0].time_ms != bar_ms)
+        .count();
     live.log(format!(
         "{} {}-minute candles from {} to {} (exclusive), built from every OKX trade in {:.0}s; {gaps} gaps without trades; {} price changes for TP/SL",
         candles.len(),
@@ -386,7 +464,13 @@ fn work(args: &Args, live: &Live) -> Result<()> {
     ));
 
     let filters = filters(&args.trends, &args.atrs);
-    let exits = exit_settings(&args.stops, &args.ladders, &args.shares, &args.breakeven, (args.size_btc * 10_000.0).round() as i64)?;
+    let exits = exit_settings(
+        &args.stops,
+        &args.ladders,
+        &args.shares,
+        &args.breakeven,
+        (args.size_btc * 10_000.0).round() as i64,
+    )?;
     let pairs: Vec<(usize, usize)> = (0..args.lengths.len())
         .flat_map(|i| (i + 1..args.lengths.len()).map(move |j| (i, j)))
         .collect();
@@ -407,17 +491,41 @@ fn work(args: &Args, live: &Live) -> Result<()> {
     ));
     ensure!(n_settings <= usize::from(u16::MAX), "too many settings");
 
-    live.stage("rsi", format!("Calculating {} RSI lines", args.lengths.len()), 0, 1);
+    live.stage(
+        "rsi",
+        format!("Calculating {} RSI lines", args.lengths.len()),
+        0,
+        1,
+    );
     let closes = CloseRanges::new(&candles.iter().map(|c| c.close).collect::<Vec<_>>());
     let ind = Indicators::new(&candles, &args.lengths, &filters);
-    let costs = Costs { steps: (args.size_btc * 10_000.0).round() as i64, taker, maker, balance: args.balance_usdt };
-    let data = Arc::new(Data { candles, tape, closes, split, ind, filters, exits, costs });
+    let costs = Costs {
+        steps: (args.size_btc * 10_000.0).round() as i64,
+        taker,
+        maker,
+        balance: args.balance_usdt,
+    };
+    let data = Arc::new(Data {
+        candles,
+        tape,
+        closes,
+        split,
+        ind,
+        filters,
+        exits,
+        costs,
+    });
 
     let started = Instant::now();
     let next = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-    live.stage("scan", format!("Testing {} combinations", pairs.len() * n_settings), 0, pairs.len());
+    live.stage(
+        "scan",
+        format!("Testing {} combinations", pairs.len() * n_settings),
+        0,
+        pairs.len(),
+    );
     let market = data.market();
     let (train_bars, test_bars) = (data.bars(Period::Train), data.bars(Period::Test));
     let mut per_pair: Vec<(usize, Vec<Outcome>, Vec<Outcome>)> = std::thread::scope(|scope| {
@@ -449,28 +557,55 @@ fn work(args: &Args, live: &Live) -> Result<()> {
                 })
             })
             .collect();
-        handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect()
     });
     per_pair.sort_by_key(|(p, _, _)| *p);
-    let (train, test): (Vec<Vec<Outcome>>, Vec<Vec<Outcome>>) = per_pair.into_iter().map(|(_, a, b)| (a, b)).unzip();
+    let (train, test): (Vec<Vec<Outcome>>, Vec<Vec<Outcome>>) =
+        per_pair.into_iter().map(|(_, a, b)| (a, b)).unzip();
     let total = pairs.len() * n_settings;
-    live.log(format!("Tested {total} combinations in both parts in {:.1}s", started.elapsed().as_secs_f64()));
+    live.log(format!(
+        "Tested {total} combinations in both parts in {:.1}s",
+        started.elapsed().as_secs_f64()
+    ));
 
     let tr = |(p, k): Combo| &train[p as usize][k as usize];
     let te = |(p, k): Combo| &test[p as usize][k as usize];
-    let mut ranked: Vec<Combo> = (0..pairs.len() as u32).flat_map(|p| (0..n_settings as u16).map(move |k| (p, k))).collect();
+    let mut ranked: Vec<Combo> = (0..pairs.len() as u32)
+        .flat_map(|p| (0..n_settings as u16).map(move |k| (p, k)))
+        .collect();
     ranked.sort_by(|a, b| tr(*b).total().total_cmp(&tr(*a).total()));
     let best: Vec<Combo> = (0..pairs.len() as u32)
-        .map(|p| (p, (0..n_settings as u16).max_by(|a, b| tr((p, *a)).total().total_cmp(&tr((p, *b)).total())).unwrap()))
+        .map(|p| {
+            (
+                p,
+                (0..n_settings as u16)
+                    .max_by(|a, b| tr((p, *a)).total().total_cmp(&tr((p, *b)).total()))
+                    .unwrap(),
+            )
+        })
         .collect();
 
     fs::create_dir_all(&args.out)?;
-    let path = args.out.join(format!("rsi_cross_filters_{}m_{}_{}.csv", args.minutes, args.start, args.end));
+    let path = args.out.join(format!(
+        "rsi_cross_filters_{}m_{}_{}.csv",
+        args.minutes, args.start, args.end
+    ));
     live.stage("report", "Writing the CSV of every combination", 0, 1);
     write_csv(&path, &ranked, &data, &train, &test, args.balance_usdt)?;
 
-    let train_wins: Vec<Combo> = ranked.iter().copied().filter(|c| tr(*c).total() > 0.0).collect();
-    let both: Vec<Combo> = train_wins.iter().copied().filter(|c| te(*c).total() > 0.0).collect();
+    let train_wins: Vec<Combo> = ranked
+        .iter()
+        .copied()
+        .filter(|c| tr(*c).total() > 0.0)
+        .collect();
+    let both: Vec<Combo> = train_wins
+        .iter()
+        .copied()
+        .filter(|c| te(*c).total() > 0.0)
+        .collect();
     let test_wins = ranked.iter().filter(|c| te(**c).total() > 0.0).count();
     live.log(format!(
         "Training: {} of {total} combinations made money after fees. Test: {} of those also made money on the unseen months ({:.1}%); {} of all combinations made money in the test part",
@@ -491,7 +626,11 @@ fn work(args: &Args, live: &Live) -> Result<()> {
     let top10: Vec<f64> = ranked.iter().take(10).map(|c| te(*c).total()).collect();
     live.log(format!(
         "The 10 best in training made {} in the test part",
-        top10.iter().map(|v| format!("{v:+.2}")).collect::<Vec<_>>().join(", ")
+        top10
+            .iter()
+            .map(|v| format!("{v:+.2}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     ));
     println!(
         "\n{:>4} {:>5}  {:<62} {:>7} {:>11} {:>7} {:>11} {:>9}",
@@ -558,32 +697,58 @@ fn work(args: &Args, live: &Live) -> Result<()> {
     });
     if args.serve.is_some() {
         // Any combination is replayed on request, so the browser gets the summary only.
-        let _ = live.computed.set(Computed { report: serde_json::to_string(&report)?, data: data.clone() });
+        let _ = live.computed.set(Computed {
+            report: serde_json::to_string(&report)?,
+            data: data.clone(),
+        });
         live.status.lock().unwrap().ready = true;
         live.log("Results are ready in the live report; every combination can be opened");
     }
     let mut detailed: Vec<Combo> = both.iter().copied().take(args.report).collect();
-    let more: Vec<Combo> = ranked.iter().copied().filter(|c| !detailed.contains(c)).take(args.report.saturating_sub(detailed.len())).collect();
+    let more: Vec<Combo> = ranked
+        .iter()
+        .copied()
+        .filter(|c| !detailed.contains(c))
+        .take(args.report.saturating_sub(detailed.len()))
+        .collect();
     detailed.extend(more);
     report["details"] = detailed
         .iter()
         .map(|&c| {
             let o = tr(c);
-            (format!("{}/{}/{}", o.fast, o.slow, c.1), data.details(o.fast as usize, o.slow as usize, c.1 as usize).unwrap())
+            (
+                format!("{}/{}/{}", o.fast, o.slow, c.1),
+                data.details(o.fast as usize, o.slow as usize, c.1 as usize)
+                    .unwrap(),
+            )
         })
         .collect::<serde_json::Map<_, _>>()
         .into();
-    let html = REPORT_HTML.replace("/*__REPORT__*/null", &serde_json::to_string(&report)?.replace("</", "<\\/"));
+    let html = REPORT_HTML
+        .replace("/*__TABLE_SORT__*/", TABLE_SORT)
+        .replace(
+            "/*__REPORT__*/null",
+            &serde_json::to_string(&report)?.replace("</", "<\\/"),
+        );
     let html_path = path.with_extension("html");
     fs::write(&html_path, html)?;
-    live.log(format!("Report file (open in a browser): {}", html_path.display()));
+    live.log(format!(
+        "Report file (open in a browser): {}",
+        html_path.display()
+    ));
 
     if args.verify > 0 {
         let mut picks: Vec<Combo> = both.iter().copied().take(args.verify).collect();
         if picks.is_empty() {
             picks = ranked.iter().copied().take(args.verify).collect();
         }
-        verify(args, &config, &data, &picks.iter().map(|c| *tr(*c)).collect::<Vec<_>>(), live)?;
+        verify(
+            args,
+            &config,
+            &data,
+            &picks.iter().map(|c| *tr(*c)).collect::<Vec<_>>(),
+            live,
+        )?;
     }
     live.stage("done", "Finished", 1, 1);
     Ok(())
@@ -592,15 +757,33 @@ fn work(args: &Args, live: &Live) -> Result<()> {
 /// Reruns `picks` through NautilusTrader on both parts and compares every fill. The test part
 /// starts from the archives of its first day, with the indicators warmed up on the training
 /// candles, as the scanner does.
-fn verify(args: &Args, config: &AppConfig, data: &Data, picks: &[Outcome], live: &Live) -> Result<()> {
+fn verify(
+    args: &Args,
+    config: &AppConfig,
+    data: &Data,
+    picks: &[Outcome],
+    live: &Live,
+) -> Result<()> {
     let test_from = args.test_from.unwrap();
-    live.log(format!("Rerunning {} combination(s) through NautilusTrader, on the training and the test part", picks.len()));
+    live.log(format!(
+        "Rerunning {} combination(s) through NautilusTrader, on the training and the test part",
+        picks.len()
+    ));
     let mut all_same = true;
     for (n, o) in picks.iter().enumerate() {
         let (filter, exits) = data.setting(o.setting as usize).context("setting")?;
-        let params = RsiCrossParams { fast: o.fast as usize, slow: o.slow as usize };
+        let params = RsiCrossParams {
+            fast: o.fast as usize,
+            slow: o.slow as usize,
+        };
         for period in [Period::Train, Period::Test] {
-            let name = format!("RSI {}/{} {} ({})", o.fast, o.slow, data.label(o.setting as usize), period.name());
+            let name = format!(
+                "RSI {}/{} {} ({})",
+                o.fast,
+                o.slow,
+                data.label(o.setting as usize),
+                period.name()
+            );
             let (start, end) = match period {
                 Period::Train => (args.start, test_from),
                 Period::Test => (test_from, args.end),
@@ -623,13 +806,34 @@ fn verify(args: &Args, config: &AppConfig, data: &Data, picks: &[Outcome], live:
             let started = Instant::now();
             let label = format!("NautilusTrader check {} of {}: {name}", n + 1, picks.len());
             live.stage("verify", label.clone(), 0, 1);
-            let (result, mut theirs) = run_backtest(&run, Box::new(signals), exits.cloned(), |done, total| {
-                live.stage("verify", format!("{label}, archive {done} of {total}"), done, total)
-            })?;
-            let pnl = result.stats_pnls.get("USDT").and_then(|s| s.get("PnL (total)")).copied().unwrap_or(0.0);
-            let (ours_o, record) = data.replay(o.fast as usize, o.slow as usize, o.setting as usize, period).context("replay")?;
+            let (result, mut theirs) =
+                run_backtest(&run, Box::new(signals), exits.cloned(), |done, total| {
+                    live.stage(
+                        "verify",
+                        format!("{label}, archive {done} of {total}"),
+                        done,
+                        total,
+                    )
+                })?;
+            let pnl = result
+                .stats_pnls
+                .get("USDT")
+                .and_then(|s| s.get("PnL (total)"))
+                .copied()
+                .unwrap_or(0.0);
+            let (ours_o, record) = data
+                .replay(o.fast as usize, o.slow as usize, o.setting as usize, period)
+                .context("replay")?;
             let mut ours = record.fills;
-            let key = |f: &Fill| (f.time_ms, f.kind, f.buy, (f.price * 10.0).round() as i64, (f.size_btc / STEP_BTC).round() as i64);
+            let key = |f: &Fill| {
+                (
+                    f.time_ms,
+                    f.kind,
+                    f.buy,
+                    (f.price * 10.0).round() as i64,
+                    (f.size_btc / STEP_BTC).round() as i64,
+                )
+            };
             ours.sort_by_key(key);
             theirs.sort_by_key(key);
             let same = |a: &Fill, b: &Fill| {
@@ -641,23 +845,48 @@ fn verify(args: &Args, config: &AppConfig, data: &Data, picks: &[Outcome], live:
                     && (a.fee_usdt - b.fee_usdt).abs() < 1e-6
             };
             let bad: Vec<usize> = (0..ours.len().max(theirs.len()))
-                .filter(|&k| !matches!((ours.get(k), theirs.get(k)), (Some(a), Some(b)) if same(a, b)))
+                .filter(
+                    |&k| !matches!((ours.get(k), theirs.get(k)), (Some(a), Some(b)) if same(a, b)),
+                )
                 .collect();
             for &k in bad.iter().take(3) {
-                live.log(format!("    fill {}: scanner {:?} | Nautilus {:?}", k + 1, ours.get(k), theirs.get(k)));
+                live.log(format!(
+                    "    fill {}: scanner {:?} | Nautilus {:?}",
+                    k + 1,
+                    ours.get(k),
+                    theirs.get(k)
+                ));
             }
             if !bad.is_empty() {
-                let base = args.out.join(format!("verify_{}_{}_{}_{}", o.fast, o.slow, o.setting, period.name()));
+                let base = args.out.join(format!(
+                    "verify_{}_{}_{}_{}",
+                    o.fast,
+                    o.slow,
+                    o.setting,
+                    period.name()
+                ));
                 for (who, fills) in [("scanner", &ours), ("nautilus", &theirs)] {
                     let path = base.with_extension(format!("{who}.csv"));
                     let mut file = BufWriter::new(fs::File::create(&path)?);
                     writeln!(file, "time_ms,kind,side,size_btc,price,fee_usdt")?;
                     for f in fills.iter() {
-                        writeln!(file, "{},{:?},{},{},{},{}", f.time_ms, f.kind, if f.buy { "buy" } else { "sell" }, f.size_btc, f.price, f.fee_usdt)?;
+                        writeln!(
+                            file,
+                            "{},{:?},{},{},{},{}",
+                            f.time_ms,
+                            f.kind,
+                            if f.buy { "buy" } else { "sell" },
+                            f.size_btc,
+                            f.price,
+                            f.fee_usdt
+                        )?;
                     }
                     file.flush()?;
                 }
-                live.log(format!("    every fill of both: {}.scanner.csv / .nautilus.csv", base.display()));
+                live.log(format!(
+                    "    every fill of both: {}.scanner.csv / .nautilus.csv",
+                    base.display()
+                ));
             }
             // Nautilus' "PnL (total)" counts closed parts and fees, not the open position.
             let closed = ours_o.realized - ours_o.fees;
@@ -689,14 +918,40 @@ fn verify(args: &Args, config: &AppConfig, data: &Data, picks: &[Outcome], live:
 }
 
 const COLUMNS: [&str; 15] = [
-    "fast", "slow", "setting", "orders", "refused", "closed", "wins", "target_fills", "stop_fills", "realized", "fees", "open_pnl",
-    "total", "max_drawdown", "position",
+    "fast",
+    "slow",
+    "setting",
+    "orders",
+    "refused",
+    "closed",
+    "wins",
+    "target_fills",
+    "stop_fills",
+    "realized",
+    "fees",
+    "open_pnl",
+    "total",
+    "max_drawdown",
+    "position",
 ];
 
 fn row(o: &Outcome) -> Value {
     json!([
-        o.fast, o.slow, o.setting, o.orders, o.refused, o.closed_trades, o.wins, o.target_fills, o.stop_fills,
-        round6(o.realized), round6(o.fees), round6(o.open_pnl), round6(o.total()), round6(o.max_drawdown), o.position
+        o.fast,
+        o.slow,
+        o.setting,
+        o.orders,
+        o.refused,
+        o.closed_trades,
+        o.wins,
+        o.target_fills,
+        o.stop_fills,
+        round6(o.realized),
+        round6(o.fees),
+        round6(o.open_pnl),
+        round6(o.total()),
+        round6(o.max_drawdown),
+        o.position
     ])
 }
 
@@ -705,26 +960,68 @@ fn trades_json(record: &Record) -> Value {
         .trades
         .iter()
         .map(|t| {
-            let exits: Vec<Value> = t.exits.iter().map(|e| json!([e.time_ms, e.price, e.steps as f64 * STEP_BTC, e.fee, e.kind])).collect();
-            json!([if t.long { 1 } else { -1 }, t.entry_ms, t.entry_price, t.steps as f64 * STEP_BTC, t.entry_fee, exits, t.open])
+            let exits: Vec<Value> = t
+                .exits
+                .iter()
+                .map(|e| json!([e.time_ms, e.price, e.steps as f64 * STEP_BTC, e.fee, e.kind]))
+                .collect();
+            json!([
+                if t.long { 1 } else { -1 },
+                t.entry_ms,
+                t.entry_price,
+                t.steps as f64 * STEP_BTC,
+                t.entry_fee,
+                exits,
+                t.open
+            ])
         })
         .collect()
 }
 
-fn write_csv(path: &std::path::Path, ranked: &[Combo], data: &Data, train: &[Vec<Outcome>], test: &[Vec<Outcome>], balance: f64) -> Result<()> {
+fn write_csv(
+    path: &std::path::Path,
+    ranked: &[Combo],
+    data: &Data,
+    train: &[Vec<Outcome>],
+    test: &[Vec<Outcome>],
+    balance: f64,
+) -> Result<()> {
     let mut file = BufWriter::new(fs::File::create(path)?);
     let part = |p: &str| {
-        ["orders", "refused_orders", "closed_trades", "win_rate_pct", "take_profit_fills", "stop_fills", "fees_usdt", "pnl_usdt", "pnl_pct", "max_drawdown_usdt", "final_position"]
-            .map(|c| format!("{p}_{c}"))
-            .join(",")
+        [
+            "orders",
+            "refused_orders",
+            "closed_trades",
+            "win_rate_pct",
+            "take_profit_fills",
+            "stop_fills",
+            "fees_usdt",
+            "pnl_usdt",
+            "pnl_pct",
+            "max_drawdown_usdt",
+            "final_position",
+        ]
+        .map(|c| format!("{p}_{c}"))
+        .join(",")
     };
-    writeln!(file, "fast,slow,filter,trend_ema,min_atr_pct,tp_sl,stop_pct,targets_pct,shares_pct,breakeven,{},{}", part("train"), part("test"))?;
+    writeln!(
+        file,
+        "fast,slow,filter,trend_ema,min_atr_pct,tp_sl,stop_pct,targets_pct,shares_pct,breakeven,{},{}",
+        part("train"),
+        part("test")
+    )?;
     let n_exits = data.exits.len();
     for &(p, k) in ranked {
         let k = k as usize;
         let (f, s) = (&data.filters[k / n_exits], &data.exits[k % n_exits]);
         let list = |g: fn(&(f64, f64)) -> f64| {
-            s.as_ref().map_or(String::new(), |e| e.targets.iter().map(|t| format!("{}", g(t))).collect::<Vec<_>>().join("/"))
+            s.as_ref().map_or(String::new(), |e| {
+                e.targets
+                    .iter()
+                    .map(|t| format!("{}", g(t)))
+                    .collect::<Vec<_>>()
+                    .join("/")
+            })
         };
         let a = &train[p as usize][k];
         write!(
@@ -739,7 +1036,8 @@ fn write_csv(path: &std::path::Path, ranked: &[Combo], data: &Data, train: &[Vec
             s.as_ref().map_or(String::new(), |e| e.stop_pct.to_string()),
             list(|t| t.0),
             list(|t| (t.1 * 100.0).round()),
-            s.as_ref().map_or(String::new(), |e| e.breakeven.to_string()),
+            s.as_ref()
+                .map_or(String::new(), |e| e.breakeven.to_string()),
         )?;
         for o in [a, &test[p as usize][k]] {
             write!(
@@ -765,6 +1063,7 @@ fn write_csv(path: &std::path::Path, ranked: &[Combo], data: &Data, train: &[Vec
 }
 
 const REPORT_HTML: &str = include_str!("rsi_combos_report.html");
+const TABLE_SORT: &str = include_str!("table_sort.js");
 
 /// Answers one browser request: the page, the run's status, the summary, or one combination's trades.
 fn serve(stream: TcpStream, live: &Live) -> Result<()> {
@@ -779,19 +1078,39 @@ fn serve(stream: TcpStream, live: &Live) -> Result<()> {
     }
     let path = request.split_whitespace().nth(1).unwrap_or("/");
     let path = path.split('?').next().unwrap_or("/");
-    let not_ready = || (503, "application/json", r#"{"error":"not ready"}"#.to_string());
+    let not_ready = || {
+        (
+            503,
+            "application/json",
+            r#"{"error":"not ready"}"#.to_string(),
+        )
+    };
     let (code, kind, body) = match path {
-        "/" => (200, "text/html; charset=utf-8", REPORT_HTML.to_string()),
-        "/api/status" => (200, "application/json", serde_json::to_string(&*live.status.lock().unwrap())?),
+        "/" => (
+            200,
+            "text/html; charset=utf-8",
+            REPORT_HTML.replace("/*__TABLE_SORT__*/", TABLE_SORT),
+        ),
+        "/api/status" => (
+            200,
+            "application/json",
+            serde_json::to_string(&*live.status.lock().unwrap())?,
+        ),
         "/api/report" => match live.computed.get() {
             Some(c) => (200, "application/json", c.report.clone()),
             None => not_ready(),
         },
         _ if path.starts_with("/api/pair/") => match live.computed.get() {
             None => not_ready(),
-            Some(c) => match combo_from_path(path).and_then(|(f, s, k)| (f < s).then(|| c.data.details(f, s, k)).flatten()) {
+            Some(c) => match combo_from_path(path)
+                .and_then(|(f, s, k)| (f < s).then(|| c.data.details(f, s, k)).flatten())
+            {
                 Some(details) => (200, "application/json", serde_json::to_string(&details)?),
-                None => (404, "application/json", r#"{"error":"unknown pair or setting"}"#.into()),
+                None => (
+                    404,
+                    "application/json",
+                    r#"{"error":"unknown pair or setting"}"#.into(),
+                ),
             },
         },
         _ => (404, "text/plain", "not found".into()),

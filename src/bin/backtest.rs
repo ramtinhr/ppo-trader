@@ -124,7 +124,8 @@ fn main() -> Result<()> {
         };
         params.validate()?;
         let started = Instant::now();
-        let (result, _) = run_backtest(&run, Box::new(PineRsiSignals::new(params)), None, |_, _| {})?;
+        let (result, _) =
+            run_backtest(&run, Box::new(PineRsiSignals::new(params)), None, |_, _| {})?;
         println!(
             "  {:<28} done in {:.1}s",
             label(&params),
@@ -142,7 +143,10 @@ fn main() -> Result<()> {
 }
 
 fn label(p: &PineRsiParams) -> String {
-    format!("Pine RSI({}) cross {}/{}", p.length, p.oversold, p.overbought)
+    format!(
+        "Pine RSI({}) cross {}/{}",
+        p.length, p.oversold, p.overbought
+    )
 }
 
 fn usdt_stat(result: &BacktestResult, name: &str) -> f64 {
@@ -167,8 +171,16 @@ fn print_comparison(results: &[(PineRsiParams, BacktestResult)]) {
             usdt_stat(result, "PnL (total)"),
             usdt_stat(result, "PnL% (total)"),
             usdt_stat(result, "Win Rate") * 100.0,
-            result.stats_returns.get("Profit Factor").copied().unwrap_or(0.0),
-            result.stats_returns.get("Sharpe Ratio (252 days)").copied().unwrap_or(0.0),
+            result
+                .stats_returns
+                .get("Profit Factor")
+                .copied()
+                .unwrap_or(0.0),
+            result
+                .stats_returns
+                .get("Sharpe Ratio (252 days)")
+                .copied()
+                .unwrap_or(0.0),
         );
     }
 }

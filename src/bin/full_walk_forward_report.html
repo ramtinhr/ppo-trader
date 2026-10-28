@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Full search walk-forward</title>
+<style>
+  :root {
+    --bg: #09090b; --panel: #121214; --panel-2: #1a1a1e; --border: #27272a;
+    --text: #fafafa; --muted: #a1a1aa; --accent: #2dd4bf;
+    --green: #4ade80; --red: #fb7185; --amber: #fbbf24;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; color: var(--text);
+         background: radial-gradient(900px 420px at 12% -18%, rgba(45,212,191,.10), transparent 55%), var(--bg);
+         font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { border-bottom: 1px solid var(--border); padding: 14px 24px; display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; font-weight: 650; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  main { padding: 20px 24px 48px; max-width: 1500px; margin: 0 auto; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 16px; }
+  .card-head { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .card-head h2 { font-size: 15px; margin: 0; font-weight: 620; }
+  .card-body { padding: 14px 16px; }
+  .verdict { font-size: 15px; padding: 14px 16px; border-left: 4px solid var(--amber); }
+  .verdict.good { border-left-color: var(--green); } .verdict.bad { border-left-color: var(--red); }
+  .muted { color: var(--muted); }
+  .pos { color: var(--green); } .neg { color: var(--red); }
+  .table-wrap { overflow: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { padding: 7px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--border); }
+  th:first-child, td:first-child, td.left, th.left { text-align: left; }
+  th { background: var(--panel-2); color: var(--muted); font-weight: 600; font-size: 12px; }
+  tbody tr:hover { background: rgba(45,212,191,.10); }
+  ul.plain { margin: 6px 0; padding-left: 20px; } ul.plain li { margin: 3px 0; }
+  details { margin: 6px 0; } summary { cursor: pointer; color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Full search: every RSI pair × timeframe × TP × SL, best of last month, walk-forward by trades</h1>
+  <span class="sub" id="sub"></span>
+</header>
+<main>
+  <div class="card"><div class="card-body" id="explain"></div></div>
+  <div class="card"><div class="verdict" id="verdict"></div></div>
+  <div class="card">
+    <div class="card-head"><h2>Step 2: the chosen window pairs, one after another</h2>
+      <span class="muted">Each row is one choice and the trades that followed it. This is the bot's real result.</span></div>
+    <div class="card-body table-wrap"><table id="chosen"></table></div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>Monthly ranking: did last month's best keep working?</h2>
+      <span class="muted">Every combination ranked on one month; the best become the next month's finalists. "Next month" is what they really made after.</span></div>
+    <div class="card-body table-wrap"><table id="months"></table><div id="month-tops"></div></div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>Step 1: every window pair on its own</h2>
+      <span class="muted">Each window pair's own walk-forward among the finalists, from the first pick to the end. Click a column title to sort; Shift+click to sort by more columns.</span></div>
+    <div class="card-body table-wrap"><table id="pairs"></table></div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>With hindsight: the best over the whole year</h2>
+      <span class="muted">Ranked after the year was over. A bot could not have known these in advance; shown only to see what was possible.</span></div>
+    <div class="card-body table-wrap"><table id="year"></table></div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>Checks</h2>
+      <span class="muted">Combinations traded, replayed again trade by trade; the last one through NautilusTrader, compared fill by fill.</span></div>
+    <div class="card-body table-wrap"><div id="checked"></div><table id="verify"></table></div>
+  </div>
+</main>
+<script>
+const R = /*__REPORT__*/null;
+const $ = (s) => document.querySelector(s);
+const fmt = (x, d = 2) => Number.isFinite(x) ? x.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }) : '–';
+const signed = (x, d = 2) => (x > 0 ? '+' : '') + fmt(x, d);
+const cls = (x) => x > 0 ? 'pos' : x < 0 ? 'neg' : '';
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const money = (x) => `<span class="${cls(x)}">${signed(x)}</span>`;
+const int = (x) => x.toLocaleString('en-US');
+const M = R.meta;
+
+$('#sub').textContent = `${M.instrument} · timeframes ${M.timeframes.map((t) => t + 'm').join(', ')} · ${M.start} to ${M.end} (end excluded) · ${int(M.combinations)} combinations · ${M.window_pairs} window pairs · ${M.size_btc} BTC per trade · fees taker ${M.taker_fee_bps} / maker ${M.maker_fee_bps} bps · generated ${M.generated_utc} UTC`;
+$('#explain').innerHTML = `
+  <b>How it works</b>
+  <ul class="plain">
+    <li><b>Combinations</b>: ${int(M.pairs)} RSI pairs × ${M.timeframes.length} timeframes × ${M.tp[2]} take-profits (${M.tp[0]}% to ${M.tp[1]}%) × ${M.sl[2]} stop-losses (${M.sl[0]}% to ${M.sl[1]}%)${M.leverage ? ` × ${M.leverage[2]} leverages (${M.leverage[0]}x to ${M.leverage[1]}x)` : ''} = ${int(M.combinations)}, every one replayed over the whole year with all fees.</li>
+    <li><b>Monthly ranking</b>: at the start of every month, all of them are ranked by their <b>score</b> (profit after fees ÷ largest drop) in the month before. The best become that month's <b>finalists</b> (up to ${int(M.max_finalists)}, as many as fit in ${M.memory_gb} GB).</li>
+    <li><b>Step 1</b>, from ${M.first_pick}: every window pair N/M (N = 100 … 10 trades, M = N/3 … 1) picks the finalist with the best score on its last N trades, trades its next M trades, then picks again.</li>
+    <li><b>Step 2</b>, from ${M.first_choice}: the window pair whose own last N trades have the best score is followed for its next M trades, again and again. Nothing after a pick or a choice is used to make it.</li>
+    <li>The account starts with ${fmt(M.balance_usdt, 0)} USDT. <b>Buy-and-hold</b> means buying the same ${M.size_btc} BTC when each choice starts and selling when it ends, with fees.</li>
+  </ul>`;
+
+const C = R.chosen;
+const good = C.total > 0 && C.total > C.buy_and_hold_total && C.positive > C.windows.length / 2;
+$('#verdict').className = `verdict ${good ? 'good' : 'bad'}`;
+$('#verdict').innerHTML = `Choosing again and again made <b class="${cls(C.total)}">${signed(C.total)} USDT</b> after fees over ${C.windows.length} choices (${C.positive} profitable); buy-and-hold over the same time: ${money(C.buy_and_hold_total)} USDT; in choices where BTC fell: ${money(C.in_falling_windows)} USDT. ${good ? 'It made money in most choices and beat buy-and-hold. Check it on more data before trusting it.' : 'It did not make money reliably.'} <span class="muted">Stopped because ${esc(C.stop_reason)}.</span>`;
+
+$('#chosen').innerHTML = `<thead><tr><th>#</th><th class="left">Chosen at (UTC)</th><th>Window pair</th><th>Its last N trades</th><th>Drop</th><th>Score</th><th class="left">Traded (UTC)</th><th class="left">Combination</th><th>Result</th><th>Won</th><th>Balance after</th><th>Buy-and-hold</th><th>Pairs eligible</th></tr></thead><tbody>${
+  C.windows.map((w, i) => `<tr><td>${i + 1}</td><td class="left">${w.pick_at}</td><td>${w.train_trades} / ${w.test_trades}</td><td>${money(w.train_profit)}</td><td>${fmt(w.train_drop)}</td><td>${fmt(w.train_score)}</td>
+    <td class="left">${w.test_from} → ${w.test_to}</td><td class="left">${esc(w.label)}</td><td><b>${money(w.test_net)}</b></td><td>${w.test_wins} / ${w.test_trades}</td><td>${fmt(w.balance)}</td><td>${money(w.buy_and_hold)}</td><td>${w.eligible}</td></tr>`).join('')}</tbody>`;
+
+$('#months').innerHTML = `<thead><tr><th class="left">Ranked on</th><th class="left">Traded in</th><th>Combinations that traded</th><th>Made money</th><th class="left">Best combination</th><th>Its score</th><th>Its profit</th><th>Its next month</th><th>Finalists</th><th>Finalists' next month, together</th><th>Finalists positive next month</th></tr></thead><tbody>${
+  R.months.map((m) => { const b = m.top[0] || {}; return `<tr><td class="left">${m.ranked}</td><td class="left">${m.traded_in}</td><td>${int(m.combinations_traded)}</td><td>${int(m.profitable)} (${fmt(100 * m.profitable / Math.max(1, m.combinations_traded), 0)}%)</td><td class="left">${esc(b.label || '')}</td><td>${fmt(b.score)}</td><td>${money(b.profit)}</td><td><b>${money(b.next_profit)}</b></td><td>${int(m.finalists)}</td><td>${money(m.finalists_next_total)}</td><td>${int(m.finalists_next_positive)} (${fmt(100 * m.finalists_next_positive / Math.max(1, m.finalists), 0)}%)</td></tr>`; }).join('')}</tbody>`;
+$('#month-tops').innerHTML = R.months.map((m) => `<details><summary>Best ${m.top.length} of ${m.ranked} and what they made in ${m.traded_in}</summary><table><thead><tr><th>Rank</th><th class="left">Combination</th><th>Score</th><th>Profit</th><th>Drop</th><th>Trades</th><th>Next month</th><th>Its trades</th></tr></thead><tbody>${
+  m.top.map((t) => `<tr><td>${t.rank}</td><td class="left">${esc(t.label)}</td><td>${fmt(t.score)}</td><td>${money(t.profit)}</td><td>${fmt(t.drop)}</td><td>${t.trades}</td><td><b>${money(t.next_profit)}</b></td><td>${t.next_trades}</td></tr>`).join('')}</tbody></table></details>`).join('');
+
+const PAIRS = R.window_pairs.map((p) => ({ ...p, mix: p.timeframe_trades.map((n, i) => n ? `${M.timeframes[i]}m ${fmt(100 * n / Math.max(1, p.trades), 0)}%` : '').filter(Boolean).join(', ') }));
+const COLS = [['train_trades', 'Training (N)'], ['test_trades', 'Test (M)'], ['total', 'Total after fees'], ['windows', 'Test windows'], ['positive', 'Profitable windows'], ['trades', 'Trades'], ['mix', 'Timeframes traded'], ['until', 'Last trade (UTC)'], ['stop_reason', 'Stopped because']];
+const LEFT = new Set(['mix', 'until', 'stop_reason']);
+function drawPairs() {
+  const rows = [...PAIRS].sort((a, b) => b.total - a.total);
+  $('#pairs').innerHTML = `<thead><tr>${COLS.map(([k, l]) => `<th class="${LEFT.has(k) ? 'left' : ''}">${l}</th>`).join('')}</tr></thead><tbody>${
+    rows.map((p) => `<tr><td>${p.train_trades}</td><td>${p.test_trades}</td><td><b>${money(p.total)}</b></td><td>${p.windows}</td><td>${p.positive} of ${p.windows}</td><td>${int(p.trades)}</td><td class="left">${p.mix}</td><td class="left">${p.until}</td><td class="left muted">${esc(p.stop_reason)}</td></tr>`).join('')}</tbody>`;
+}
+drawPairs();
+
+const Y = R.year;
+$('#year').innerHTML = `<caption class="muted" style="text-align:left;padding:4px 0">${int(Y.profitable)} of ${int(Y.traded)} combinations made money over the whole year.</caption><thead><tr><th>Rank</th><th class="left">Combination</th><th>Score</th><th>Profit</th><th>Drop</th><th>Trades</th></tr></thead><tbody>${
+  Y.top.slice(0, 20).map((t, i) => `<tr><td>${i + 1}</td><td class="left">${esc(t.label)}</td><td>${fmt(t.score)}</td><td>${money(t.profit)}</td><td>${fmt(t.drop)}</td><td>${int(t.trades)}</td></tr>`).join('')}</tbody>`;
+
+$('#checked').innerHTML = `<p>${C.combinations_checked} combinations traded by the chosen window pairs were replayed again by the trade-by-trade scanner: every trade identical.</p>`;
+$('#verify').innerHTML = R.verify.length
+  ? `<thead><tr><th class="left">Combination</th><th>Fills</th><th>Fills that differ</th><th>Time</th><th>Result</th></tr></thead><tbody>${
+    R.verify.map((v) => `<tr><td class="left">${esc(v.pair)}</td><td>${int(v.fills)}</td><td class="${v.differ ? 'neg' : 'pos'}">${v.differ}</td><td>${fmt(v.seconds, 0)} s</td><td class="${v.ok ? 'pos' : 'neg'}">${v.ok ? 'match' : 'MISMATCH'}</td></tr>`).join('')}</tbody>`
+  : '<tbody><tr><td class="muted">NautilusTrader check pending or skipped (--verify 0).</td></tr></tbody>';
+</script>
+<script>/*__TABLE_SORT__*/</script>
+</body>
+</html>

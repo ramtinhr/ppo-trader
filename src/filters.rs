@@ -33,14 +33,20 @@ impl Filter {
         if let Some(a) = self.min_atr_pct {
             parts.push(format!("ATR ≥ {a}%"));
         }
-        if parts.is_empty() { "No filter".into() } else { parts.join(" · ") }
+        if parts.is_empty() {
+            "No filter".into()
+        } else {
+            parts.join(" · ")
+        }
     }
 
     /// Whether a cross in direction `dir` (+1 long, -1 short) on a bar with this `close`, `ema`
     /// and `atr` may open a position. NaN means the indicator has no value yet.
     pub fn allows(&self, dir: i8, close: f64, ema: f64, atr: f64) -> bool {
         let trend = self.trend.is_none() || if dir > 0 { close > ema } else { close < ema };
-        let volatile = self.min_atr_pct.is_none_or(|min| atr / close * 100.0 >= min);
+        let volatile = self
+            .min_atr_pct
+            .is_none_or(|min| atr / close * 100.0 >= min);
         trend && volatile
     }
 }
@@ -57,7 +63,11 @@ pub struct Ema {
 impl Ema {
     pub fn new(length: usize) -> Self {
         assert!(length > 0, "EMA length must be positive");
-        Self { length, seen: 0, value: 0.0 }
+        Self {
+            length,
+            seen: 0,
+            value: 0.0,
+        }
     }
 
     pub fn update(&mut self, x: f64) -> Option<f64> {
@@ -86,13 +96,20 @@ pub struct Atr {
 impl Atr {
     pub fn new(length: usize) -> Self {
         assert!(length > 0, "ATR length must be positive");
-        Self { length, prev_close: None, seen: 0, value: 0.0 }
+        Self {
+            length,
+            prev_close: None,
+            seen: 0,
+            value: 0.0,
+        }
     }
 
     pub fn update(&mut self, bar: &Candle) -> Option<f64> {
         let tr = match self.prev_close.replace(bar.close) {
             None => bar.high - bar.low,
-            Some(c) => (bar.high - bar.low).max((bar.high - c).abs()).max((bar.low - c).abs()),
+            Some(c) => (bar.high - bar.low)
+                .max((bar.high - c).abs())
+                .max((bar.low - c).abs()),
         };
         self.seen += 1;
         let n = self.length as f64;
@@ -108,13 +125,19 @@ impl Atr {
 /// EMA of every close; NaN until it has a value.
 pub fn ema_series(candles: &[Candle], length: usize) -> Vec<f64> {
     let mut ema = Ema::new(length);
-    candles.iter().map(|c| ema.update(c.close).unwrap_or(f64::NAN)).collect()
+    candles
+        .iter()
+        .map(|c| ema.update(c.close).unwrap_or(f64::NAN))
+        .collect()
 }
 
 /// ATR of every bar; NaN until it has a value.
 pub fn atr_series(candles: &[Candle], length: usize) -> Vec<f64> {
     let mut atr = Atr::new(length);
-    candles.iter().map(|c| atr.update(c).unwrap_or(f64::NAN)).collect()
+    candles
+        .iter()
+        .map(|c| atr.update(c).unwrap_or(f64::NAN))
+        .collect()
 }
 
 /// RSI crosses through a [`Filter`]: a rejected cross becomes [`Signal::Flat`].
@@ -128,17 +151,30 @@ pub struct FilteredCross {
 
 impl FilteredCross {
     pub fn new(params: RsiCrossParams, filter: Filter) -> Self {
-        Self { cross: RsiCrossSignals::new(params), filter, ema: filter.trend.map(Ema::new), atr: Atr::new(ATR_LENGTH) }
+        Self {
+            cross: RsiCrossSignals::new(params),
+            filter,
+            ema: filter.trend.map(Ema::new),
+            atr: Atr::new(ATR_LENGTH),
+        }
     }
 }
 
 impl BarSignals for FilteredCross {
     fn on_bar(&mut self, bar: &Candle) -> Option<Signal> {
-        let ema = self.ema.as_mut().and_then(|e| e.update(bar.close)).unwrap_or(f64::NAN);
+        let ema = self
+            .ema
+            .as_mut()
+            .and_then(|e| e.update(bar.close))
+            .unwrap_or(f64::NAN);
         let atr = self.atr.update(bar).unwrap_or(f64::NAN);
         let signal = self.cross.on_bar(bar)?;
         let dir = if signal == Signal::Long { 1 } else { -1 };
-        Some(if self.filter.allows(dir, bar.close, ema, atr) { signal } else { Signal::Flat })
+        Some(if self.filter.allows(dir, bar.close, ema, atr) {
+            signal
+        } else {
+            Signal::Flat
+        })
     }
 }
 
@@ -147,7 +183,13 @@ mod tests {
     use super::*;
 
     fn bar(high: f64, low: f64, close: f64) -> Candle {
-        Candle { time_ms: 0, open: close, high, low, close }
+        Candle {
+            time_ms: 0,
+            open: close,
+            high,
+            low,
+            close,
+        }
     }
 
     #[test]
@@ -170,7 +212,10 @@ mod tests {
 
     #[test]
     fn filter_needs_the_trend_and_enough_volatility() {
-        let f = Filter { trend: Some(50), min_atr_pct: Some(0.5) };
+        let f = Filter {
+            trend: Some(50),
+            min_atr_pct: Some(0.5),
+        };
         assert!(f.allows(1, 100.0, 99.0, 0.5));
         assert!(!f.allows(-1, 100.0, 99.0, 0.5));
         assert!(!f.allows(1, 100.0, 99.0, 0.4));

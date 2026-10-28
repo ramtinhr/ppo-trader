@@ -44,7 +44,10 @@ fn voided(trade_id: u64) -> bool {
 /// (10,395,636.17 against 10,440,163.64), all in the 1m candle opening at 1768342200000
 /// (589,963.66 against 634,491.13). That minute's high (96777) and low (94655.1) match OKX's,
 /// so prices are complete. OKX's `history-trades` no longer returns trades that old.
-const KNOWN_GAPS: &[(u64, u64)] = &[(2_105_958_516, 2_105_979_022), (2_106_031_988, 2_106_045_535)];
+const KNOWN_GAPS: &[(u64, u64)] = &[
+    (2_105_958_516, 2_105_979_022),
+    (2_106_031_988, 2_106_045_535),
+];
 /// Archive day of [`KNOWN_GAPS`].
 const KNOWN_GAP_DAY: (i32, u32, u32) = (2026, 1, 14);
 /// Contracts, in hundredths, missing from archive [`KNOWN_GAP_DAY`]: 44,527.47.
@@ -94,7 +97,12 @@ pub fn is_verified(dir: &Path, day: NaiveDate) -> bool {
 
 /// First and last millisecond (exclusive) of archive `day`, in UTC.
 pub fn archive_window_ms(day: NaiveDate) -> (i64, i64) {
-    let start = day.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis() - 8 * HOUR_MS;
+    let start = day
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp_millis()
+        - 8 * HOUR_MS;
     (start, start + 24 * HOUR_MS)
 }
 
@@ -151,9 +159,12 @@ fn download(day: NaiveDate, path: &Path) -> Result<()> {
     println!("Downloading {url}");
     let fetch = || -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
-        http().get(&url)
+        http()
+            .get(&url)
             .call()
-            .with_context(|| format!("download {url} (OKX publishes a day's archive the next day)"))?
+            .with_context(|| {
+                format!("download {url} (OKX publishes a day's archive the next day)")
+            })?
             .into_body()
             .into_reader()
             .read_to_end(&mut bytes)?;
@@ -201,7 +212,8 @@ fn verify(day: NaiveDate, path: &Path) -> Result<DaySummary> {
             Some(s) => {
                 ensure!(
                     t.trade_id > s.last_id
-                        && ((s.last_id + 1..t.trade_id).all(voided) || known_gap(day, s.last_id, t.trade_id)),
+                        && ((s.last_id + 1..t.trade_id).all(voided)
+                            || known_gap(day, s.last_id, t.trade_id)),
                     "{day}: trade IDs jump from {} to {}",
                     s.last_id,
                     t.trade_id
@@ -215,7 +227,11 @@ fn verify(day: NaiveDate, path: &Path) -> Result<DaySummary> {
     })?;
     let summary = summary.with_context(|| format!("{day}: archive has no trades"))?;
     let official = official_volume_hundredths(day)?;
-    let shortfall = if known_gap_day(day) { KNOWN_GAP_SHORTFALL } else { 0 };
+    let shortfall = if known_gap_day(day) {
+        KNOWN_GAP_SHORTFALL
+    } else {
+        0
+    };
     ensure!(
         summary.volume_hundredths + shortfall == official,
         "{day}: archive has {} contracts (+ {} known missing) but OKX's daily candle says {}",
@@ -247,7 +263,8 @@ fn verify(day: NaiveDate, path: &Path) -> Result<DaySummary> {
 /// Volume of OKX's official 1D candle for archive `day`, in hundredths of a contract.
 fn official_volume_hundredths(day: NaiveDate) -> Result<u64> {
     let (start, _) = archive_window_ms(day);
-    let reply: serde_json::Value = http().get(CANDLE_URL)
+    let reply: serde_json::Value = http()
+        .get(CANDLE_URL)
         .query("instId", INSTRUMENT)
         .query("bar", "1D")
         .query("after", (start + 1).to_string())
@@ -260,7 +277,10 @@ fn official_volume_hundredths(day: NaiveDate) -> Result<u64> {
         candle[0].as_str() == Some(start.to_string().as_str()),
         "{day}: OKX returned no daily candle ({reply})"
     );
-    ensure!(candle[8] == "1", "{day}: OKX's daily candle is not final yet");
+    ensure!(
+        candle[8] == "1",
+        "{day}: OKX's daily candle is not final yet"
+    );
     hundredths(candle[5].as_str().context("candle volume")?)
 }
 
@@ -274,7 +294,8 @@ pub fn official_candle(bar_ms: i64, time_ms: i64) -> Result<Candle> {
         _ => bail!("OKX publishes no {minutes}-minute candles"),
     };
     let fetch = || -> Result<serde_json::Value> {
-        Ok(http().get(CANDLE_URL)
+        Ok(http()
+            .get(CANDLE_URL)
             .query("instId", INSTRUMENT)
             .query("bar", &bar)
             .query("after", (time_ms + 1).to_string())
@@ -300,7 +321,13 @@ pub fn official_candle(bar_ms: i64, time_ms: i64) -> Result<Candle> {
         "OKX returned no {bar} candle at {time_ms} ({reply})"
     );
     let f = |i: usize| -> Result<f64> { Ok(c[i].as_str().context("candle field")?.parse()?) };
-    Ok(Candle { time_ms, open: f(1)?, high: f(2)?, low: f(3)?, close: f(4)? })
+    Ok(Candle {
+        time_ms,
+        open: f(1)?,
+        high: f(2)?,
+        low: f(3)?,
+        close: f(4)?,
+    })
 }
 
 /// Parses a decimal with at most 2 decimal places into hundredths, exactly.
@@ -381,7 +408,11 @@ pub fn candles(dir: &Path, bar_ms: i64, from_ms: i64, to_ms: i64) -> Result<Vec<
                     c.close = t.price;
                 }
                 Some(c) if c.time_ms > open_ms => {
-                    bail!("trade {} at {} ms is out of time order", t.trade_id, t.time_ms)
+                    bail!(
+                        "trade {} at {} ms is out of time order",
+                        t.trade_id,
+                        t.time_ms
+                    )
                 }
                 _ => out.push(Candle {
                     time_ms: open_ms,
@@ -435,7 +466,11 @@ mod tests {
         assert!(known_gap(day, 2_106_031_988, 2_106_045_535));
         assert!(!known_gap(day, 2_105_958_516, 2_105_979_023));
         assert!(!known_gap(day, 2_105_958_517, 2_105_979_022));
-        assert!(!known_gap(day.succ_opt().unwrap(), 2_105_958_516, 2_105_979_022));
+        assert!(!known_gap(
+            day.succ_opt().unwrap(),
+            2_105_958_516,
+            2_105_979_022
+        ));
     }
 
     #[test]

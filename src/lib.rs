@@ -10,4 +10,7 @@ pub mod rsi_cross;
 pub mod scan;
 pub mod strategy;
 pub mod tape;
+pub mod tpsl_grid;
 pub mod tradingview;
+pub mod price_model;
+pub mod window_score;

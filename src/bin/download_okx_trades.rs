@@ -23,7 +23,10 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             "--dir" => dir = args.next().context("--dir needs a value")?.into(),
-            _ => days.push(arg.parse::<NaiveDate>().with_context(|| format!("{arg} is not YYYY-MM-DD\n\n{USAGE}"))?),
+            _ => days.push(
+                arg.parse::<NaiveDate>()
+                    .with_context(|| format!("{arg} is not YYYY-MM-DD\n\n{USAGE}"))?,
+            ),
         }
     }
     let (start, end) = match days[..] {

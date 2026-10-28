@@ -61,7 +61,11 @@ pub fn btc_usdt_perpetual() -> Result<InstrumentAny> {
 
 /// Simulated OKX margin account in USDT, filling orders against recorded trades. Market orders
 /// fill completely at the last trade price, as TradingView fills them at the bar's open.
-pub fn okx_venue(costs: &VenueConfig, starting_usdt: f64, leverage: u32) -> Result<SimulatedVenueConfig> {
+pub fn okx_venue(
+    costs: &VenueConfig,
+    starting_usdt: f64,
+    leverage: u32,
+) -> Result<SimulatedVenueConfig> {
     let maker = bps_to_rate(costs.maker_fee_bps)?;
     let taker = bps_to_rate(costs.taker_fee_bps)?;
     Ok(SimulatedVenueConfig::builder()
@@ -124,10 +128,16 @@ pub fn run_backtest(
     let instrument_id = instrument.id();
     let mut engine = BacktestEngine::new(
         BacktestEngineConfig::builder()
-            .logging(LoggerConfig::from_spec(&std::env::var("NAUTILUS_LOG").unwrap_or_else(|_| "stdout=Error".into()))?)
+            .logging(LoggerConfig::from_spec(
+                &std::env::var("NAUTILUS_LOG").unwrap_or_else(|_| "stdout=Error".into()),
+            )?)
             .build(),
     )?;
-    engine.add_venue(okx_venue(&run.config.venues.okx, run.balance_usdt, run.config.risk.max_leverage)?)?;
+    engine.add_venue(okx_venue(
+        &run.config.venues.okx,
+        run.balance_usdt,
+        run.config.risk.max_leverage,
+    )?)?;
     engine.add_instrument(&instrument)?;
     engine.add_strategy(ReversalStrategy::new(
         instrument_id,
@@ -137,11 +147,21 @@ pub fn run_backtest(
         exits,
     ))?;
 
-    let ms = |day: NaiveDate| day.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis();
+    let ms = |day: NaiveDate| {
+        day.and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis()
+    };
     let (from_ms, to_ms) = (ms(run.start), ms(run.end));
     let days = archive_days(run.start, run.end);
     for (i, day) in days.iter().enumerate() {
-        engine.add_data(load_archive(run.data, *day, instrument_id, from_ms, to_ms)?, None, true, true)?;
+        engine.add_data(
+            load_archive(run.data, *day, instrument_id, from_ms, to_ms)?,
+            None,
+            true,
+            true,
+        )?;
         engine.run(None, None, None, i + 1 < days.len())?;
         engine.clear_data();
         progress(i + 1, days.len());
@@ -153,7 +173,9 @@ pub fn run_backtest(
         let cache = engine.kernel_mut().cache();
         let cache = cache.borrow();
         for order in cache.orders(None, None, None, None, None) {
-            let Some(price) = order.avg_px() else { continue };
+            let Some(price) = order.avg_px() else {
+                continue;
+            };
             fills.push(Fill {
                 time_ms: i64::try_from(order.ts_last().as_u64() / 1_000_000)?,
                 kind: match order.order_type() {
@@ -207,7 +229,11 @@ pub fn trade_tick(instrument_id: InstrumentId, trade: &Trade) -> Result<TradeTic
         instrument_id,
         Price::new(trade.price, PRICE_PRECISION),
         Quantity::new(btc, SIZE_PRECISION),
-        if trade.buy { AggressorSide::Buy } else { AggressorSide::Sell },
+        if trade.buy {
+            AggressorSide::Buy
+        } else {
+            AggressorSide::Sell
+        },
         TradeId::new(&trade.trade_id.to_string()),
         ts,
         ts,

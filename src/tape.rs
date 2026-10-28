@@ -44,10 +44,20 @@ impl Tape {
         mut progress: impl FnMut(usize, usize),
     ) -> Result<(Vec<Candle>, Tape)> {
         let mut candles: Vec<Candle> = Vec::new();
-        let mut tape = Tape { price: Vec::new(), offset_ms: Vec::new(), bar_start: Vec::new(), bar_time: Vec::new(), highs: Vec::new(), lows: Vec::new() };
+        let mut tape = Tape {
+            price: Vec::new(),
+            offset_ms: Vec::new(),
+            bar_start: Vec::new(),
+            bar_time: Vec::new(),
+            highs: Vec::new(),
+            lows: Vec::new(),
+        };
         let mut previous: Option<u32> = None;
         let first_day = okx_history::utc8_day(from_ms);
-        let days: Vec<_> = first_day.iter_days().take_while(|d| *d <= okx_history::utc8_day(to_ms - 1)).collect();
+        let days: Vec<_> = first_day
+            .iter_days()
+            .take_while(|d| *d <= okx_history::utc8_day(to_ms - 1))
+            .collect();
         for (n, day) in days.iter().enumerate() {
             progress(n, days.len());
             let path = okx_history::archive_path(dir, *day);
@@ -72,7 +82,8 @@ impl Tape {
                         c.high = c.high.max(t.price);
                         c.low = c.low.min(t.price);
                         c.close = t.price;
-                        let bar_first = *tape.bar_start.last().unwrap() as usize == tape.price.len() - 1;
+                        let bar_first =
+                            *tape.bar_start.last().unwrap() as usize == tape.price.len() - 1;
                         if bar_first || *tape.price.last().unwrap() != matching {
                             tape.grow();
                             tape.price.push(matching);
@@ -80,10 +91,20 @@ impl Tape {
                         }
                     }
                     Some(c) if c.time_ms > open_ms => {
-                        bail!("trade {} at {} ms is out of time order", t.trade_id, t.time_ms)
+                        bail!(
+                            "trade {} at {} ms is out of time order",
+                            t.trade_id,
+                            t.time_ms
+                        )
                     }
                     _ => {
-                        candles.push(Candle { time_ms: open_ms, open: t.price, high: t.price, low: t.price, close: t.price });
+                        candles.push(Candle {
+                            time_ms: open_ms,
+                            open: t.price,
+                            high: t.price,
+                            low: t.price,
+                            close: t.price,
+                        });
                         tape.bar_start.push(u32::try_from(tape.price.len())?);
                         tape.bar_time.push(open_ms);
                         tape.grow();
@@ -110,7 +131,13 @@ impl Tape {
         if from > to {
             return None;
         }
-        let row = |depth: usize| if depth == 0 { &self.price[..] } else { &tree[depth - 1][..] };
+        let row = |depth: usize| {
+            if depth == 0 {
+                &self.price[..]
+            } else {
+                &tree[depth - 1][..]
+            }
+        };
         // Climb: scan the rest of the current block at each depth until something hits.
         let (mut depth, mut i, mut span) = (0, from, 1);
         let found = loop {
@@ -134,7 +161,9 @@ impl Tape {
         while depth > 0 {
             depth -= 1;
             let r = row(depth);
-            j = (j * FAN..((j + 1) * FAN).min(r.len())).find(|&c| hit(r[c])).expect("parent hit");
+            j = (j * FAN..((j + 1) * FAN).min(r.len()))
+                .find(|&c| hit(r[c]))
+                .expect("parent hit");
         }
         (j <= to).then_some(j)
     }
@@ -147,6 +176,28 @@ impl Tape {
         if self.price.len() == self.price.capacity() {
             self.price.reserve_exact(CHUNK);
             self.offset_ms.reserve_exact(CHUNK);
+        }
+    }
+
+    /// A tape of the matching prices `price`, one trade per millisecond, with a candle of
+    /// `bar_ms` starting at each step in `bar_start`.
+    #[cfg(test)]
+    pub(crate) fn from_prices(price: Vec<u32>, bar_start: Vec<u32>, bar_ms: i64) -> Tape {
+        let mut offset_ms = Vec::with_capacity(price.len());
+        for (b, &s) in bar_start.iter().enumerate() {
+            let end = bar_start.get(b + 1).map_or(price.len(), |e| *e as usize);
+            offset_ms.extend(0..(end - s as usize) as u32);
+        }
+        let bar_time = (0..bar_start.len() as i64).map(|b| b * bar_ms).collect();
+        let highs = layers(&price, u32::max);
+        let lows = layers(&price, u32::min);
+        Tape {
+            price,
+            offset_ms,
+            bar_start,
+            bar_time,
+            highs,
+            lows,
         }
     }
 
@@ -164,7 +215,10 @@ fn layers(base: &[u32], pick: fn(u32, u32) -> u32) -> Vec<Vec<u32>> {
     let mut out: Vec<Vec<u32>> = Vec::new();
     let mut current = base;
     while current.len() > 1 {
-        let next: Vec<u32> = current.chunks(FAN).map(|c| c.iter().copied().reduce(pick).unwrap()).collect();
+        let next: Vec<u32> = current
+            .chunks(FAN)
+            .map(|c| c.iter().copied().reduce(pick).unwrap())
+            .collect();
         out.push(next);
         current = out.last().unwrap();
     }
@@ -189,7 +243,12 @@ pub struct Span {
 }
 
 impl Span {
-    const EMPTY: Span = Span { max: f64::NEG_INFINITY, min: f64::INFINITY, fall: 0.0, rise: 0.0 };
+    const EMPTY: Span = Span {
+        max: f64::NEG_INFINITY,
+        min: f64::INFINITY,
+        fall: 0.0,
+        rise: 0.0,
+    };
 
     fn then(self, next: Span) -> Span {
         Span {
@@ -206,7 +265,12 @@ impl CloseRanges {
         let size = closes.len().next_power_of_two();
         let mut nodes = vec![Span::EMPTY; 2 * size];
         for (i, c) in closes.iter().enumerate() {
-            nodes[size + i] = Span { max: *c, min: *c, fall: 0.0, rise: 0.0 };
+            nodes[size + i] = Span {
+                max: *c,
+                min: *c,
+                fall: 0.0,
+                rise: 0.0,
+            };
         }
         for i in (1..size).rev() {
             nodes[i] = nodes[2 * i].then(nodes[2 * i + 1]);
@@ -242,7 +306,14 @@ mod tests {
         let n = price.len();
         let highs = layers(&price, u32::max);
         let lows = layers(&price, u32::min);
-        Tape { price, offset_ms: (0..n as u32).collect(), bar_start: vec![0], bar_time: vec![0], highs, lows }
+        Tape {
+            price,
+            offset_ms: (0..n as u32).collect(),
+            bar_start: vec![0],
+            bar_time: vec![0],
+            highs,
+            lows,
+        }
     }
 
     #[test]
@@ -250,15 +321,34 @@ mod tests {
         let mut x: u64 = 7;
         let price: Vec<u32> = (0..5000)
             .map(|_| {
-                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 1000 + (x >> 33) as u32 % 200
             })
             .collect();
         let t = tape(price.clone());
-        for (from, to, level) in [(0, 4999, 1199), (17, 3000, 1195), (100, 100, 1100), (4000, 4999, 1000), (5, 2, 1100), (0, 4999, 2000)] {
+        for (from, to, level) in [
+            (0, 4999, 1199),
+            (17, 3000, 1195),
+            (100, 100, 1100),
+            (4000, 4999, 1000),
+            (5, 2, 1100),
+            (0, 4999, 2000),
+        ] {
             for up in [true, false] {
-                let scan = (from..=to.min(4999)).find(|&j| if up { price[j] >= level } else { price[j] <= level });
-                assert_eq!(t.first_hit(from, to, level, up), scan, "{from} {to} {level} {up}");
+                let scan = (from..=to.min(4999)).find(|&j| {
+                    if up {
+                        price[j] >= level
+                    } else {
+                        price[j] <= level
+                    }
+                });
+                assert_eq!(
+                    t.first_hit(from, to, level, up),
+                    scan,
+                    "{from} {to} {level} {up}"
+                );
             }
         }
     }

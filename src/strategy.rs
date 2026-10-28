@@ -18,9 +18,9 @@ use nautilus_common::actor::DataActor;
 use nautilus_model::{
     data::TradeTick,
     enums::OrderSide,
-    orders::Order,
     events::OrderFilled,
     identifiers::{ClientOrderId, InstrumentId, StrategyId},
+    orders::Order,
     types::{Price, Quantity},
 };
 use nautilus_trading::{
@@ -111,7 +111,11 @@ impl ReversalStrategy {
         };
         self.cancel_exits()?;
         let delta = target - current;
-        let side = if delta > Decimal::ZERO { OrderSide::Buy } else { OrderSide::Sell };
+        let side = if delta > Decimal::ZERO {
+            OrderSide::Buy
+        } else {
+            OrderSide::Sell
+        };
         let order = self.order().market(
             self.instrument_id,
             side,
@@ -129,7 +133,13 @@ impl ReversalStrategy {
     }
 
     fn cancel_exits(&mut self) -> anyhow::Result<()> {
-        for id in self.targets.drain(..).collect::<Vec<_>>().into_iter().chain(self.stop.take()) {
+        for id in self
+            .targets
+            .drain(..)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .chain(self.stop.take())
+        {
             self.cancel_order(id, None, None)?;
         }
         self.open_steps = 0;
@@ -137,13 +147,19 @@ impl ReversalStrategy {
     }
 
     fn place_exits(&mut self, entry_px: Price, long: bool) -> anyhow::Result<()> {
-        let Some(exits) = self.exits.clone() else { return Ok(()) };
+        let Some(exits) = self.exits.clone() else {
+            return Ok(());
+        };
         let steps = steps(self.trade_size);
         self.entry_ticks = ticks(entry_px);
         self.long = long;
         self.open_steps = steps;
         self.targets_filled = 0;
-        let side = if long { OrderSide::Sell } else { OrderSide::Buy };
+        let side = if long {
+            OrderSide::Sell
+        } else {
+            OrderSide::Buy
+        };
         for (k, size) in exits.target_steps(steps).into_iter().enumerate() {
             let order = self.order().limit(
                 self.instrument_id,
@@ -222,7 +238,11 @@ impl ReversalStrategy {
             self.entry = None;
             // The portfolio is updated after this handler; the entry moved the position to
             // the target, on the order's side.
-            return if opens { self.place_exits(event.last_px, event.order_side == OrderSide::Buy) } else { Ok(()) };
+            return if opens {
+                self.place_exits(event.last_px, event.order_side == OrderSide::Buy)
+            } else {
+                Ok(())
+            };
         }
         if let Some(k) = self.targets.iter().position(|t| *t == id) {
             self.targets.remove(k);
@@ -233,9 +253,17 @@ impl ReversalStrategy {
                 self.stop = None;
                 return self.cancel_order(stop, None, None);
             }
-            let breakeven = self.exits.as_ref().is_some_and(|e| e.breakeven) && self.targets_filled == 1;
+            let breakeven =
+                self.exits.as_ref().is_some_and(|e| e.breakeven) && self.targets_filled == 1;
             let trigger = breakeven.then(|| price(self.entry_ticks));
-            return self.modify_order(stop, Some(quantity(self.open_steps)), None, trigger, None, None);
+            return self.modify_order(
+                stop,
+                Some(quantity(self.open_steps)),
+                None,
+                trigger,
+                None,
+                None,
+            );
         }
         if self.stop == Some(id) {
             self.stop = None;
@@ -283,7 +311,13 @@ impl DataActor for ReversalStrategy {
             bar.close = price;
             return Ok(());
         }
-        let new = Candle { time_ms: open, open: price, high: price, low: price, close: price };
+        let new = Candle {
+            time_ms: open,
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+        };
         match self.bar.replace(new) {
             Some(closed) => match self.signals.on_bar(&closed) {
                 Some(signal) => self.on_signal(signal),

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>10-day window walk-forward</title>
+<style>
+  :root {
+    --bg: #09090b; --panel: #121214; --panel-2: #1a1a1e; --border: #27272a;
+    --text: #fafafa; --muted: #a1a1aa; --accent: #2dd4bf;
+    --green: #4ade80; --red: #fb7185; --amber: #fbbf24;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; color: var(--text);
+         background: radial-gradient(900px 420px at 12% -18%, rgba(45,212,191,.10), transparent 55%), var(--bg);
+         font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { border-bottom: 1px solid var(--border); padding: 14px 24px; display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; font-weight: 650; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  main { padding: 20px 24px 48px; max-width: 1600px; margin: 0 auto; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 16px; }
+  .card-head { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .card-head h2 { font-size: 15px; margin: 0; font-weight: 620; }
+  .card-body { padding: 14px 16px; }
+  .verdict { font-size: 15px; padding: 14px 16px; border-left: 4px solid var(--amber); }
+  .verdict.good { border-left-color: var(--green); } .verdict.bad { border-left-color: var(--red); }
+  .muted { color: var(--muted); }
+  .pos { color: var(--green); } .neg { color: var(--red); }
+  .table-wrap { overflow: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { padding: 7px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--border); }
+  th:first-child, td:first-child, td.left, th.left { text-align: left; }
+  th { background: var(--panel-2); color: var(--muted); font-weight: 600; font-size: 12px; }
+  tbody tr:hover { background: rgba(45,212,191,.10); }
+  ul.plain { margin: 6px 0; padding-left: 20px; } ul.plain li { margin: 3px 0; }
+  details { margin: 6px 0; } summary { cursor: pointer; color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Score the last 10 days, trade the next 10 days, repeat</h1>
+  <span class="sub" id="sub"></span>
+</header>
+<main>
+  <div class="card"><div class="card-body" id="explain"></div></div>
+  <div class="card"><div class="verdict" id="verdict"></div></div>
+  <div class="card">
+    <div class="card-head"><h2>Every round: the best of the last window, traded in the next</h2>
+      <span class="muted">This is the bot's real result. Nothing from the traded window is used to choose.</span></div>
+    <div class="card-body table-wrap"><table id="rounds"></table></div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>Did the score predict the next window?</h2>
+      <span class="muted">The best combinations of each window, and what each made in the next one.</span></div>
+    <div class="card-body table-wrap"><div id="tops"></div></div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>Check</h2></div>
+    <div class="card-body" id="check"></div>
+  </div>
+</main>
+<script>
+const R = /*__REPORT__*/null;
+const $ = (s) => document.querySelector(s);
+const fmt = (x, d = 2) => Number.isFinite(x) ? x.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }) : '–';
+const signed = (x, d = 2) => (x > 0 ? '+' : '') + fmt(x, d);
+const cls = (x) => x > 0 ? 'pos' : x < 0 ? 'neg' : '';
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const money = (x) => `<span class="${cls(x)}">${signed(x)}</span>`;
+const int = (x) => x.toLocaleString('en-US');
+const M = R.meta, S = R.summary;
+
+$('#sub').textContent = `BTC-USDT-SWAP · ${M.start} to ${M.end} (end excluded) · ${M.windows} windows of ${M.days} days · ${int(M.combinations)} combinations · ${M.size_btc} BTC per trade · fees taker ${M.taker_fee_bps} / maker ${M.maker_fee_bps} bps · generated ${M.generated_utc} UTC`;
+$('#explain').innerHTML = `
+  <b>How it works</b>
+  <ul class="plain">
+    <li><b>Combinations</b>: ${int(M.pairs)} RSI pairs × ${M.timeframes.length} timeframes (${M.timeframes.map((t) => t + 'm').join(', ')}) × ${M.tp[2]} take-profits (${M.tp[0]}% to ${M.tp[1]}%) × ${M.sl[2]} stop-losses (${M.sl[0]}% to ${M.sl[1]}%)${M.leverage ? ` × ${M.leverage[2]} leverages (${M.leverage[0]}x to ${M.leverage[1]}x)` : ''} = ${int(M.combinations)}.</li>
+    <li><b>Same situation for all</b>: in every ${M.days}-day window, every combination starts with no position at the same minute and trades every signal inside the window; a trade still open at the end is closed with the fee.</li>
+    <li><b>Score</b> = profit ÷ largest drop (at least ${M.min_drop} USDT) × <b>trusted win rate</b> (the win rate the number of trades really supports, 95% sure) × <b>risk</b> (profit ÷ (profit + biggest loss)) × <b>hold time</b> (1 ÷ (1 + average hours held ÷ 24)). A combination needs at least ${M.min_trades} trades in the window to get a score.</li>
+    <li><b>Each round</b>: the combination with the best score in one window is traded in the next window. <b>Buy-and-hold</b> buys the same ${M.size_btc} BTC at the start of that window and sells at its end, with fees.</li>
+  </ul>`;
+
+const good = S.total > 0 && S.total > S.buy_and_hold_total && S.positive > S.rounds / 2;
+$('#verdict').className = `verdict ${good ? 'good' : 'bad'}`;
+$('#verdict').innerHTML = `Trading each window's best in the next window made <b class="${cls(S.total)}">${signed(S.total)} USDT</b> after fees over ${S.rounds} rounds (${S.positive} profitable${S.flat ? `, ${S.flat} without any trade` : ''}); buy-and-hold over the same time: ${money(S.buy_and_hold_total)} USDT. ${good ? 'It made money in most rounds and beat buy-and-hold. Check it on more data before trusting it.' : 'It did not make money reliably.'}`;
+
+const pct = (x) => `${fmt(x, 0)}%`;
+$('#rounds').innerHTML = `<thead><tr><th>#</th><th class="left">Scored on</th><th class="left">Best combination</th><th>Score</th><th>Its profit</th><th>Win rate (trusted)</th><th>Trades</th><th class="left">Traded in</th><th>Result</th><th>Won</th><th>Biggest loss</th><th>Avg hold</th><th>Total</th><th>Buy-and-hold</th><th>Buy-and-hold total</th><th>Scored</th></tr></thead><tbody>${
+  R.rounds.map((r, i) => { const p = r.pick; return `<tr><td>${i + 1}</td><td class="left">${r.scored_from} → ${r.scored_to}</td>${p
+    ? `<td class="left">${esc(p.label)}</td><td>${fmt(p.scored.score, 3)}</td><td>${money(p.scored.profit)}</td><td>${pct(p.scored.win_rate)} (${pct(p.scored.trusted_win_rate)})</td><td>${p.scored.trades}</td><td class="left">${r.traded_from} → ${r.traded_to}</td><td><b>${money(p.traded.profit)}</b></td><td>${p.traded.wins} / ${p.traded.trades}</td><td>${money(p.traded.worst)}</td><td>${fmt(p.traded.hold_hours, 1)} h</td>`
+    : `<td class="left muted" colspan="5">no combination with ${M.min_trades} trades: no trade</td><td class="left">${r.traded_from} → ${r.traded_to}</td><td>0.00</td><td></td><td></td><td></td>`}<td>${money(r.total)}</td><td>${money(r.buy_and_hold)}</td><td>${money(r.buy_and_hold_total)}</td><td class="muted">${int(r.eligible)} of ${int(r.combinations_traded)}</td></tr>`; }).join('')}</tbody>`;
+
+$('#tops').innerHTML = `<table><thead><tr><th class="left">Scored on</th><th>Best ${R.rounds[0]?.top_n ?? 0}: profitable in the next window</th><th>Best ${R.rounds[0]?.top_n ?? 0}: their next window together</th><th>Combinations with a score</th><th>Made money in the scored window</th></tr></thead><tbody>${
+  R.rounds.map((r) => `<tr><td class="left">${r.scored_from}</td><td>${r.top_next_positive} of ${r.top_n}</td><td>${money(r.top_next_total)}</td><td>${int(r.eligible)}</td><td>${int(r.profitable)}</td></tr>`).join('')}</tbody></table>` +
+  R.rounds.map((r) => `<details><summary>Best ${r.tops.length} of ${r.scored_from} → ${r.scored_to}, and their next window</summary><table><thead><tr><th>Rank</th><th class="left">Combination</th><th>Score</th><th>Profit</th><th>Drop</th><th>Win rate (trusted)</th><th>Biggest loss</th><th>Avg hold</th><th>Trades</th><th>Next window</th><th>Next trades</th><th>Next win rate</th></tr></thead><tbody>${
+    r.tops.map((t) => `<tr><td>${t.rank}</td><td class="left">${esc(t.label)}</td><td>${fmt(t.scored.score, 3)}</td><td>${money(t.scored.profit)}</td><td>${fmt(t.scored.drop)}</td><td>${pct(t.scored.win_rate)} (${pct(t.scored.trusted_win_rate)})</td><td>${money(t.scored.worst)}</td><td>${fmt(t.scored.hold_hours, 1)} h</td><td>${t.scored.trades}</td><td><b>${money(t.next.profit)}</b></td><td>${t.next.trades}</td><td>${pct(t.next.win_rate)}</td></tr>`).join('')}</tbody></table></details>`).join('');
+
+$('#check').innerHTML = R.check
+  ? `${R.check.combinations} combinations traded were replayed again by the trade-by-trade scanner over the window they traded: every result identical.`
+  : '<span class="muted">Check pending or skipped (--check 0).</span>';
+</script>
+<script>/*__TABLE_SORT__*/</script>
+</body>
+</html>

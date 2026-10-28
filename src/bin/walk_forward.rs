@@ -13,7 +13,10 @@ use dynamic_trader::{
     config::AppConfig,
     exits::Exits,
     filters::{Filter, FilteredCross},
-    grid::{Indicators, exit_settings, exits_label, filters, parse_groups, parse_lengths, parse_numbers, parse_options},
+    grid::{
+        Indicators, exit_settings, exits_label, filters, parse_groups, parse_lengths,
+        parse_numbers, parse_options,
+    },
     okx_history::{self, Candle},
     rsi_cross::RsiCrossParams,
     scan::{self, Costs, Market, Outcome, Record, STEP_BTC},
@@ -104,7 +107,12 @@ struct Candidate {
 
 impl Candidate {
     fn label(&self) -> String {
-        format!("RSI {}/{} · {} · No TP/SL", self.fast, self.slow, self.filter.label())
+        format!(
+            "RSI {}/{} · {} · No TP/SL",
+            self.fast,
+            self.slow,
+            self.filter.label()
+        )
     }
 }
 
@@ -116,13 +124,23 @@ fn parse_candidates(text: &str) -> Result<Vec<Candidate>> {
     text.split(',')
         .map(|c| {
             let parts: Vec<&str> = c.trim().split('/').collect();
-            ensure!(parts.len() == 4, "a candidate is fast/slow/trend/atr, got {c:?}");
+            ensure!(
+                parts.len() == 4,
+                "a candidate is fast/slow/trend/atr, got {c:?}"
+            );
             let fast: usize = parts[0].parse()?;
             let slow: usize = parts[1].parse()?;
-            ensure!(0 < fast && fast < slow, "candidate {c:?} needs 0 < fast < slow");
+            ensure!(
+                0 < fast && fast < slow,
+                "candidate {c:?} needs 0 < fast < slow"
+            );
             let trend = parse_options::<usize>(parts[2])?[0];
             let min_atr_pct = parse_options::<f64>(parts[3])?[0];
-            Ok(Candidate { fast, slow, filter: Filter { trend, min_atr_pct } })
+            Ok(Candidate {
+                fast,
+                slow,
+                filter: Filter { trend, min_atr_pct },
+            })
         })
         .collect()
 }
@@ -165,13 +183,21 @@ fn parse_args() -> Result<Args> {
             println!("{USAGE}");
             std::process::exit(0);
         }
-        let value = raw.next().with_context(|| format!("{flag} needs a value\n\n{USAGE}"))?;
+        let value = raw
+            .next()
+            .with_context(|| format!("{flag} needs a value\n\n{USAGE}"))?;
         let bad = || format!("bad value for {flag}: {value}");
         match flag.as_str() {
             "--start" => args.start = value.parse().with_context(bad)?,
             "--end" => args.end = value.parse().with_context(bad)?,
             "--timeframe" => args.minutes = value.parse().with_context(bad)?,
-            "--train-months" => args.train_months = value.split(',').map(|v| v.trim().parse()).collect::<Result<_, _>>().with_context(bad)?,
+            "--train-months" => {
+                args.train_months = value
+                    .split(',')
+                    .map(|v| v.trim().parse())
+                    .collect::<Result<_, _>>()
+                    .with_context(bad)?
+            }
             "--min-trades" => args.min_trades = value.parse().with_context(bad)?,
             "--top-k" => args.top_k = value.parse().with_context(bad)?,
             "--lengths" => args.lengths = parse_lengths(&value).with_context(bad)?,
@@ -198,19 +224,37 @@ fn parse_args() -> Result<Args> {
             _ => bail!("unknown option {flag}\n\n{USAGE}"),
         }
     }
-    ensure!(args.start.day() == 1 && args.end.day() == 1, "--start and --end must be the first day of a month");
+    ensure!(
+        args.start.day() == 1 && args.end.day() == 1,
+        "--start and --end must be the first day of a month"
+    );
     ensure!(args.start < args.end, "--start must be before --end");
-    ensure!(args.minutes > 0 && 1440 % args.minutes == 0, "--timeframe must divide a day into whole bars");
-    ensure!(args.lengths.len() >= 2, "--lengths needs at least two lengths");
-    ensure!(!args.train_months.is_empty() && args.train_months.iter().all(|m| *m > 0), "--train-months must be positive");
+    ensure!(
+        args.minutes > 0 && 1440 % args.minutes == 0,
+        "--timeframe must divide a day into whole bars"
+    );
+    ensure!(
+        args.lengths.len() >= 2,
+        "--lengths needs at least two lengths"
+    );
+    ensure!(
+        !args.train_months.is_empty() && args.train_months.iter().all(|m| *m > 0),
+        "--train-months must be positive"
+    );
     ensure!(args.top_k > 0, "--top-k must be positive");
     let steps = args.size_btc * 10_000.0;
-    ensure!(args.size_btc >= 0.0001 && (steps.round() - steps).abs() < 1e-6, "--size-btc must use OKX's 0.0001 BTC step");
+    ensure!(
+        args.size_btc >= 0.0001 && (steps.round() - steps).abs() < 1e-6,
+        "--size-btc must use OKX's 0.0001 BTC step"
+    );
     Ok(args)
 }
 
 fn ms(day: NaiveDate) -> i64 {
-    day.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis()
+    day.and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp_millis()
 }
 
 /// Training score of one combination on one window, kept small: there are about a million
@@ -248,32 +292,59 @@ impl Ctx<'_> {
 
     fn label(&self, k: usize) -> String {
         let n = self.exits.len();
-        format!("{} · {}", self.filters[k / n].label(), exits_label(&self.exits[k % n]))
+        format!(
+            "{} · {}",
+            self.filters[k / n].label(),
+            exits_label(&self.exits[k % n])
+        )
     }
 
     /// Profit of `o` after also paying the taker fee to close what is still open at the last
     /// close of `bars`, and the size that was still open.
     fn net(&self, o: &Outcome, record: &Record, bars: &Range<usize>) -> (f64, f64) {
-        let open_btc = record.trades.last().filter(|t| t.open).and_then(|t| t.exits.last()).map_or(0.0, |e| e.steps as f64 * STEP_BTC);
+        let open_btc = record
+            .trades
+            .last()
+            .filter(|t| t.open)
+            .and_then(|t| t.exits.last())
+            .map_or(0.0, |e| e.steps as f64 * STEP_BTC);
         let close = self.candles[bars.end - 1].close;
         (o.total() - open_btc * close * self.costs.taker, open_btc)
     }
 
     /// One combination over `bars`, with every fill.
-    fn replay(&self, signals: &[(u32, i8)], exits: Option<&Exits>, ids: (u16, u16, u16), bars: &Range<usize>) -> (Outcome, Record, f64) {
+    fn replay(
+        &self,
+        signals: &[(u32, i8)],
+        exits: Option<&Exits>,
+        ids: (u16, u16, u16),
+        bars: &Range<usize>,
+    ) -> (Outcome, Record, f64) {
         let mut record = Record::default();
-        let o = scan::simulate(ids, signals, exits, &self.market, bars.clone(), self.costs, Some(&mut record));
+        let o = scan::simulate(
+            ids,
+            signals,
+            exits,
+            &self.market,
+            bars.clone(),
+            self.costs,
+            Some(&mut record),
+        );
         let (net, _) = self.net(&o, &record, bars);
         (o, record, net)
     }
 
     fn combo_signals(&self, fast: usize, slow: usize, filter: &Filter) -> Vec<(u32, i8)> {
         let (i, j) = (self.ind.index(fast).unwrap(), self.ind.index(slow).unwrap());
-        self.ind.filtered(&self.ind.signals(i, j), filter, self.candles)
+        self.ind
+            .filtered(&self.ind.signals(i, j), filter, self.candles)
     }
 
     fn buy_and_hold(&self, bars: &Range<usize>) -> f64 {
-        let (first, last) = (self.candles[bars.start].open, self.candles[bars.end - 1].close);
+        let (first, last) = (
+            self.candles[bars.start].open,
+            self.candles[bars.end - 1].close,
+        );
         self.args.size_btc * (last - first) - self.args.size_btc * (first + last) * self.costs.taker
     }
 }
@@ -287,19 +358,37 @@ fn main() -> Result<()> {
 
     let started = Instant::now();
     let mut shown = 0;
-    let (candles, tape) = Tape::load(&args.data, bar_ms, ms(args.start), ms(args.end), |done, total| {
-        if done * 10 / total.max(1) > shown || done == total {
-            shown = done * 10 / total.max(1);
-            println!("Reading every OKX trade: archive {done} of {total}");
-        }
-    })?;
-    let months: Vec<NaiveDate> = (0..).map(|n| args.start + Months::new(n)).take_while(|m| *m <= args.end).collect();
+    let (candles, tape) = Tape::load(
+        &args.data,
+        bar_ms,
+        ms(args.start),
+        ms(args.end),
+        |done, total| {
+            if done * 10 / total.max(1) > shown || done == total {
+                shown = done * 10 / total.max(1);
+                println!("Reading every OKX trade: archive {done} of {total}");
+            }
+        },
+    )?;
+    let months: Vec<NaiveDate> = (0..)
+        .map(|n| args.start + Months::new(n))
+        .take_while(|m| *m <= args.end)
+        .collect();
     let month_bars: Vec<Range<usize>> = months
         .windows(2)
-        .map(|w| candles.partition_point(|c| c.time_ms < ms(w[0]))..candles.partition_point(|c| c.time_ms < ms(w[1])))
+        .map(|w| {
+            candles.partition_point(|c| c.time_ms < ms(w[0]))
+                ..candles.partition_point(|c| c.time_ms < ms(w[1]))
+        })
         .collect();
-    ensure!(month_bars.iter().all(|r| r.len() > 1), "every month needs candles");
-    let gaps = candles.windows(2).filter(|w| w[1].time_ms - w[0].time_ms != bar_ms).count();
+    ensure!(
+        month_bars.iter().all(|r| r.len() > 1),
+        "every month needs candles"
+    );
+    let gaps = candles
+        .windows(2)
+        .filter(|w| w[1].time_ms - w[0].time_ms != bar_ms)
+        .count();
     println!(
         "{} {}-minute candles from {} to {} (exclusive) in {:.0}s; {gaps} gaps without trades; {} price changes for TP/SL",
         candles.len(),
@@ -311,12 +400,23 @@ fn main() -> Result<()> {
     );
 
     let filters = filters(&args.trends, &args.atrs);
-    let exits = exit_settings(&args.stops, &args.ladders, &args.shares, &args.breakeven, (args.size_btc * 10_000.0).round() as i64)?;
+    let exits = exit_settings(
+        &args.stops,
+        &args.ladders,
+        &args.shares,
+        &args.breakeven,
+        (args.size_btc * 10_000.0).round() as i64,
+    )?;
     let n_settings = filters.len() * exits.len();
     ensure!(n_settings <= usize::from(u16::MAX), "too many settings");
-    let pairs: Vec<(usize, usize)> = (0..args.lengths.len()).flat_map(|i| (i + 1..args.lengths.len()).map(move |j| (i, j))).collect();
+    let pairs: Vec<(usize, usize)> = (0..args.lengths.len())
+        .flat_map(|i| (i + 1..args.lengths.len()).map(move |j| (i, j)))
+        .collect();
     let n_combos = pairs.len() * n_settings;
-    let candidates = args.candidates.clone().unwrap_or_else(|| default_candidates(args.minutes));
+    let candidates = args
+        .candidates
+        .clone()
+        .unwrap_or_else(|| default_candidates(args.minutes));
     let mut lengths = args.lengths.clone();
     lengths.extend(candidates.iter().flat_map(|c| [c.fast, c.slow]));
     lengths.sort_unstable();
@@ -325,18 +425,42 @@ fn main() -> Result<()> {
     all_filters.extend(candidates.iter().map(|c| c.filter));
     let ind = Indicators::new(&candles, &lengths, &all_filters);
     let closes = CloseRanges::new(&candles.iter().map(|c| c.close).collect::<Vec<_>>());
-    let costs = Costs { steps: (args.size_btc * 10_000.0).round() as i64, taker, maker, balance: args.balance_usdt };
-    let ctx = Ctx { args: &args, candles: &candles, market: Market { candles: &candles, tape: &tape, closes: &closes }, ind: &ind, filters: &filters, exits: &exits, costs };
+    let costs = Costs {
+        steps: (args.size_btc * 10_000.0).round() as i64,
+        taker,
+        maker,
+        balance: args.balance_usdt,
+    };
+    let ctx = Ctx {
+        args: &args,
+        candles: &candles,
+        market: Market {
+            candles: &candles,
+            tape: &tape,
+            bar_start: &tape.bar_start,
+            closes: &closes,
+        },
+        ind: &ind,
+        filters: &filters,
+        exits: &exits,
+        costs,
+    };
 
     let windows: Vec<Window> = args
         .train_months
         .iter()
-        .flat_map(|&n| {
-            (n as usize..month_bars.len()).map(move |m| (n, m))
+        .flat_map(|&n| (n as usize..month_bars.len()).map(move |m| (n, m)))
+        .map(|(n, m)| Window {
+            months: n,
+            test_month: m,
+            train: month_bars[m - n as usize].start..month_bars[m - 1].end,
+            test: month_bars[m].clone(),
         })
-        .map(|(n, m)| Window { months: n, test_month: m, train: month_bars[m - n as usize].start..month_bars[m - 1].end, test: month_bars[m].clone() })
         .collect();
-    ensure!(!windows.is_empty(), "the period is too short for the training windows");
+    ensure!(
+        !windows.is_empty(),
+        "the period is too short for the training windows"
+    );
     println!(
         "{} combinations ({} RSI pairs × {} filters × {} TP/SL settings) scored on {} training windows ({} months of training each); at least {} closed trades",
         n_combos,
@@ -344,7 +468,11 @@ fn main() -> Result<()> {
         filters.len(),
         exits.len(),
         windows.len(),
-        args.train_months.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(" / "),
+        args.train_months
+            .iter()
+            .map(|m| m.to_string())
+            .collect::<Vec<_>>()
+            .join(" / "),
         args.min_trades
     );
 
@@ -360,17 +488,32 @@ fn main() -> Result<()> {
                     let mut out = Vec::new();
                     loop {
                         let p = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(&(i, j)) = pairs.get(p) else { break out };
+                        let Some(&(i, j)) = pairs.get(p) else {
+                            break out;
+                        };
                         let raw = ind.signals(i, j);
                         let mut scores = vec![Score::default(); windows.len() * n_settings];
                         for (f, filter) in filters.iter().enumerate() {
                             let signals = ind.filtered(&raw, filter, &candles);
                             for (e, exit) in exits.iter().enumerate() {
                                 let k = f * exits.len() + e;
-                                let ids = (args.lengths[i] as u16, args.lengths[j] as u16, k as u16);
+                                let ids =
+                                    (args.lengths[i] as u16, args.lengths[j] as u16, k as u16);
                                 for (w, window) in windows.iter().enumerate() {
-                                    let o = scan::simulate(ids, &signals, exit.as_ref(), &ctx.market, window.train.clone(), costs, None);
-                                    scores[w * n_settings + k] = Score { total: o.total() as f32, closed: o.closed_trades, refused: o.refused > 0 };
+                                    let o = scan::simulate(
+                                        ids,
+                                        &signals,
+                                        exit.as_ref(),
+                                        &ctx.market,
+                                        window.train.clone(),
+                                        costs,
+                                        None,
+                                    );
+                                    scores[w * n_settings + k] = Score {
+                                        total: o.total() as f32,
+                                        closed: o.closed_trades,
+                                        refused: o.refused > 0,
+                                    };
                                 }
                             }
                         }
@@ -378,16 +521,26 @@ fn main() -> Result<()> {
                         let d = done.fetch_add(1, Ordering::Relaxed) + 1;
                         if d % 200 == 0 {
                             let secs = started.elapsed().as_secs_f64();
-                            println!("Scored pair {d} of {} on every window, about {:.0}s left", pairs.len(), secs / d as f64 * (pairs.len() - d) as f64);
+                            println!(
+                                "Scored pair {d} of {} on every window, about {:.0}s left",
+                                pairs.len(),
+                                secs / d as f64 * (pairs.len() - d) as f64
+                            );
                         }
                     }
                 })
             })
             .collect();
-        handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect()
     });
     per_pair.sort_by_key(|(p, _)| *p);
-    println!("Scored every combination on every training window in {:.0}s", started.elapsed().as_secs_f64());
+    println!(
+        "Scored every combination on every training window in {:.0}s",
+        started.elapsed().as_secs_f64()
+    );
 
     let earlier_start = ms(EARLIER_DATA_START.parse()?);
     let month_json: Vec<Value> = month_bars
@@ -404,13 +557,20 @@ fn main() -> Result<()> {
         })
         .collect();
 
-    let first_length: Vec<usize> = (0..windows.len()).filter(|&w| windows[w].months == args.train_months[0]).collect();
+    let first_length: Vec<usize> = (0..windows.len())
+        .filter(|&w| windows[w].months == args.train_months[0])
+        .collect();
     let to_verify = &first_length[first_length.len().saturating_sub(args.verify)..];
     let mut window_json = Vec::new();
     let mut verify_picks: Vec<(usize, usize, usize, usize)> = Vec::new();
     for (w, window) in windows.iter().enumerate() {
         let mut eligible: Vec<(usize, Score)> = (0..n_combos)
-            .map(|c| (c, per_pair[c / n_settings].1[w * n_settings + c % n_settings]))
+            .map(|c| {
+                (
+                    c,
+                    per_pair[c / n_settings].1[w * n_settings + c % n_settings],
+                )
+            })
             .filter(|(_, s)| s.closed >= args.min_trades && !s.refused)
             .collect();
         let n_eligible = eligible.len();
@@ -456,8 +616,15 @@ fn main() -> Result<()> {
             let (i, j) = pairs[c / n_settings];
             verify_picks.push((w, args.lengths[i], args.lengths[j], c % n_settings));
         }
-        let nets: Vec<f64> = picks.iter().map(|p| p["test_net"].as_f64().unwrap()).collect();
-        let avg = if nets.is_empty() { 0.0 } else { nets.iter().sum::<f64>() / nets.len() as f64 };
+        let nets: Vec<f64> = picks
+            .iter()
+            .map(|p| p["test_net"].as_f64().unwrap())
+            .collect();
+        let avg = if nets.is_empty() {
+            0.0
+        } else {
+            nets.iter().sum::<f64>() / nets.len() as f64
+        };
         let bh = ctx.buy_and_hold(&window.test);
         match picks.first() {
             Some(best) => println!(
@@ -476,7 +643,12 @@ fn main() -> Result<()> {
                 profitable,
                 n_eligible,
             ),
-            None => println!("Train {} month(s), trade {}: no combination had {} closed trades", window.months, months[window.test_month].format("%Y-%m"), args.min_trades),
+            None => println!(
+                "Train {} month(s), trade {}: no combination had {} closed trades",
+                window.months,
+                months[window.test_month].format("%Y-%m"),
+                args.min_trades
+            ),
         }
         window_json.push(json!({
             "train_months": window.months,
@@ -555,8 +727,18 @@ fn main() -> Result<()> {
     for &(w, fast, slow, setting) in &verify_picks {
         let window = &windows[w];
         for (part, bars, start, end) in [
-            ("test month", &window.test, months[window.test_month], months[window.test_month + 1]),
-            ("training window", &window.train, months[window.test_month - window.months as usize], months[window.test_month]),
+            (
+                "test month",
+                &window.test,
+                months[window.test_month],
+                months[window.test_month + 1],
+            ),
+            (
+                "training window",
+                &window.train,
+                months[window.test_month - window.months as usize],
+                months[window.test_month],
+            ),
         ] {
             let v = verify(&ctx, &config, fast, slow, setting, part, bars, start, end)?;
             verify_json.push(v);
@@ -591,11 +773,25 @@ fn main() -> Result<()> {
         "verify": verify_json,
     });
     fs::create_dir_all(&args.out)?;
-    let base = args.out.join(format!("walk_forward_{}m_{}_{}", args.minutes, args.start, args.end));
-    fs::write(base.with_extension("json"), serde_json::to_string_pretty(&report)?)?;
-    let html = REPORT_HTML.replace("/*__REPORT__*/null", &serde_json::to_string(&report)?.replace("</", "<\\/"));
+    let base = args.out.join(format!(
+        "walk_forward_{}m_{}_{}",
+        args.minutes, args.start, args.end
+    ));
+    fs::write(
+        base.with_extension("json"),
+        serde_json::to_string_pretty(&report)?,
+    )?;
+    let html = REPORT_HTML
+        .replace("/*__TABLE_SORT__*/", TABLE_SORT)
+        .replace(
+            "/*__REPORT__*/null",
+            &serde_json::to_string(&report)?.replace("</", "<\\/"),
+        );
     fs::write(base.with_extension("html"), html)?;
-    println!("\nReport (open in a browser): {}", base.with_extension("html").display());
+    println!(
+        "\nReport (open in a browser): {}",
+        base.with_extension("html").display()
+    );
     if verify_json.iter().any(|v| v["ok"] == false) {
         bail!("NautilusTrader and the scanner disagree, see above");
     }
@@ -605,10 +801,31 @@ fn main() -> Result<()> {
 /// Reruns one combination on `bars` (from `start` to `end`) through NautilusTrader, with the
 /// indicators warmed up on every earlier candle, and compares every fill with the scanner.
 #[allow(clippy::too_many_arguments)]
-fn verify(ctx: &Ctx, config: &AppConfig, fast: usize, slow: usize, setting: usize, part: &str, bars: &Range<usize>, start: NaiveDate, end: NaiveDate) -> Result<Value> {
+fn verify(
+    ctx: &Ctx,
+    config: &AppConfig,
+    fast: usize,
+    slow: usize,
+    setting: usize,
+    part: &str,
+    bars: &Range<usize>,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<Value> {
     let (filter, exits) = ctx.setting(setting);
-    let name = format!("RSI {fast}/{slow} {} ({part} {start} to {end})", ctx.label(setting));
-    let run = Run { config, data: &ctx.args.data, start, end, bar_minutes: ctx.args.minutes as u64, size_btc: ctx.args.size_btc, balance_usdt: ctx.args.balance_usdt };
+    let name = format!(
+        "RSI {fast}/{slow} {} ({part} {start} to {end})",
+        ctx.label(setting)
+    );
+    let run = Run {
+        config,
+        data: &ctx.args.data,
+        start,
+        end,
+        bar_minutes: ctx.args.minutes as u64,
+        size_btc: ctx.args.size_btc,
+        balance_usdt: ctx.args.balance_usdt,
+    };
     let mut signals = FilteredCross::new(RsiCrossParams { fast, slow }, *filter);
     for bar in &ctx.candles[..bars.start] {
         signals.on_bar(bar);
@@ -616,16 +833,35 @@ fn verify(ctx: &Ctx, config: &AppConfig, fast: usize, slow: usize, setting: usiz
     let started = Instant::now();
     println!("NautilusTrader check: {name}");
     let mut shown = 0;
-    let (result, mut theirs) = run_backtest(&run, Box::new(signals), exits.cloned(), |done, total| {
-        if done * 4 / total.max(1) > shown {
-            shown = done * 4 / total.max(1);
-            println!("  archive {done} of {total}");
-        }
-    })?;
-    let pnl = result.stats_pnls.get("USDT").and_then(|s| s.get("PnL (total)")).copied().unwrap_or(0.0);
-    let (o, record, _) = ctx.replay(&ctx.combo_signals(fast, slow, filter), exits, (fast as u16, slow as u16, setting as u16), bars);
+    let (result, mut theirs) =
+        run_backtest(&run, Box::new(signals), exits.cloned(), |done, total| {
+            if done * 4 / total.max(1) > shown {
+                shown = done * 4 / total.max(1);
+                println!("  archive {done} of {total}");
+            }
+        })?;
+    let pnl = result
+        .stats_pnls
+        .get("USDT")
+        .and_then(|s| s.get("PnL (total)"))
+        .copied()
+        .unwrap_or(0.0);
+    let (o, record, _) = ctx.replay(
+        &ctx.combo_signals(fast, slow, filter),
+        exits,
+        (fast as u16, slow as u16, setting as u16),
+        bars,
+    );
     let mut ours = record.fills;
-    let key = |f: &Fill| (f.time_ms, f.kind, f.buy, (f.price * 10.0).round() as i64, (f.size_btc / STEP_BTC).round() as i64);
+    let key = |f: &Fill| {
+        (
+            f.time_ms,
+            f.kind,
+            f.buy,
+            (f.price * 10.0).round() as i64,
+            (f.size_btc / STEP_BTC).round() as i64,
+        )
+    };
     ours.sort_by_key(key);
     theirs.sort_by_key(key);
     let same = |a: &Fill, b: &Fill| {
@@ -636,9 +872,16 @@ fn verify(ctx: &Ctx, config: &AppConfig, fast: usize, slow: usize, setting: usiz
             && (a.price - b.price).abs() < 1e-6
             && (a.fee_usdt - b.fee_usdt).abs() < 1e-6
     };
-    let bad: Vec<usize> = (0..ours.len().max(theirs.len())).filter(|&k| !matches!((ours.get(k), theirs.get(k)), (Some(a), Some(b)) if same(a, b))).collect();
+    let bad: Vec<usize> = (0..ours.len().max(theirs.len()))
+        .filter(|&k| !matches!((ours.get(k), theirs.get(k)), (Some(a), Some(b)) if same(a, b)))
+        .collect();
     for &k in bad.iter().take(3) {
-        println!("    fill {}: scanner {:?} | Nautilus {:?}", k + 1, ours.get(k), theirs.get(k));
+        println!(
+            "    fill {}: scanner {:?} | Nautilus {:?}",
+            k + 1,
+            ours.get(k),
+            theirs.get(k)
+        );
     }
     // Nautilus' "PnL (total)" counts closed parts and fees, not the open position.
     let closed = o.realized - o.fees;
@@ -649,10 +892,13 @@ fn verify(ctx: &Ctx, config: &AppConfig, fast: usize, slow: usize, setting: usiz
         bad.len(),
         started.elapsed().as_secs_f64()
     );
-    Ok(json!({ "pair": name, "fills": theirs.len(), "differ": bad.len(), "nautilus_pnl": pnl, "scanner_pnl": closed, "ok": ok, "seconds": started.elapsed().as_secs_f64() }))
+    Ok(
+        json!({ "pair": name, "fills": theirs.len(), "differ": bad.len(), "nautilus_pnl": pnl, "scanner_pnl": closed, "ok": ok, "seconds": started.elapsed().as_secs_f64() }),
+    )
 }
 
 const REPORT_HTML: &str = include_str!("walk_forward_report.html");
+const TABLE_SORT: &str = include_str!("table_sort.js");
 
 fn round2(x: f64) -> f64 {
     (x * 100.0).round() / 100.0

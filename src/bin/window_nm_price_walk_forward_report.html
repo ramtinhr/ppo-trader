@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Price walk-forward</title>
+<style>
+  :root {
+    --bg: #0f0f10; --panel: #161618; --ink: #f2f2f3; --muted: #9a9aa2;
+    --line: #2a2a2e; --accent: #5eead4; --pos: #4ade80; --neg: #f87171;
+    --pred: #60a5fa; --spot: #e2e8f0;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: var(--sans); background: var(--bg); color: var(--ink); }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 28px 20px 80px; }
+  .eyebrow { color: var(--accent); text-transform: uppercase; letter-spacing: .12em; font-size: 12px; }
+  h1 { font-size: 28px; margin: 8px 0 6px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .tabs { display: flex; gap: 8px; margin: 18px 0; flex-wrap: wrap; }
+  .tabs button {
+    background: transparent; border: 1px solid var(--line); color: var(--muted);
+    padding: 8px 14px; border-radius: 8px; cursor: pointer;
+  }
+  .tabs button.active { color: var(--ink); border-color: var(--accent); }
+  .tab { display: none; }
+  .tab.active { display: block; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+  .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .kpi .l { color: var(--muted); font-size: 12px; }
+  .kpi .v { font-family: var(--mono); font-size: 18px; margin-top: 6px; }
+  .pos { color: var(--pos); } .neg { color: var(--neg); }
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12.5px; }
+  th, td { border-bottom: 1px solid var(--line); padding: 8px 6px; text-align: left; }
+  th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+  .table-wrap { overflow: auto; max-height: 70vh; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  .note { color: var(--muted); font-size: 13px; margin-top: 12px; }
+  .chart-card {
+    margin-top: 16px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px 12px 8px;
+  }
+  .chart-head {
+    display: flex; flex-wrap: wrap; gap: 14px; align-items: center;
+    justify-content: space-between; margin-bottom: 8px;
+  }
+  .chart-title { font-size: 14px; color: var(--ink); }
+  .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch {
+    width: 18px; height: 3px; border-radius: 2px; display: inline-block;
+  }
+  .swatch.spot { background: var(--spot); }
+  .swatch.pred { background: var(--pred); }
+  .mark {
+    width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent;
+    display: inline-block;
+  }
+  .mark.buy { border-bottom: 9px solid var(--pos); }
+  .mark.sell { border-top: 9px solid var(--neg); }
+  #price-chart { width: 100%; height: 380px; display: block; cursor: crosshair; }
+  .tip {
+    position: fixed; display: none; z-index: 20; pointer-events: none;
+    background: #1c1c20; border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 10px; font-family: var(--mono); font-size: 12px; max-width: 280px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="eyebrow" id="eyebrow">Price equation path</p>
+  <h1 id="title">Predicted price vs market</h1>
+  <p class="sub" id="sub"></p>
+  <div class="tabs">
+    <button type="button" class="active" data-tab="summary">Summary</button>
+    <button type="button" data-tab="horizons">Horizons</button>
+    <button type="button" data-tab="chart">Chart</button>
+    <button type="button" data-tab="signals">Signals</button>
+  </div>
+  <section class="tab active" data-tab="summary">
+    <div class="kpis" id="kpis"></div>
+    <p class="note" id="eq"></p>
+    <div class="table-wrap" id="grid-wrap" style="display:none;margin:14px 0;max-height:none">
+      <table id="bar-grid"><thead></thead><tbody></tbody></table>
+    </div>
+    <div class="chart-card">
+      <div class="chart-head">
+        <div class="chart-title">Spot vs predicted (OOS) with signals</div>
+        <div class="legend">
+          <span><i class="swatch spot"></i> Spot</span>
+          <span><i class="swatch pred"></i> Predicted</span>
+          <span><i class="mark buy"></i> Buy</span>
+          <span><i class="mark sell"></i> Sell</span>
+        </div>
+      </div>
+      <canvas id="price-chart-summary" height="320"></canvas>
+    </div>
+  </section>
+  <section class="tab" data-tab="horizons">
+    <p class="note">OOS error by candles-ahead (h). Baseline = hold last close. Mentor bar: under 1% and beat baseline.</p>
+    <div class="table-wrap" style="max-height:none"><table id="horizons"><thead></thead><tbody></tbody></table></div>
+    <div class="chart-card" id="path-card" style="display:none;margin-top:14px">
+      <div class="chart-title" id="path-title">Example: forecast made at origin → next H future candles</div>
+      <p class="note" id="path-note"></p>
+      <div class="table-wrap" style="max-height:none;margin-top:8px"><table id="path-ex"><thead></thead><tbody></tbody></table></div>
+    </div>
+  </section>
+  <section class="tab" data-tab="chart">
+    <div class="chart-card">
+      <div class="chart-head">
+        <div class="chart-title">X = time · Y = price</div>
+        <div class="legend">
+          <span><i class="swatch spot"></i> Spot</span>
+          <span><i class="swatch pred"></i> Predicted</span>
+          <span><i class="mark buy"></i> Buy</span>
+          <span><i class="mark sell"></i> Sell</span>
+        </div>
+      </div>
+      <canvas id="price-chart" height="420"></canvas>
+      <p class="note">Hover a point for spot, predicted, and side.</p>
+    </div>
+  </section>
+  <section class="tab" data-tab="signals">
+    <div class="table-wrap"><table id="signals"><thead></thead><tbody></tbody></table></div>
+  </section>
+</div>
+<div class="tip" id="tip"></div>
+<script>
+const REPORT = /*__REPORT__*/null;
+const LANG0 = /*__LANG0__*/'en';
+const $ = (s) => document.querySelector(s);
+const fmt = (n, d=2) => (n == null || Number.isNaN(Number(n))) ? '—' : Number(n).toLocaleString(undefined, { maximumFractionDigits: d, minimumFractionDigits: d });
+const signed = (n) => `${n >= 0 ? '+' : ''}${fmt(n)}`;
+const cls = (n) => n > 0 ? 'pos' : n < 0 ? 'neg' : '';
+
+document.querySelectorAll('.tabs button').forEach((b) => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.tabs button').forEach((x) => x.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach((x) => x.classList.remove('active'));
+    b.classList.add('active');
+    document.querySelector(`.tab[data-tab="${b.dataset.tab}"]`).classList.add('active');
+    // Redraw when chart tab becomes visible (canvas width was 0 while hidden).
+    if (b.dataset.tab === 'chart' || b.dataset.tab === 'summary') requestAnimationFrame(drawAll);
+  });
+});
+
+const M = REPORT.meta || {};
+const S = (REPORT.signals || []).filter((r) => r.side !== 'flat' || r.predicted != null);
+const total = REPORT.total_pnl ?? 0;
+const barLabel = M.bar || (M.bar_ms ? `${Math.round(M.bar_ms/60000)}m` : '');
+$('#title').textContent = barLabel
+  ? `Predicted price vs market (${barLabel}${M.is_selected ? ' · selected' : ''})`
+  : 'Predicted price vs market';
+$('#sub').textContent = `${M.trade_start || ''} → ${M.trade_end || ''} · ${barLabel || 'candle'} · lock rel_err ${(100 * (M.price_model?.rel_err ?? 0)).toFixed(3)}% · ${S.length} signals`;
+const ST = REPORT.strategy || {};
+const oos = ST.oos || {};
+const sel = ST.selected || M.strategy || {};
+const feeNote = (sel.taker_fee_bps != null)
+  ? `taker ${fmt(sel.taker_fee_bps,1)} / maker ${fmt(sel.maker_fee_bps,1)} bps`
+  : '';
+$('#kpis').innerHTML = [
+  ['Bar', barLabel || '—', ''],
+  ['OOS PnL (fees in)', signed(oos.total_pnl ?? total), cls(oos.total_pnl ?? total)],
+  ['OOS fees', fmt(oos.fees ?? 0), ''],
+  ['OOS trades', String(oos.closed_trades ?? 0), ''],
+  ['Win rate', oos.closed_trades ? `${fmt(oos.win_rate ?? 0,1)}%` : '—', ''],
+  ['Leverage', String(sel.leverage ?? '—'), ''],
+  ['Size BTC', fmt(sel.size_btc ?? M.size_btc, 4), ''],
+  ['Fit samples', String(M.fit_pairs ?? 0), ''],
+  ['Return MAE', `${(100 * (M.price_model?.rel_err ?? 0)).toFixed(3)}%`, ''],
+].map(([l,v,c]) => `<div class="kpi"><div class="l">${l}</div><div class="v ${c}">${v}</div></div>`).join('');
+const a = M.price_model?.alphas || [];
+const names = M.feature_names || ['prev_return','range','body','typical_dev'];
+const exitsLab = sel.exits?.label || '';
+const stratBits = [
+  exitsLab ? `Strategy: ${exitsLab}${sel.leverage ? ` · ${sel.leverage}x` : ''}` : '',
+  feeNote,
+].filter(Boolean);
+const eqBits = a.length
+  ? [(M.equation || `(close_t/close_t-1)-1 = ${names.map((n,i) => `${fmt(a[i], 4)}·${n}`).join(' + ')}`)
+    + (M.price_model ? ` · return_mae=${(100*(M.price_model.return_mae ?? M.price_model.rel_err ?? 0)).toFixed(3)}% baseline=${(100*(M.price_model.baseline_rel_err ?? 0)).toFixed(3)}%` : '')]
+  : [];
+$('#eq').textContent = [...stratBits, ...eqBits].join(' · ');
+
+const HZ = M.horizons || [];
+if (HZ.length) {
+  const hh = $('#horizons thead');
+  const hb = $('#horizons tbody');
+  hh.innerHTML = `<tr><th>h</th><th>OOS n</th><th>Price err%</th><th>Baseline%</th><th>Under 1%</th><th>Beats base</th><th>Gate</th></tr>`;
+  hb.innerHTML = HZ.map((r) => `<tr>
+    <td>${r.h}</td>
+    <td>${r.oos_n ?? '—'}</td>
+    <td>${r.oos_price_err == null || Number.isNaN(r.oos_price_err) ? '—' : fmt(100*r.oos_price_err, 3)}</td>
+    <td>${r.oos_baseline_err == null || Number.isNaN(r.oos_baseline_err) ? '—' : fmt(100*r.oos_baseline_err, 3)}</td>
+    <td>${r.under_1pct ? 'yes' : 'no'}</td>
+    <td>${r.beats_baseline ? 'yes' : 'no'}</td>
+    <td>${r.gate_ok ? 'ok' : '—'}</td>
+  </tr>`).join('');
+}
+const PE = M.path_example;
+if (PE && PE.steps && PE.steps.length) {
+  $('#path-card').style.display = '';
+  $('#path-title').textContent = `From last candle ${PE.origin || '?'} (close ${fmt(PE.origin_close, 2)}) → next ${PE.steps.length} candles`;
+  $('#path-note').textContent = 'This is what you want live: after the last known bar, predict +1…+H. Spot is filled only if that future bar already exists on the tape; otherwise spot = n/a.';
+  $('#path-ex thead').innerHTML = `<tr><th>h ahead</th><th>Future bar time</th><th>Predicted</th><th>Actual (if known)</th><th>Err%</th><th>&lt;1%?</th></tr>`;
+  $('#path-ex tbody').innerHTML = PE.steps.map((s) => {
+    const ok = s.err_pct != null && s.err_pct < 1;
+    const spot = s.beyond_tape || s.spot == null ? 'n/a (future)' : fmt(s.spot, 2);
+    return `<tr>
+    <td>+${s.h}</td><td>${s.at||''}</td><td>${fmt(s.predicted,2)}</td><td>${spot}</td>
+    <td>${s.err_pct == null ? '—' : fmt(s.err_pct,3)}</td>
+    <td>${s.err_pct == null ? '—' : (ok ? 'yes' : 'no')}</td>
+  </tr>`;
+  }).join('');
+}
+
+const grid = M.bar_grid || [];
+if (grid.length) {
+  $('#grid-wrap').style.display = '';
+  const gh = $('#bar-grid thead');
+  const gb = $('#bar-grid tbody');
+  gh.innerHTML = `<tr><th>Bar</th><th>Locked</th><th>Fit</th><th>Return MAE</th><th>Price err</th><th>Baseline</th><th>PnL</th><th>Signals</th><th></th></tr>`;
+  gb.innerHTML = grid.map((r) => {
+    const sel = r.bar === M.selected_bar;
+    return `<tr style="${sel ? 'color:var(--accent)' : ''}">
+      <td>${r.bar || ''}</td>
+      <td>${r.locked ? 'yes' : 'no'}</td>
+      <td>${r.fit_pairs ?? '—'}</td>
+      <td>${fmt(100 * (r.return_mae ?? 0), 3)}%</td>
+      <td>${fmt(100 * (r.price_rel_err ?? 0), 3)}%</td>
+      <td>${fmt(100 * (r.baseline_rel_err ?? 0), 3)}%</td>
+      <td class="${cls(r.total_pnl)}">${signed(r.total_pnl || 0)}</td>
+      <td>${r.signals ?? '—'}</td>
+      <td>${sel ? 'SELECTED' : ''}</td>
+    </tr>`;
+  }).join('');
+}
+
+const thead = $('#signals thead');
+const tbody = $('#signals tbody');
+thead.innerHTML = `<tr><th>#</th><th>Time</th><th>Spot</th><th>Ref</th><th>Predicted</th><th>Err%</th><th>Side</th><th>PnL</th><th>Combo</th></tr>`;
+tbody.innerHTML = (REPORT.signals || []).map((r, i) => {
+  const err = (r.rel_err != null) ? (100 * r.rel_err) : (r.spot && r.predicted != null ? 100 * Math.abs(r.predicted - r.spot) / r.spot : null);
+  return `<tr>
+  <td>${i+1}</td><td>${r.at || ''}</td><td>${fmt(r.spot, 2)}</td><td>${fmt(r.ref, 2)}</td><td>${fmt(r.predicted, 2)}</td>
+  <td>${err == null ? '—' : fmt(err, 3)}</td>
+  <td>${r.side || ''}</td><td class="${cls(r.pnl)}">${signed(r.pnl || 0)}</td><td>${r.label || ''}</td>
+</tr>`;
+}).join('');
+
+function parseAt(s) {
+  if (!s) return NaN;
+  // "YYYY-MM-DD HH:MM:SS" UTC from report
+  const t = Date.parse(String(s).replace(' ', 'T') + 'Z');
+  return t;
+}
+
+const POINTS = (REPORT.signals || [])
+  .map((r) => ({
+    t: parseAt(r.at),
+    at: r.at,
+    spot: Number(r.spot),
+    pred: r.predicted == null ? null : Number(r.predicted),
+    side: r.side,
+    pnl: Number(r.pnl || 0),
+    label: r.label || '',
+  }))
+  .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.spot));
+
+function drawChart(canvas) {
+  if (!canvas || !POINTS.length) return;
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = canvas.parentElement.clientWidth || 800;
+  const cssH = Number(canvas.getAttribute('height')) || 380;
+  canvas.style.width = cssW + 'px';
+  canvas.style.height = cssH + 'px';
+  canvas.width = Math.floor(cssW * dpr);
+  canvas.height = Math.floor(cssH * dpr);
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const pad = { l: 64, r: 16, t: 16, b: 36 };
+  const w = cssW - pad.l - pad.r;
+  const h = cssH - pad.t - pad.b;
+  ctx.clearRect(0, 0, cssW, cssH);
+  ctx.fillStyle = '#161618';
+  ctx.fillRect(0, 0, cssW, cssH);
+
+  const times = POINTS.map((p) => p.t);
+  const prices = POINTS.flatMap((p) => [p.spot, p.pred].filter((x) => x != null && Number.isFinite(x)));
+  let t0 = Math.min(...times), t1 = Math.max(...times);
+  let y0 = Math.min(...prices), y1 = Math.max(...prices);
+  if (t1 <= t0) t1 = t0 + 1;
+  const yPad = (y1 - y0) * 0.08 || y0 * 0.002 || 1;
+  y0 -= yPad; y1 += yPad;
+  const xOf = (t) => pad.l + ((t - t0) / (t1 - t0)) * w;
+  const yOf = (v) => pad.t + (1 - (v - y0) / (y1 - y0)) * h;
+
+  // grid
+  ctx.strokeStyle = '#2a2a2e';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.t + (h * i) / 4;
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(pad.l + w, y); ctx.stroke();
+    const val = y1 - ((y1 - y0) * i) / 4;
+    ctx.fillStyle = '#9a9aa2';
+    ctx.font = '11px ui-monospace, monospace';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(fmt(val, 0), pad.l - 8, y);
+  }
+
+  // spot line
+  ctx.strokeStyle = '#e2e8f0';
+  ctx.lineWidth = 1.75;
+  ctx.beginPath();
+  POINTS.forEach((p, i) => {
+    const x = xOf(p.t), y = yOf(p.spot);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // predicted line (skip nulls)
+  ctx.strokeStyle = '#60a5fa';
+  ctx.lineWidth = 1.75;
+  ctx.setLineDash([5, 4]);
+  let started = false;
+  ctx.beginPath();
+  POINTS.forEach((p) => {
+    if (p.pred == null || !Number.isFinite(p.pred)) { started = false; return; }
+    const x = xOf(p.t), y = yOf(p.pred);
+    if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // signal markers
+  POINTS.forEach((p) => {
+    if (p.side !== 'buy' && p.side !== 'sell') return;
+    const x = xOf(p.t);
+    const y = yOf(p.spot);
+    ctx.beginPath();
+    if (p.side === 'buy') {
+      ctx.fillStyle = '#4ade80';
+      ctx.moveTo(x, y - 10);
+      ctx.lineTo(x - 6, y + 2);
+      ctx.lineTo(x + 6, y + 2);
+    } else {
+      ctx.fillStyle = '#f87171';
+      ctx.moveTo(x, y + 10);
+      ctx.lineTo(x - 6, y - 2);
+      ctx.lineTo(x + 6, y - 2);
+    }
+    ctx.closePath();
+    ctx.fill();
+  });
+
+  // x labels
+  ctx.fillStyle = '#9a9aa2';
+  ctx.font = '11px ui-monospace, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const mid = POINTS[Math.floor(POINTS.length / 2)];
+  [POINTS[0], mid, POINTS[POINTS.length - 1]].filter(Boolean).forEach((p) => {
+    ctx.fillText(String(p.at || '').slice(0, 16), xOf(p.t), pad.t + h + 10);
+  });
+
+  canvas._chart = { pad, w, h, t0, t1, y0, y1, xOf, yOf, cssW, cssH };
+}
+
+function nearest(canvas, clientX) {
+  const g = canvas._chart;
+  if (!g || !POINTS.length) return null;
+  const rect = canvas.getBoundingClientRect();
+  const x = clientX - rect.left;
+  let best = null, bestD = Infinity;
+  POINTS.forEach((p) => {
+    const dx = Math.abs(g.xOf(p.t) - x);
+    if (dx < bestD) { bestD = dx; best = p; }
+  });
+  return bestD < 28 ? best : null;
+}
+
+function bindTip(canvas) {
+  const tip = $('#tip');
+  canvas.addEventListener('mousemove', (ev) => {
+    const p = nearest(canvas, ev.clientX);
+    if (!p) { tip.style.display = 'none'; return; }
+    tip.style.display = 'block';
+    tip.style.left = Math.min(ev.clientX + 14, window.innerWidth - 260) + 'px';
+    tip.style.top = (ev.clientY + 14) + 'px';
+    tip.innerHTML = `<b>${p.at || ''}</b><br>
+      Spot ${fmt(p.spot)} · Pred ${fmt(p.pred)}<br>
+      ${p.side || '—'} · PnL <span class="${cls(p.pnl)}">${signed(p.pnl)}</span><br>
+      <span style="color:#9a9aa2">${p.label || ''}</span>`;
+  });
+  canvas.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+}
+
+function drawAll() {
+  drawChart($('#price-chart-summary'));
+  drawChart($('#price-chart'));
+}
+bindTip($('#price-chart-summary'));
+bindTip($('#price-chart'));
+drawAll();
+window.addEventListener('resize', drawAll);
+</script>
+<script>/*__TABLE_SORT__*/</script>
+</body>
+</html>

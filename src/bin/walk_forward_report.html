@@ -6,13 +6,14 @@
 <title>Walk-forward test</title>
 <style>
   :root {
-    --bg: #0b0f17; --panel: #121826; --panel-2: #172033; --border: #24304a;
-    --text: #e6ebf5; --muted: #8b97ad; --accent: #4f8cff;
-    --green: #22c55e; --red: #ef4444; --amber: #f59e0b;
-    --radius: 10px;
+    --bg: #09090b; --panel: #121214; --panel-2: #1a1a1e; --border: #27272a;
+    --text: #fafafa; --muted: #a1a1aa; --accent: #2dd4bf;
+    --green: #4ade80; --red: #fb7185; --amber: #fbbf24;
+    --radius: 12px;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text);
+  body { margin: 0; color: var(--text);
+         background: radial-gradient(900px 420px at 12% -18%, rgba(45,212,191,.10), transparent 55%), var(--bg);
          font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   header { border-bottom: 1px solid var(--border); padding: 14px 24px; display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; }
   header h1 { font-size: 18px; margin: 0; font-weight: 650; }
@@ -37,7 +38,7 @@
   th, td { padding: 7px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--border); }
   th:first-child, td:first-child, td.left, th.left { text-align: left; }
   th { background: var(--panel-2); color: var(--muted); font-weight: 600; font-size: 12px; }
-  tbody tr:hover { background: rgba(79,140,255,.08); }
+  tbody tr:hover { background: rgba(45,212,191,.10); }
   .tag { display: inline-block; padding: 0 7px; border-radius: 999px; font-size: 11px; font-weight: 600; background: rgba(245,158,11,.15); color: var(--amber); margin-left: 6px; }
   .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
   .legend i { display: inline-block; width: 12px; height: 3px; vertical-align: middle; margin-right: 5px; border-radius: 2px; }
@@ -197,5 +198,6 @@ function chart(labels, series) {
 if (REPORT) render(REPORT);
 else document.body.innerHTML = '<main><p>No report data.</p></main>';
 </script>
+<script>/*__TABLE_SORT__*/</script>
 </body>
 </html>

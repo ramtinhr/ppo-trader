@@ -6,13 +6,14 @@
 <title>Walk-forward by trades</title>
 <style>
   :root {
-    --bg: #0b0f17; --panel: #121826; --panel-2: #172033; --border: #24304a;
-    --text: #e6ebf5; --muted: #8b97ad; --accent: #4f8cff;
-    --green: #22c55e; --red: #ef4444; --amber: #f59e0b;
-    --radius: 10px;
+    --bg: #09090b; --panel: #121214; --panel-2: #1a1a1e; --border: #27272a;
+    --text: #fafafa; --muted: #a1a1aa; --accent: #2dd4bf;
+    --green: #4ade80; --red: #fb7185; --amber: #fbbf24;
+    --radius: 12px;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text);
+  body { margin: 0; color: var(--text);
+         background: radial-gradient(900px 420px at 12% -18%, rgba(45,212,191,.10), transparent 55%), var(--bg);
          font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   header { border-bottom: 1px solid var(--border); padding: 14px 24px; display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; }
   header h1 { font-size: 18px; margin: 0; font-weight: 650; }
@@ -31,7 +32,7 @@
   th, td { padding: 7px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--border); }
   th:first-child, td:first-child, td.left, th.left { text-align: left; }
   th { background: var(--panel-2); color: var(--muted); font-weight: 600; font-size: 12px; }
-  tbody tr:hover { background: rgba(79,140,255,.08); }
+  tbody tr:hover { background: rgba(45,212,191,.10); }
   ul.plain { margin: 6px 0; padding-left: 20px; } ul.plain li { margin: 3px 0; }
 </style>
 </head>
@@ -50,7 +51,7 @@
   </div>
   <div class="card">
     <div class="card-head"><h2>Step 1: every window pair on its own</h2>
-      <span class="muted">Each window pair's own walk-forward, from the first pick to the end. Click a column to sort.</span></div>
+      <span class="muted">Each window pair's own walk-forward, from the first pick to the end. Click a column title to sort; Shift+click to sort by more columns.</span></div>
     <div class="card-body table-wrap"><table id="pairs"></table></div>
   </div>
   <div class="card">
@@ -90,13 +91,11 @@ $('#chosen').innerHTML = `<thead><tr><th>#</th><th class="left">Chosen at (UTC)<
     <td class="left">${w.test_from} → ${w.test_to}</td><td class="left">${esc(w.label)}</td><td><b>${money(w.test_net)}</b></td><td>${w.test_wins} / ${w.test_trades}</td><td>${fmt(w.balance)}</td><td>${money(w.buy_and_hold)}</td><td>${w.eligible}</td></tr>`).join('')}</tbody>`;
 
 const PAIRS = R.window_pairs;
-let sortKey = 'total', sortDir = -1;
 const COLS = [['train_trades', 'Training (N)'], ['test_trades', 'Test (M)'], ['total', 'Total after fees'], ['windows', 'Test windows'], ['positive', 'Profitable windows'], ['trades', 'Trades'], ['until', 'Last trade (UTC)'], ['stop_reason', 'Stopped because']];
 function drawPairs() {
-  const rows = [...PAIRS].sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : a[sortKey] < b[sortKey] ? -1 : 0) * sortDir);
-  $('#pairs').innerHTML = `<thead><tr>${COLS.map(([k, l]) => `<th data-k="${k}" style="cursor:pointer" class="${k === 'until' || k === 'stop_reason' ? 'left' : ''}">${l}${k === sortKey ? (sortDir > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('')}</tr></thead><tbody>${
+  const rows = [...PAIRS].sort((a, b) => b.total - a.total);
+  $('#pairs').innerHTML = `<thead><tr>${COLS.map(([k, l]) => `<th class="${k === 'until' || k === 'stop_reason' ? 'left' : ''}">${l}</th>`).join('')}</tr></thead><tbody>${
     rows.map((p) => `<tr><td>${p.train_trades}</td><td>${p.test_trades}</td><td><b>${money(p.total)}</b></td><td>${p.windows}</td><td>${p.positive} of ${p.windows}</td><td>${p.trades}</td><td class="left">${p.until}</td><td class="left muted">${esc(p.stop_reason)}</td></tr>`).join('')}</tbody>`;
-  document.querySelectorAll('#pairs th').forEach((th) => th.addEventListener('click', () => { const k = th.dataset.k; sortDir = k === sortKey ? -sortDir : -1; sortKey = k; drawPairs(); }));
 }
 drawPairs();
 
@@ -105,5 +104,6 @@ $('#verify').innerHTML = R.verify.length
     R.verify.map((v) => `<tr><td class="left">${esc(v.pair)}</td><td>${v.fills}</td><td class="${v.differ ? 'neg' : 'pos'}">${v.differ}</td><td>${fmt(v.seconds, 0)} s</td><td class="${v.ok ? 'pos' : 'neg'}">${v.ok ? 'match' : 'MISMATCH'}</td></tr>`).join('')}</tbody>`
   : '<tbody><tr><td class="muted">Skipped (--verify 0).</td></tr></tbody>';
 </script>
+<script>/*__TABLE_SORT__*/</script>
 </body>
 </html>

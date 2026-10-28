@@ -91,7 +91,13 @@ mod tests {
     }
 
     fn close(signals: &mut RsiCrossSignals, close: f64) -> Option<Signal> {
-        signals.on_bar(&Candle { time_ms: 0, open: close, high: close, low: close, close })
+        signals.on_bar(&Candle {
+            time_ms: 0,
+            open: close,
+            high: close,
+            low: close,
+            close,
+        })
     }
 
     #[test]

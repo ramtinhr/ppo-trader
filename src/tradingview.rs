@@ -22,7 +22,10 @@ const SERIES: &str = "sds_1";
 /// token the chart feed accepts.
 pub fn auth_token(sessionid: &str, sessionid_sign: &str) -> Result<String> {
     let page = ureq::get("https://www.tradingview.com/")
-        .header("Cookie", &format!("sessionid={sessionid}; sessionid_sign={sessionid_sign}"))
+        .header(
+            "Cookie",
+            &format!("sessionid={sessionid}; sessionid_sign={sessionid_sign}"),
+        )
         .header("User-Agent", "Mozilla/5.0")
         .call()
         .context("open tradingview.com")?
@@ -35,7 +38,10 @@ pub fn auth_token(sessionid: &str, sessionid_sign: &str) -> Result<String> {
         .context("TradingView did not accept the login cookies (no auth_token on the page); copy fresh sessionid and sessionid_sign")?
         + "\"auth_token\":\"".len();
     let end = page[start..].find('"').context("unterminated auth_token")? + start;
-    anyhow::ensure!(end > start, "TradingView returned an empty auth_token; the login cookies are not valid");
+    anyhow::ensure!(
+        end > start,
+        "TradingView returned an empty auth_token; the login cookies are not valid"
+    );
     Ok(page[start..end].to_string())
 }
 
@@ -51,18 +57,26 @@ pub struct PineScript {
 impl PineScript {
     /// Downloads a built-in script such as `STD;RSI` or `STD;RSI%1Strategy`.
     pub fn fetch(id: &str) -> Result<Self> {
-        let url = format!("{PINE_URL}/{}/last", id.replace('%', "%25").replace(';', "%3B"));
+        let url = format!(
+            "{PINE_URL}/{}/last",
+            id.replace('%', "%25").replace(';', "%3B")
+        );
         let reply: Value = ureq::get(&url)
             .call()
             .with_context(|| format!("download TradingView script {id}"))?
             .body_mut()
             .read_json()?;
         let result = &reply["result"];
-        let il = result["ilTemplate"].as_str().context("script has no ilTemplate")?;
+        let il = result["ilTemplate"]
+            .as_str()
+            .context("script has no ilTemplate")?;
         let meta = &result["metaInfo"];
         Ok(Self {
             id: id.to_string(),
-            version: meta["pine"]["version"].as_str().unwrap_or("last").to_string(),
+            version: meta["pine"]["version"]
+                .as_str()
+                .unwrap_or("last")
+                .to_string(),
             il: il.to_string(),
             inputs: meta["inputs"].as_array().cloned().unwrap_or_default(),
         })
@@ -134,12 +148,15 @@ impl ChartSession {
         // Several crates enable both rustls crypto backends, so one must be chosen explicitly.
         let _ = rustls::crypto::ring::default_provider().install_default();
         let mut request = SOCKET_URL.into_client_request()?;
-        request
-            .headers_mut()
-            .insert("Origin", HeaderValue::from_static("https://www.tradingview.com"));
+        request.headers_mut().insert(
+            "Origin",
+            HeaderValue::from_static("https://www.tradingview.com"),
+        );
         let (socket, _) = tungstenite::connect(request).context("connect to TradingView")?;
         if let MaybeTlsStream::Rustls(stream) = socket.get_ref() {
-            stream.get_ref().set_read_timeout(Some(Duration::from_secs(60)))?;
+            stream
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_secs(60)))?;
         }
         let mut session = Self {
             socket,
@@ -149,7 +166,10 @@ impl ChartSession {
         session.send("set_auth_token", json!([token]))?;
         session.send("chart_create_session", json!([CHART, ""]))?;
         let symbol_spec = json!({ "symbol": symbol, "adjustment": "splits" }).to_string();
-        session.send("resolve_symbol", json!([CHART, "sds_sym_1", format!("={symbol_spec}")]))?;
+        session.send(
+            "resolve_symbol",
+            json!([CHART, "sds_sym_1", format!("={symbol_spec}")]),
+        )?;
         session.send(
             "create_series",
             json!([CHART, SERIES, "s1", "sds_sym_1", timeframe, bar_count, ""]),
@@ -172,7 +192,14 @@ impl ChartSession {
         let settings = script.settings(overrides)?;
         self.send(
             "create_study",
-            json!([CHART, study_id, "st1", SERIES, "Script@tv-scripting-101!", settings]),
+            json!([
+                CHART,
+                study_id,
+                "st1",
+                SERIES,
+                "Script@tv-scripting-101!",
+                settings
+            ]),
         )?;
         self.wait_for("study_completed", Some(study_id))?;
         Ok(self.studies.remove(study_id).unwrap_or_default())
@@ -299,7 +326,10 @@ fn base64_decode(data: &str) -> Result<Vec<u8>> {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = Vec::with_capacity(data.len() * 3 / 4);
     let (mut buffer, mut bits) = (0u32, 0u32);
-    for byte in data.bytes().filter(|b| !b.is_ascii_whitespace() && *b != b'=') {
+    for byte in data
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace() && *b != b'=')
+    {
         let value = ALPHABET
             .iter()
             .position(|&a| a == byte)
@@ -333,6 +363,9 @@ mod tests {
     #[test]
     fn inflates_strategy_report() {
         // zlib-compressed `{"report":1}`, base64 without padding.
-        assert_eq!(inflate_base64("eJyrVipKLcgvKlGyMqwFABzVBEQ").unwrap(), json!({"report": 1}));
+        assert_eq!(
+            inflate_base64("eJyrVipKLcgvKlGyMqwFABzVBEQ").unwrap(),
+            json!({"report": 1})
+        );
     }
 }
