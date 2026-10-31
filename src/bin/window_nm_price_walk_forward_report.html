@@ -190,11 +190,11 @@ $('#eq').textContent = [
   ...eqBits,
 ].filter(Boolean).join(' · ');
 
-$('#trade-note').innerHTML = `Each direction signal enters with the best <b>TP/SL/lev</b> for that bar on the <b>predicted</b> path (live-safe). <b>Realized</b> = what actually happened. <b>Oracle</b> = if we had peeked at future candles (comparison only — not used to trade). Forecast candles (${S.length}) are not trades.`;
+$('#trade-note').innerHTML = `Report mode: each direction signal picks the <b>best TP/SL/lev</b> on that bar’s <b>actual</b> future path (oracle / peek-ahead). Skip if no profitable combo. Forecast candles (${S.length}) are not trades.`;
 
 $('#trades-intro').textContent = trades.length
-  ? `${trades.length} trades · PnL ${signed(ST.total_pnl ?? total)} · columns after Realized/Running are just the running total; Oracle is a what-if peek`
-  : 'No strategy trades (no direction signals in OOS, or strategy was off).';
+  ? `${trades.length} trades · PnL ${signed(ST.total_pnl ?? total)} · exits = max PnL on actuals`
+  : 'No strategy trades (no direction signals in OOS, or no profitable exit combo).';
 
 const th = $('#trades thead');
 const tb = $('#trades tbody');
@@ -209,7 +209,7 @@ th.innerHTML = `<tr>
   <th>Closed</th>
   <th>Profit</th>
   <th>Running</th>
-  <th class="oracle-col">Oracle peek <span class="pill">not used</span></th>
+  <th class="oracle-col">Best on actuals <span class="pill">used</span></th>
 </tr>`;
 tb.innerHTML = trades.map((t, i) => `<tr>
   <td class="num">${i+1}</td>

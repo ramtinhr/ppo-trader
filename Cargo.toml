@@ -28,3 +28,12 @@ zip = { version = "6", default-features = false, features = ["deflate"] }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Fast iteration (price strategy tweaks): ~5–15s rebuilds instead of ~45s LTO.
+#   cargo build --profile relfast --bin window_nm_walk_forward
+#   ./target/relfast/window_nm_walk_forward --path price ...
+[profile.relfast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true

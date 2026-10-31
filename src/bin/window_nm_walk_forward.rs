@@ -3,8 +3,9 @@
 use std::{
     cmp::Ordering,
     fs::{self, File},
+    io::{Read, Write},
     os::unix::fs::FileExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering as AtomicOrdering},
@@ -111,15 +112,18 @@ Usage: cargo run --release --bin window_nm_walk_forward -- [options]
   --path score|price|both     Which pipeline to run (default: score).
                               score = RSI budget-10 walk-forward (nm_walk_forward*).
                               price = candle OHLC linear return model; OOS buy/sell (nm_price_walk_forward*).
+                                      Fast: skips tick tape + finalists; caches 1m candles under scan/.cache/.
                               both  = run both, separate reports.
+  Build tip: cargo build --profile relfast --bin window_nm_walk_forward
+            (much faster rebuilds than --release while iterating on price exits)
   --price-bars <list>         Candle sizes for the price path grid (default: 5m,15m,1h,4h).
                               Each bar is fit separately; best locked becomes nm_price_walk_forward.*.
   --price-horizon <n|auto>    Candles ahead to forecast (default: auto). One OLS per horizon h.
                               auto = grow while OOS mean miss stays under --max-rel-err (cap 500).
                               Also reports forward-until-1% vs OKX (~162-style).
-  --price-strategy <0|1>      Per-trade TP/SL on predicted path (default: 0 = off).
-  --price-stops <list|range>  Stop % grid for single TP=SL (default: 1-10/1). TP = stop unless a
-                              ladder profile scores better on that trade's predicted path.
+  --price-strategy <0|1>      Per-trade TP/SL/lev on actual future path (report/oracle; default: 0).
+  --price-stops <list|range>  Stop % grid for single TP=SL (default: 0.5-5/0.5). TP = stop unless a
+                              ladder profile scores better on that trade's actual path.
   --price-risk <list>         % of balance risked if stop hits (default: 0.25,0.5,1,2,3,5).
   --price-leverage <list>     Max leverage cap for risk-derived size (default: 1,2,3,5,8,10).
   --html-only                 Rebuild HTML reports from existing nm_walk_forward*.json (no rescan)
@@ -152,8 +156,10 @@ const PRICE_SIGNAL_CONFIRM_BARS: usize = 4;
 const PRICE_MAX_BREAKEVEN_WIN: f64 = 0.75;
 /// Cap stop%×leverage (balance risk if SL hits). Stops 10x blow-ups on flat paths.
 const PRICE_MAX_IMPLIED_RISK_PCT: f64 = 5.0;
-/// Scale |h=1 return| → path span % for exit search (flat OLS paths need shape).
-const PRICE_PATH_SPAN_FROM_RHAT: f64 = 20.0;
+/// Lookback bars for per-signal range → TP/SL distance.
+const PRICE_RANGE_LOOKBACK: usize = 32;
+/// TP/SL target ≈ this fraction of the recent high-low window.
+const PRICE_RANGE_STOP_FRAC: f64 = 0.5;
 /// Combinations shown per window in the report.
 const SHOWN: usize = 20;
 /// Minimum IS (training) profit in USDT required before a pick/choice is traded.
@@ -243,7 +249,7 @@ fn parse_args() -> Result<Args> {
         price_horizon: PRICE_HORIZON_AUTO_CAP,
         price_horizon_auto: true,
         price_strategy: false,
-        price_stops: parse_range("1-10/1")?,
+        price_stops: parse_range("0.5-5/0.5")?,
         price_risk: vec![0.25, 0.5, 1.0, 2.0, 3.0, 5.0],
         price_leverage: vec![1, 2, 3, 5, 8, 10],
     };
@@ -1591,6 +1597,10 @@ impl Market1m<'_> {
     /// Price of the last OKX trade at or before `at`.
     fn price_at(&self, at: i64) -> f64 {
         let bar = self.minutes.partition_point(|c| c.time_ms <= at).max(1) - 1;
+        // Candle-only stub tape (price path fast load) has empty range trees.
+        if self.tape.highs_empty() {
+            return self.minutes.get(bar).map(|c| c.close).unwrap_or(0.0);
+        }
         let tape = self.tape;
         let (mut lo, mut hi) = (
             tape.bar_start[bar] as usize,
@@ -2344,7 +2354,7 @@ fn run_one_price_bar(
                 "fixed --price-horizon"
             },
             "signal_rule": format!(
-                "debounced dir from h=1 return ({PRICE_SIGNAL_CONFIRM_BARS} bars); per-trade TP/SL/lev on predicted path t+1..t+{horizon_n}; oracle peeks actuals for report only"
+                "debounced dir from h=1 return ({PRICE_SIGNAL_CONFIRM_BARS} bars); per-trade TP/SL/lev = max PnL on actual closes t+1..t+{horizon_n} (report/oracle pick)"
             ),
             "lookback_days": lookback_days,
             "max_rel_err": args.max_rel_err,
@@ -2943,39 +2953,37 @@ fn shaped_predicted_path(raw: &[f64], entry: f64, long: bool, span_pct: f64) -> 
         .collect()
 }
 
+/// Recent window high-low % — varies by regime so each signal can get a different TP/SL.
+fn recent_window_range_pct(candles: &[Candle], i: usize, entry: f64) -> f64 {
+    if !(entry > 0.0) || i < 2 {
+        return 1.0;
+    }
+    let lo = i.saturating_sub(PRICE_RANGE_LOOKBACK);
+    let mut hi = f64::NEG_INFINITY;
+    let mut lw = f64::INFINITY;
+    for c in &candles[lo..i] {
+        if c.high.is_finite() {
+            hi = hi.max(c.high);
+        }
+        if c.low.is_finite() {
+            lw = lw.min(c.low);
+        }
+    }
+    if !(hi > lw) {
+        return 1.0;
+    }
+    (hi - lw) / entry * 100.0
+}
+
 fn path_span_pct_for_signal(
-    raw: &[f64],
+    candles: &[Candle],
+    i: usize,
     entry: f64,
-    long: bool,
-    rhat: f64,
     stop_lo: f64,
     stop_hi: f64,
 ) -> f64 {
-    let max_fav = raw
-        .iter()
-        .map(|&px| {
-            if long {
-                (px - entry) / entry
-            } else {
-                (entry - px) / entry
-            }
-        })
-        .fold(0.0_f64, f64::max)
-        * 100.0;
-    let from_rhat = rhat.abs() * 100.0 * PRICE_PATH_SPAN_FROM_RHAT;
-    max_fav
-        .max(from_rhat)
-        .max(stop_lo)
-        .min(stop_hi)
-}
-
-fn exit_reason_rank(reason: &str) -> i32 {
-    match reason {
-        "tp" | "ladder" => 2,
-        "timeout" => 1,
-        "stop" => 0,
-        _ => 0,
-    }
+    let range = recent_window_range_pct(candles, i, entry);
+    (range * PRICE_RANGE_STOP_FRAC).max(stop_lo).min(stop_hi)
 }
 
 fn actual_closes(candles: &[Candle], entry_bar: usize, h_max: usize) -> Vec<f64> {
@@ -3020,7 +3028,8 @@ struct PathPick {
     liquid_dist: f64,
 }
 
-/// At each OOS signal: pick TP/SL/ladder/risk on the **predicted** path only; oracle peeks actuals.
+/// At each OOS signal: pick TP/SL/ladder/lev that maximizes PnL on the **actual** future path
+/// (report / oracle mode — peeks ahead; not live-safe).
 fn run_price_strategy_per_trade(
     args: &Args,
     mk: &Market1m<'_>,
@@ -3070,10 +3079,8 @@ fn run_price_strategy_per_trade(
         "{label}: all stops failed fee floor"
     );
 
-    let stop_lo = usable_stops.iter().copied().fold(f64::INFINITY, f64::min);
-    let stop_hi = usable_stops.iter().copied().fold(0.0_f64, f64::max);
     println!(
-        "  {label} per-trade exits: H={h_max} · stops={} · lev={:?} · max_risk={max_risk_pct}% · debounce={PRICE_SIGNAL_CONFIRM_BARS} · signals={} · OOS {}..{}",
+        "  {label} per-trade exits (oracle): H={h_max} · stops={} · lev={:?} · max_risk={max_risk_pct}% · debounce={PRICE_SIGNAL_CONFIRM_BARS} · signals={} · OOS {}..{}",
         usable_stops.len(),
         args.price_leverage,
         signals.len(),
@@ -3111,22 +3118,12 @@ fn run_price_strategy_per_trade(
         if raw_path.is_empty() {
             continue;
         }
-        let rhat = h1.predict_return(&feat);
-        let span_pct = path_span_pct_for_signal(&raw_path, entry, long, rhat, stop_lo, stop_hi);
-        // Search exits on a shaped path so different TP/SL actually compete (raw OLS path is ~flat).
-        let pred_path = shaped_predicted_path(&raw_path, entry, long, span_pct);
         let act_path = actual_closes(candles, i, h_max);
-
-        // TP/SL distance for this bar ≈ how far this signal's path is expected to run.
-        let target_stop = usable_stops
-            .iter()
-            .copied()
-            .filter(|&s| s <= span_pct + 1e-9)
-            .fold(stop_lo, f64::max);
+        if act_path.is_empty() {
+            continue;
+        }
 
         let mut best: Option<PathPick> = None;
-        let mut oracle_best_pnl = f64::NAN;
-        let mut oracle_label = Value::Null;
         for &stop in &usable_stops {
             for exits in exit_candidates_for_stop(stop) {
                 for &lev_u in &args.price_leverage {
@@ -3147,22 +3144,10 @@ fn run_price_strategy_per_trade(
                         continue;
                     }
                     let sim = simulate_exits_on_path(
-                        long, entry, &exits, steps, &pred_path, taker, maker,
+                        long, entry, &exits, steps, &act_path, taker, maker,
                     );
-                    if !act_path.is_empty() {
-                        let o = simulate_exits_on_path(
-                            long, entry, &exits, steps, &act_path, taker, maker,
-                        );
-                        if !oracle_best_pnl.is_finite() || o.pnl > oracle_best_pnl {
-                            oracle_best_pnl = o.pnl;
-                            oracle_label = json!(exits.label());
-                        }
-                    }
-                    // Live pick: only stops at this signal's target distance; must take profit on path.
-                    if (exits.stop_pct - target_stop).abs() > 1e-9 {
-                        continue;
-                    }
-                    if sim.pnl <= 0.0 || exit_reason_rank(sim.reason) < 2 {
+                    // Report pick: max realized PnL on actuals (must be profitable).
+                    if sim.pnl <= 0.0 {
                         continue;
                     }
                     let path_r = sim.pnl / (balance * risk_pct / 100.0).max(1e-9);
@@ -3170,7 +3155,6 @@ fn run_price_strategy_per_trade(
                     let better = match &best {
                         None => true,
                         Some(b) => {
-                            // Max path profit at this TP/SL, then R, then safer liquid.
                             sim.pnl > b.path_pnl + 1e-9
                                 || ((sim.pnl - b.path_pnl).abs() <= 1e-9 && path_r > b.path_r + 1e-9)
                                 || ((sim.pnl - b.path_pnl).abs() <= 1e-9
@@ -3199,31 +3183,25 @@ fn run_price_strategy_per_trade(
         if pick.steps <= 0 {
             continue;
         }
-        let path_sim =
-            simulate_exits_on_path(long, entry, &pick.exits, pick.steps, &pred_path, taker, maker);
-        let real_sim = if act_path.is_empty() {
-            PathSim {
-                pnl: 0.0,
-                fees: 0.0,
-                reason: "no_actuals",
-                exit_h: 0,
-                fills: vec![],
-            }
-        } else {
-            simulate_exits_on_path(long, entry, &pick.exits, pick.steps, &act_path, taker, maker)
+        let real_sim =
+            simulate_exits_on_path(long, entry, &pick.exits, pick.steps, &act_path, taker, maker);
+        let path_sim = {
+            let span_pct = {
+                let stop_lo = usable_stops.iter().copied().fold(f64::INFINITY, f64::min);
+                let stop_hi = usable_stops.iter().copied().fold(0.0_f64, f64::max);
+                path_span_pct_for_signal(candles, i, entry, stop_lo, stop_hi)
+            };
+            let pred_path = shaped_predicted_path(&raw_path, entry, long, span_pct);
+            simulate_exits_on_path(long, entry, &pick.exits, pick.steps, &pred_path, taker, maker)
         };
 
-        let pnl = if act_path.is_empty() {
-            path_sim.pnl
-        } else {
-            real_sim.pnl
-        };
+        let pnl = real_sim.pnl;
         balance += pnl;
         running += pnl;
         if pnl > 0.0 {
             wins += 1;
         }
-        free_after = i + real_sim.exit_h.max(path_sim.exit_h).max(1);
+        free_after = i + real_sim.exit_h.max(1);
 
         trades_json.push(json!({
             "side": if long { "buy" } else { "sell" },
@@ -3241,19 +3219,16 @@ fn run_price_strategy_per_trade(
             "path_reason": path_sim.reason,
             "path_exit_h": path_sim.exit_h,
             "pnl": round2(pnl),
-            "reason": if act_path.is_empty() { path_sim.reason } else { real_sim.reason },
-            "exit_h": if act_path.is_empty() { path_sim.exit_h } else { real_sim.exit_h },
-            "fees": round2(if act_path.is_empty() { path_sim.fees } else { real_sim.fees }),
+            "reason": real_sim.reason,
+            "exit_h": real_sim.exit_h,
+            "fees": round2(real_sim.fees),
             "running_pnl": round2(running),
             "balance": round2(balance),
-            "oracle_pnl": if oracle_best_pnl.is_finite() {
-                Value::from(round2(oracle_best_pnl))
-            } else {
-                Value::Null
-            },
-            "oracle_exits": oracle_label,
-            "oracle_note": "best combo on actual future closes — not used to trade",
-            "fills": (if act_path.is_empty() { &path_sim.fills } else { &real_sim.fills })
+            "oracle_pnl": round2(pnl),
+            "oracle_exits": pick.exits.label(),
+            "oracle_note": "traded combo = best TP/SL/lev on actual future closes (report mode)",
+            "fills": real_sim
+                .fills
                 .iter()
                 .map(|f| json!({
                     "kind": f.kind,
@@ -3273,7 +3248,7 @@ fn run_price_strategy_per_trade(
 
     Ok(json!({
         "selection_rule": format!(
-            "per signal: path span from |rhat|; TP/SL≈that span; among ladders×lev at that stop pick max path PnL (TP hit, liquid-safe, stop×lev≤{max_risk_pct}%); oracle peeks actuals only"
+            "per signal: grid stop×ladder×lev (liquid-safe, stop×lev≤{max_risk_pct}%); pick max PnL on actual future closes; skip if no profitable combo"
         ),
         "summary": {
             "exits_mode": "per_trade",
@@ -3305,6 +3280,190 @@ fn run_price_strategy_per_trade(
     }))
 }
 
+/// Disk cache of 1m candles so `--path price` does not re-read multi-GB archives every tweak.
+fn minutes_cache_path(scan: &Path, from_ms: i64, to_ms: i64) -> PathBuf {
+    scan.join(format!(".cache/minutes_1m_{from_ms}_{to_ms}.bin"))
+}
+
+fn write_minutes_cache(path: &Path, from_ms: i64, to_ms: i64, candles: &[Candle]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut f = File::create(path)?;
+    f.write_all(b"M1C1")?;
+    f.write_all(&from_ms.to_le_bytes())?;
+    f.write_all(&to_ms.to_le_bytes())?;
+    f.write_all(&(candles.len() as u64).to_le_bytes())?;
+    for c in candles {
+        f.write_all(&c.time_ms.to_le_bytes())?;
+        f.write_all(&c.open.to_bits().to_le_bytes())?;
+        f.write_all(&c.high.to_bits().to_le_bytes())?;
+        f.write_all(&c.low.to_bits().to_le_bytes())?;
+        f.write_all(&c.close.to_bits().to_le_bytes())?;
+    }
+    Ok(())
+}
+
+fn read_minutes_cache(path: &Path, from_ms: i64, to_ms: i64) -> Result<Option<Vec<Candle>>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let mut f = File::open(path)?;
+    let mut mag = [0u8; 4];
+    f.read_exact(&mut mag)?;
+    if &mag != b"M1C1" {
+        return Ok(None);
+    }
+    let mut buf = [0u8; 8];
+    f.read_exact(&mut buf)?;
+    let cached_from = i64::from_le_bytes(buf);
+    f.read_exact(&mut buf)?;
+    let cached_to = i64::from_le_bytes(buf);
+    if cached_from != from_ms || cached_to != to_ms {
+        return Ok(None);
+    }
+    f.read_exact(&mut buf)?;
+    let n = u64::from_le_bytes(buf) as usize;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        f.read_exact(&mut buf)?;
+        let time_ms = i64::from_le_bytes(buf);
+        f.read_exact(&mut buf)?;
+        let open = f64::from_bits(u64::from_le_bytes(buf));
+        f.read_exact(&mut buf)?;
+        let high = f64::from_bits(u64::from_le_bytes(buf));
+        f.read_exact(&mut buf)?;
+        let low = f64::from_bits(u64::from_le_bytes(buf));
+        f.read_exact(&mut buf)?;
+        let close = f64::from_bits(u64::from_le_bytes(buf));
+        out.push(Candle {
+            time_ms,
+            open,
+            high,
+            low,
+            close,
+        });
+    }
+    Ok(Some(out))
+}
+
+fn load_minutes_cached(
+    data: &Path,
+    scan: &Path,
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<Vec<Candle>> {
+    let cache = minutes_cache_path(scan, from_ms, to_ms);
+    if let Some(c) = read_minutes_cache(&cache, from_ms, to_ms)? {
+        println!(
+            "Loaded {} 1m candles from cache {} ({:.1} MB)",
+            c.len(),
+            cache.display(),
+            cache.metadata()?.len() as f64 / 1e6
+        );
+        return Ok(c);
+    }
+    let t0 = Instant::now();
+    println!(
+        "Building 1m candles from archives {} → {} (will cache for next runs)…",
+        utc(from_ms),
+        utc(to_ms)
+    );
+    let c = okx_history::candles(data, 60_000, from_ms, to_ms)?;
+    write_minutes_cache(&cache, from_ms, to_ms, &c)?;
+    println!(
+        "  {} candles in {:.0}s → wrote {}",
+        c.len(),
+        t0.elapsed().as_secs_f64(),
+        cache.display()
+    );
+    Ok(c)
+}
+
+/// Price-only entry: skip finalists / full tick tape. Uses candle cache.
+fn run_price_only(args: &Args, config: &AppConfig, meta: &Meta) -> Result<()> {
+    let lookback_days = args.lookback_days;
+    let lookback_ms = lookback_days as i64 * 86_400_000;
+    let wanted_from_ms = ms(meta.start).saturating_sub(lookback_ms);
+    let tape_from_ms = wanted_from_ms.max(ms(meta.start));
+    let scan_end_ms = ms_day(meta.end);
+    let train_cutoff_ms =
+        scan_end_ms.saturating_sub(args.reserve_trade_days as i64 * 86_400_000);
+    let first_pick_ms = parse_window_ms(&meta.windows[1].start)?;
+    ensure!(
+        train_cutoff_ms > first_pick_ms,
+        "--reserve-trade-days leaves no TRAIN window before TRADE"
+    );
+    let mut train_ws: Vec<usize> = Vec::new();
+    for w in 1..meta.windows.len() {
+        let end = parse_window_ms(&meta.windows[w].end)?;
+        if end > train_cutoff_ms {
+            break;
+        }
+        train_ws.push(w);
+    }
+    ensure!(!train_ws.is_empty(), "no TRAIN windows before TRADE cutoff");
+    let trade_floor_ms = args.first_choice.map(ms_day);
+    let price_trade_start_ms = match trade_floor_ms {
+        Some(floor) => train_cutoff_ms.max(floor),
+        None => train_cutoff_ms,
+    };
+    let price_trade_end_ms = if args.trade_days == 0 {
+        scan_end_ms
+    } else {
+        (price_trade_start_ms + args.trade_days as i64 * 86_400_000).min(scan_end_ms)
+    };
+
+    println!(
+        "PRICE-ONLY fast path (no tick tape / no finalists). Cache under {}/.cache/",
+        args.scan.display()
+    );
+    let minutes = load_minutes_cached(&args.data, &args.scan, tape_from_ms, ms(meta.end))?;
+    let tape = Tape::from_one_minute_candles(&minutes);
+    let space = Space {
+        timeframes: meta.timeframes.clone(),
+        lengths: meta.lengths.clone(),
+        pairs: (0..meta.lengths.len())
+            .flat_map(|i| (i + 1..meta.lengths.len()).map(move |j| (i, j)))
+            .collect(),
+        grid: Grid {
+            tp: meta.tp.clone(),
+            sl: meta.sl.clone(),
+            lev: meta.leverage.clone(),
+        },
+        survivor_groups: meta.survivor_groups.clone(),
+        exit_profiles: meta.exit_profiles.clone(),
+    };
+    let frames: Vec<Frame> = space
+        .timeframes
+        .iter()
+        .map(|&m| Frame::from_minutes(&minutes, &tape.bar_start, m))
+        .collect();
+    let costs = Costs {
+        steps: (meta.size_btc * 10_000.0).round() as i64,
+        taker: config.venues.okx.taker_fee_bps / 10_000.0,
+        maker: config.venues.okx.maker_fee_bps / 10_000.0,
+        balance: REPLAY_BALANCE,
+    };
+    let mk = Market1m {
+        space: &space,
+        tape: &tape,
+        minutes: &minutes,
+        frames: &frames,
+        costs,
+    };
+    run_price_path(
+        args,
+        meta,
+        &mk,
+        &train_ws,
+        train_cutoff_ms,
+        price_trade_start_ms,
+        price_trade_end_ms,
+        lookback_days,
+    )
+}
+
 fn main() -> Result<()> {
     let args = parse_args()?;
     if args.html_only {
@@ -3325,6 +3484,9 @@ fn main() -> Result<()> {
         "window_scan used other fees than {}",
         args.config.display()
     );
+    if args.path == PathMode::Price {
+        return run_price_only(&args, &config, &meta);
+    }
     let pairs: Vec<(usize, usize)> = (0..meta.lengths.len())
         .flat_map(|i| (i + 1..meta.lengths.len()).map(move |j| (i, j)))
         .collect();
@@ -4584,3 +4746,4 @@ mod tests {
         );
     }
 }
+

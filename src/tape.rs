@@ -34,6 +34,20 @@ pub struct Tape {
 }
 
 impl Tape {
+    /// Stub tape aligned 1:1 with 1-minute candles (no tick path). Enough for price-path
+    /// frame aggregation; do **not** use for fill simulation / `first_hit`.
+    pub fn from_one_minute_candles(candles: &[Candle]) -> Tape {
+        let n = candles.len();
+        Tape {
+            price: vec![0; n.max(1)],
+            offset_ms: vec![0; n.max(1)],
+            bar_start: (0..n as u32).collect(),
+            bar_time: candles.iter().map(|c| c.time_ms).collect(),
+            highs: Vec::new(),
+            lows: Vec::new(),
+        }
+    }
+
     /// Candles of `bar_ms` and the tape of every trade from `from_ms` to `to_ms` (exclusive),
     /// read from the verified archives in `dir`. `progress` gets (archives read, archives).
     pub fn load(
@@ -208,6 +222,11 @@ impl Tape {
     /// Bar holding step `step`.
     pub fn bar_of(&self, step: usize) -> usize {
         self.bar_start.partition_point(|&s| s as usize <= step) - 1
+    }
+
+    /// True for [`Tape::from_one_minute_candles`] stubs (no tick index).
+    pub fn highs_empty(&self) -> bool {
+        self.highs.is_empty()
     }
 }
 
