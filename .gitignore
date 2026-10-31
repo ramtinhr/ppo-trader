@@ -3,6 +3,7 @@
 .env
 *.pem
 *.key
+/dt
 
 # local walk-forward candle caches
 **/.cache/

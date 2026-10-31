@@ -1,0 +1,1051 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Walk-forward</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Sora:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #fafafa;
+    --ink-soft: #d4d4d8;
+    --muted: #a1a1aa;
+    --faint: #71717a;
+    --line: #27272a;
+    --line-strong: #3f3f46;
+    --paper: #09090b;
+    --panel: #121214;
+    --panel-2: #1a1a1e;
+    --accent: #2dd4bf;
+    --accent-soft: rgba(45, 212, 191, 0.14);
+    --pos: #4ade80;
+    --neg: #fb7185;
+    --warn: #fbbf24;
+    --lev: #fcd34d;
+    --shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 18px 40px rgba(0,0,0,0.45);
+    --radius: 14px;
+    --pad: 20px;
+    --mono: "IBM Plex Mono", ui-monospace, monospace;
+    --sans: "Sora", system-ui, sans-serif;
+  }
+  html[lang="fa"] { --sans: "Vazirmatn", "Sora", system-ui, sans-serif; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    color: var(--ink);
+    background:
+      radial-gradient(900px 420px at 12% -18%, rgba(45, 212, 191, 0.12), transparent 55%),
+      radial-gradient(700px 380px at 92% 0%, rgba(250, 250, 250, 0.04), transparent 50%),
+      var(--paper);
+    font: 14px/1.5 var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  html[lang="fa"] body { line-height: 1.65; }
+  .shell {
+    max-width: 1480px;
+    margin-inline: auto;
+    padding: 28px var(--pad) 64px;
+  }
+  .top {
+    display: flex; flex-wrap: wrap; align-items: flex-end;
+    justify-content: space-between; gap: 16px 24px;
+    margin-bottom: 18px;
+  }
+  .brand { display: flex; flex-direction: column; gap: 6px; min-width: min(100%, 420px); }
+  .eyebrow {
+    margin: 0; font-size: 11px; font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent);
+  }
+  html[lang="fa"] .eyebrow { letter-spacing: 0.04em; text-transform: none; }
+  h1 {
+    margin: 0; font-size: clamp(1.55rem, 2.4vw, 2rem);
+    font-weight: 700; letter-spacing: -0.03em; line-height: 1.15;
+  }
+  html[lang="fa"] h1 { letter-spacing: 0; }
+  .sub { margin: 0; color: var(--ink-soft); font-size: 13px; max-width: 64ch; }
+  .top-actions {
+    display: flex; flex-direction: column; align-items: end; gap: 10px;
+  }
+  .seg-row {
+    display: flex; flex-wrap: wrap; gap: 8px; justify-content: end;
+  }
+  .seg {
+    display: inline-flex; border: 1px solid var(--line-strong);
+    border-radius: 999px; overflow: hidden; background: var(--panel);
+  }
+  .seg a, .seg button {
+    border: 0; background: transparent; color: var(--muted);
+    font: inherit; font-size: 12px; font-weight: 600;
+    padding: 7px 12px; cursor: pointer; text-decoration: none;
+    transition: background .15s, color .15s;
+  }
+  .seg a.active, .seg button.active {
+    background: var(--accent-soft); color: var(--accent);
+  }
+  .seg a:hover:not(.active), .seg button:hover:not(.active) { color: var(--ink); }
+  .seg a.missing { opacity: 0.35; pointer-events: none; }
+  .meta-strip { display: flex; flex-wrap: wrap; gap: 8px; justify-content: end; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px;
+    background: var(--panel); color: var(--muted); font-size: 12px; font-weight: 500;
+  }
+  .chip b { color: var(--ink); font-family: var(--mono); font-weight: 500; font-size: 12px; }
+  .chip.tp {
+    border-color: rgba(74, 222, 128, 0.35);
+    background: rgba(74, 222, 128, 0.08);
+    color: var(--pos);
+  }
+  .chip.tp b { color: var(--pos); }
+  .chip.sl {
+    border-color: rgba(248, 113, 113, 0.35);
+    background: rgba(248, 113, 113, 0.08);
+    color: var(--neg);
+  }
+  .chip.sl b { color: var(--neg); }
+  .chip.lev {
+    border-color: rgba(252, 211, 77, 0.35);
+    background: rgba(252, 211, 77, 0.08);
+    color: var(--lev);
+  }
+  .chip.lev b { color: var(--lev); }
+  .layout {
+    display: flex; flex-direction: column; gap: 14px;
+    width: 100%; min-width: 0;
+  }
+  .nav {
+    position: sticky; top: 0; z-index: 5;
+    display: flex; flex-direction: row; flex-wrap: wrap; align-items: center;
+    gap: 6px; padding: 8px;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); box-shadow: var(--shadow);
+  }
+  .nav button {
+    appearance: none; border: 0; background: transparent;
+    color: var(--muted); font: inherit; font-size: 13px; font-weight: 500;
+    text-align: center; padding: 8px 14px; border-radius: 10px; cursor: pointer;
+    white-space: nowrap;
+  }
+  .nav button:hover { color: var(--ink); background: rgba(255,255,255,0.03); }
+  .nav button.active {
+    color: var(--accent); background: var(--accent-soft); font-weight: 600;
+  }
+  .nav .nav-hint {
+    margin: 0; margin-inline-start: auto; padding-inline: 8px;
+    font-size: 11px; color: var(--faint); line-height: 1.4;
+    max-width: 42ch;
+  }
+  .main { min-width: 0; width: 100%; display: flex; flex-direction: column; gap: 14px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden;
+  }
+  .panel-head {
+    padding: 14px 16px; border-bottom: 1px solid var(--line);
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .panel-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  .panel-head p { margin: 0; font-size: 12px; color: var(--muted); }
+  .tab { display: none; }
+  .tab.active { display: block; }
+  .kpis {
+    display: grid;
+    grid-template-columns: 1.35fr repeat(4, 1fr);
+    gap: 12px;
+  }
+  .kpi {
+    background: linear-gradient(180deg, #161618 0%, var(--panel) 100%);
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 16px; min-height: 108px;
+    display: flex; flex-direction: column; justify-content: space-between;
+    box-shadow: var(--shadow);
+  }
+  .kpi .label { font-size: 12px; font-weight: 500; color: var(--muted); }
+  .kpi .value {
+    font-size: 26px; font-weight: 700; letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums; line-height: 1.15; margin-top: 8px;
+    font-family: var(--mono);
+  }
+  .kpi.primary .value { font-size: 32px; }
+  .kpi .hint { margin-top: 8px; font-size: 12px; color: var(--faint); }
+  .kpi.lev-kpi .value { color: var(--lev); }
+  .pos { color: var(--pos); } .neg { color: var(--neg); }
+  .banner {
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 12px 14px;
+    color: var(--muted); font-size: 12px;
+  }
+  .banner strong { color: var(--ink); font-weight: 600; }
+  .help {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    border-top: 1px solid var(--line);
+  }
+  .help > div { padding: 14px 16px; border-inline-end: 1px solid var(--line); }
+  .help > div:last-child { border-inline-end: 0; }
+  .help h3 { margin: 0 0 6px; font-size: 12px; font-weight: 600; }
+  .help p { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.6; }
+  code, .mono {
+    font-family: var(--mono); font-size: 11px; color: var(--accent);
+  }
+  code {
+    background: var(--accent-soft); border: 1px solid rgba(45, 212, 191, 0.22);
+    padding-inline: 5px; border-radius: 4px;
+  }
+  /* Keep strategy codes, TP/SL/lev, timestamps, and numeric KPIs visually LTR. */
+  .ltr,
+  code,
+  .mono,
+  .badge,
+  .strat-name,
+  .chip b,
+  .kpi .value,
+  .verify-card .stat .v,
+  td.c {
+    direction: ltr;
+    unicode-bidi: isolate;
+  }
+  .table-wrap { overflow: auto; width: 100%; max-height: min(70vh, 720px); }
+  table {
+    width: 100%; border-collapse: collapse;
+    font-variant-numeric: tabular-nums; font-size: 12.5px;
+  }
+  th, td {
+    padding: 10px 12px; text-align: end;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap; vertical-align: middle;
+  }
+  th.l, td.l { text-align: start; }
+  th.c, td.c { text-align: center; }
+  thead th {
+    background: var(--panel-2); color: var(--muted);
+    font-size: 11px; font-weight: 600; position: sticky; top: 0; z-index: 2;
+  }
+  thead tr.groups th {
+    background: #151b23; color: var(--faint);
+    font-size: 10px; font-weight: 600; text-align: center;
+    border-bottom: 1px solid var(--line-strong);
+    padding-block: 8px;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover td { background: rgba(45, 212, 191, 0.045); }
+  td.emph { font-weight: 700; }
+  .strat {
+    display: flex; flex-direction: column; gap: 6px;
+    min-width: 200px; white-space: normal;
+  }
+  .strat-leg {
+    display: flex; flex-direction: column; gap: 5px;
+    padding: 6px 8px; border: 1px solid var(--line);
+    border-radius: 8px; background: rgba(255,255,255,0.02);
+  }
+  .strat-name {
+    font-size: 12px; font-weight: 600; color: var(--ink-soft);
+    font-family: var(--mono);
+  }
+  .badges { display: flex; flex-wrap: wrap; gap: 4px; }
+  .badge {
+    display: inline-flex; align-items: center;
+    padding: 2px 7px; border-radius: 999px;
+    font-family: var(--mono); font-size: 11px; font-weight: 500;
+    border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--ink-soft);
+  }
+  .badge.tp { color: var(--pos); border-color: rgba(74, 222, 128, 0.3); background: rgba(74, 222, 128, 0.08); }
+  .badge.sl { color: var(--neg); border-color: rgba(251, 113, 133, 0.3); background: rgba(251, 113, 133, 0.08); }
+  .badge.shares { color: var(--ink-soft); border-color: var(--line); }
+  .badge.be { color: var(--accent); border-color: rgba(45, 212, 191, 0.35); background: rgba(45, 212, 191, 0.1); }
+  .exit-alts { margin-top: 6px; font-size: 11px; color: var(--muted); }
+  .exit-alts summary { cursor: pointer; color: var(--accent); }
+  .exit-alts ul { margin: 6px 0 0; padding-inline-start: 1.1em; }
+  .exit-alts li { margin: 2px 0; }
+  .badge.lev {
+    color: var(--lev); border-color: rgba(252, 211, 77, 0.4);
+    background: rgba(252, 211, 77, 0.12); font-weight: 700;
+  }
+  .strat-then {
+    font-size: 10px; font-weight: 600; color: var(--faint);
+    text-transform: uppercase; letter-spacing: 0.06em; padding-inline: 2px;
+  }
+  html[lang="fa"] .strat-then { text-transform: none; letter-spacing: 0; }
+  .verify-card {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+    padding: 16px;
+  }
+  .verify-card .stat {
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px 14px;
+  }
+  .verify-card .stat .k { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+  .verify-card .stat .v { font-size: 18px; font-weight: 700; font-family: var(--mono); }
+  .ok-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  }
+  .ok-pill.good { background: rgba(74, 222, 128, 0.12); color: var(--pos); }
+  .ok-pill.bad { background: rgba(251, 113, 133, 0.12); color: var(--neg); }
+  .ok-pill.warn { background: rgba(251, 191, 36, 0.12); color: var(--warn); }
+  details.tops { margin: 0 0 8px; }
+  details.tops > summary {
+    cursor: pointer; color: var(--accent); font-size: 12px; font-weight: 500;
+  }
+  @media (max-width: 1100px) {
+    .kpis { grid-template-columns: 1fr 1fr; }
+    .kpi.primary { grid-column: 1 / -1; }
+    .verify-card { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 860px) {
+    .nav { position: static; }
+    .nav .nav-hint { display: none; }
+    .nav button { padding: 8px 12px; font-size: 12px; }
+    .help { grid-template-columns: 1fr; }
+    .help > div { border-inline-end: 0; border-top: 1px solid var(--line); }
+    .help > div:first-child { border-top: 0; }
+    .top-actions { width: 100%; align-items: stretch; }
+    .seg-row, .meta-strip { justify-content: start; }
+  }
+</style>
+</head>
+<body>
+  <div class="shell">
+    <header class="top">
+      <div class="brand">
+        <p class="eyebrow" id="eyebrow">Walk-forward</p>
+        <h1 id="title">Walk-forward</h1>
+        <p class="sub ltr" id="sub"></p>
+      </div>
+      <div class="top-actions">
+        <div class="seg-row">
+          <div class="seg" id="policy-seg" role="group" aria-label="Policy"></div>
+          <div class="seg" id="lang-seg" role="group" aria-label="Language"></div>
+        </div>
+        <div class="meta-strip" id="chips"></div>
+      </div>
+</header>
+
+    <div class="layout">
+      <nav class="nav" id="nav" aria-label="Sections"></nav>
+      <div class="main">
+        <section class="tab active" data-tab="summary" id="tab-summary">
+          <div class="kpis" id="kpis"></div>
+          <div class="banner" id="stop" style="margin-top:14px"></div>
+          <section class="panel" style="margin-top:14px">
+            <div class="panel-head">
+              <h2 id="help-title">How to read this</h2>
+              <p id="help-sub">Three ideas. Everything else is detail.</p>
+            </div>
+            <div class="help" id="help"></div>
+          </section>
+        </section>
+
+        <section class="tab" data-tab="cycles" id="tab-cycles">
+          <section class="panel">
+            <div class="panel-head">
+              <h2 id="cycles-title">Executed path</h2>
+              <p id="cycles-sub">Each row is one pick → trade next M trades → advance.</p>
+            </div>
+            <div class="table-wrap"><table id="chosen"></table></div>
+          </section>
+        </section>
+
+        <section class="tab" data-tab="pairs" id="tab-pairs">
+          <section class="panel">
+            <div class="panel-head">
+              <h2 id="pairs-title">Every N/M mode alone</h2>
+              <p id="pairs-sub">Ablation — not the live selector path.</p>
+            </div>
+            <div class="table-wrap"><table id="pairs"></table></div>
+          </section>
+        </section>
+
+        <section class="tab" data-tab="shortlist" id="tab-shortlist">
+          <section class="panel">
+            <div class="panel-head">
+              <h2 id="shortlist-title">Daily shortlist</h2>
+              <p id="shortlist-sub">Who was allowed each day after ranking yesterday.</p>
+            </div>
+            <div class="table-wrap"><table id="windows"></table></div>
+            <div id="window-tops" style="padding:12px 16px"></div>
+          </section>
+        </section>
+
+        <section class="tab" data-tab="verify" id="tab-verify">
+          <section class="panel">
+            <div class="panel-head">
+              <h2 id="verify-title">Nautilus verify</h2>
+              <p id="verify-sub">Replay of the last traded strategy through the engine.</p>
+  </div>
+            <div id="verify-summary"></div>
+            <div class="table-wrap"><table id="verify"></table></div>
+          </section>
+        </section>
+  </div>
+  </div>
+  </div>
+
+<script>
+const R = /*__REPORT__*/null;
+const LANG0 = /*__LANG0__*/'en';
+const I18N = {
+  en: {
+    title_doc: 'Walk-forward',
+    eyebrow_stop: 'Result · stop when OOS cannot fill M',
+    eyebrow_short: 'Result · short/empty folds allowed',
+    title: 'Walk-forward',
+    policy_stop: 'Stop',
+    policy_short: 'Allow short',
+    tab_summary: 'Summary',
+    tab_cycles: 'Cycles',
+    tab_pairs: 'N/M modes',
+    tab_shortlist: 'Shortlist',
+    tab_verify: 'Verify',
+    nav_hint: 'Full report sections — nothing is buried under “more”.',
+    help_title: 'How to read this',
+    help_sub: 'Three ideas. Everything else is detail.',
+    help_nm_h: 'N / M window',
+    help_nm_p: 'Example <code>100/33</code>: score on the last 100 closed trades (IS), then take the next 33 trades (OOS).',
+    help_strat_h: 'Strategy',
+    help_strat_p: 'The config that got picked (timeframe, RSI, TP, SL, leverage). Not the same thing as N/M.',
+    help_pnl_h: 'Cycle PnL',
+    help_pnl_p: 'Money made or lost in that one pick → trade-M step. The big number above is the sum of these.',
+    cycles_title: 'Executed path',
+    cycles_sub: 'Each row is one pick → trade next M → advance. Not “calendar days”.',
+    pairs_title: 'Every N/M mode alone',
+    pairs_sub: 'Ablation. Not the live selector path.',
+    shortlist_title: 'Daily shortlist',
+    shortlist_sub: 'Who was allowed each day after ranking yesterday.',
+    verify_title: 'Nautilus verify',
+    verify_sub: 'Last traded strategy replayed through NautilusTrader.',
+    kpi_pnl: 'Total PnL after fees',
+    kpi_pnl_ok: 'Beat buy-and-hold in this period',
+    kpi_pnl_bad: 'Did not make money reliably',
+    kpi_cycles: 'Pick → trade cycles',
+    kpi_cycles_h: 'Loop iterations until stop — not calendar days',
+    kpi_pos: 'Profitable cycles',
+    kpi_pos_h: 'How many cycles had positive OOS PnL',
+    kpi_bh: 'Buy-and-hold',
+    kpi_bh_h: 'Same size over the same cycle intervals',
+    kpi_short: 'Short / empty folds',
+    kpi_short_h: 'Short OOS folds · empty (0-trade) folds',
+    kpi_lev: 'Leverage grid',
+    kpi_lev_h: 'Min → max · count of levels in the scan',
+    kpi_tp: 'Take-profit grid',
+    kpi_tp_h: 'Min → max % · count of TP levels in the scan',
+    kpi_sl: 'Stop-loss grid',
+    kpi_sl_h: 'Min → max % · count of SL levels in the scan',
+    stop_label: 'Stopped because',
+    stop_short_note: 'Policy: fold still runs with remaining trades (or empty), then continues.',
+    chip_inst: 'Instrument',
+    chip_range: 'Range',
+    chip_combos: 'Configs',
+    chip_nm: 'N/M modes',
+    chip_outer: 'Outer',
+    chip_lookback: 'IS lookback',
+    chip_warmup: 'Rank warmup',
+    chip_first_pick: 'First pick',
+    chip_first_choice: 'First choice',
+    chip_tape: 'Tape from',
+    chip_size: 'Size',
+    chip_bal: 'Start bal.',
+    chip_tp: 'TP grid',
+    chip_sl: 'SL grid',
+    chip_lev: 'Leverage',
+    chip_profiles: 'Exit profiles',
+    chip_score: 'Score model',
+    chip_score_err: 'Score rel-err',
+    cold_rank: 'cold (scan start — no prior outer window)',
+    warmup_note: 'First scan window is ranking-only. OOS picks start at first pick; Step-2 at first choice. Re-scan earlier for prior ranking days.',
+    day_to_day: 'day-to-day',
+    days_n: '{n} day(s)',
+    days_look: '{n} day(s)',
+    g_id: 'Id',
+    g_is: 'Decision on the past (IS)',
+    g_oos: 'Execution on the future (OOS)',
+    g_acct: 'Account',
+    c_n: '#',
+    c_nm: 'N/M',
+    c_at: 'Decided at',
+    c_past: 'Past PnL',
+    c_score: 'Score',
+    c_from: 'OOS from',
+    c_to: 'OOS to',
+    c_strat: 'Strategy',
+    exit_alts: 'Other exits considered',
+    c_tp: 'TP',
+    c_sl: 'SL',
+    c_lev: 'Lev',
+    c_pnl: 'Cycle PnL',
+    c_wins: 'Wins',
+    c_bal: 'Balance',
+    c_bh: 'Buy-and-hold',
+    empty_fold: '(empty fold)',
+    short_mark: 'short {a}/{b}',
+    empty_mark: 'empty',
+    then: 'then',
+    p_n: 'N', p_m: 'M', p_total: 'Total', p_rounds: 'OOS rounds',
+    p_pos: 'Profitable', p_trades: 'Trades', p_tf: 'Timeframes', p_stop: 'Stopped because',
+    s_ranked: 'Ranked on', s_used: 'Used in', s_note: 'Note', s_traded: 'Traded', s_scored: 'Scored',
+    s_pos: 'Profitable', s_best: 'Best', s_score: 'Score', s_profit: 'Profit',
+    s_next: 'Next day', s_size: 'Shortlist size', s_next_sum: 'Shortlist next day',
+    tops: 'Top {n} of {a} → {b}',
+    t_rank: 'Rank', t_cfg: 'Config', t_drop: 'Drop', t_wr: 'Win rate',
+    checked: '{n} strategies used on the path were replayed trade-by-trade: identical.',
+    v_strat: 'Strategy', v_fills: 'Fills', v_differ: 'Differ', v_time: 'Time', v_result: 'Result',
+    v_match: 'match', v_mismatch: 'MISMATCH',
+    v_skip: 'Engine check skipped or pending.',
+    v_status: 'Status', v_ok: 'Verified match', v_bad: 'Mismatch', v_pending: 'Pending / skipped',
+    v_pair: 'Checked pair', v_secs: 'Seconds',
+  },
+  fa: {
+    title_doc: 'بازآزمایی پیشرونده',
+    eyebrow_stop: 'گزارش نتیجه · توقف وقتی OOS به M نرسد',
+    eyebrow_short: 'گزارش نتیجه · fold کوتاه/خالی مجاز',
+    title: 'بازآزمایی پیشرونده',
+    policy_stop: 'توقف',
+    policy_short: 'اجازه کوتاه',
+    tab_summary: 'خلاصه',
+    tab_cycles: 'چرخه‌ها',
+    tab_pairs: 'حالت‌های N/M',
+    tab_shortlist: 'منتخبان',
+    tab_verify: 'راستی‌آزمایی',
+    nav_hint: 'همه بخش‌های گزارش اینجا هستند — چیزی زیر «بیشتر» پنهان نیست.',
+    help_title: 'خواندن جدول',
+    help_sub: 'سه مفهوم؛ بقیه جزئیات است.',
+    help_nm_h: 'پنجره N / M',
+    help_nm_p: 'مثال <code>100/33</code>: با ۱۰۰ معاملهٔ اخیر تصمیم بگیر، ۳۳ تای بعدی را اجرا کن.',
+    help_strat_h: 'استراتژی',
+    help_strat_p: 'تنظیم انتخاب‌شده (تایم‌فریم، RSI، حد سود، حد ضرر، اهرم). با N/M یکی نیست.',
+    help_pnl_h: 'Cycle PnL',
+    help_pnl_p: 'سود/زیان همان یک مرحلهٔ pick → trade-M. جمع این ستون همان عدد بزرگ بالاست.',
+    cycles_title: 'مسیر اجرا شده',
+    cycles_sub: 'هر ردیف یک cycle است: انتخاب → گرفتن M معامله بعدی → جلو رفتن.',
+    pairs_title: 'همه حالت‌های N/M به‌تنهایی',
+    pairs_sub: 'مقایسهٔ جداگانه؛ مسیر اصلی نیست.',
+    shortlist_title: 'منتخبان هر روز',
+    shortlist_sub: 'فهرست مجاز روزانه پس از رتبه‌بندی دیروز.',
+    verify_title: 'راستی‌آزمایی Nautilus',
+    verify_sub: 'آخرین استراتژی معامله‌شده دوباره در موتور اجرا شد.',
+    kpi_pnl: 'سود و زیان کل',
+    kpi_pnl_ok: 'قابل اتکا در این دوره به‌نظر می‌رسد',
+    kpi_pnl_bad: 'در این دوره قابل اتکا نیست',
+    kpi_cycles: 'Pick → trade cycles',
+    kpi_cycles_h: 'تعداد تکرار حلقه تا توقف — تعداد روز تقویم نیست',
+    kpi_pos: 'Cycles سودده',
+    kpi_pos_h: 'چند cycle در OOS مثبت بود',
+    kpi_bh: 'خرید و نگهداری',
+    kpi_bh_h: 'در همان بازه‌های اجرا',
+    kpi_short: 'Fold کوتاه / خالی',
+    kpi_short_h: 'OOS کوتاه · fold خالی (۰ معامله)',
+    kpi_lev: 'شبکه اهرم',
+    kpi_lev_h: 'حداقل → حداکثر · تعداد سطوح در اسکن',
+    kpi_tp: 'شبکه حد سود',
+    kpi_tp_h: 'حداقل → حداکثر ٪ · تعداد سطوح TP در اسکن',
+    kpi_sl: 'شبکه حد ضرر',
+    kpi_sl_h: 'حداقل → حداکثر ٪ · تعداد سطوح SL در اسکن',
+    stop_label: 'دلیل توقف',
+    stop_short_note: 'سیاست: fold با معاملات باقی‌مانده (یا خالی) اجرا می‌شود و ادامه می‌دهد.',
+    chip_inst: 'نماد',
+    chip_range: 'بازه',
+    chip_combos: 'ترکیب‌ها',
+    chip_nm: 'حالت N/M',
+    chip_outer: 'پنجره بیرونی',
+    chip_lookback: 'نگاه به گذشته',
+    chip_warmup: 'گرم‌کردن رتبه',
+    chip_first_pick: 'اولین pick',
+    chip_first_choice: 'اولین choice',
+    chip_tape: 'شروع نوار',
+    chip_size: 'حجم',
+    chip_bal: 'موجودی شروع',
+    chip_profiles: 'پروفایل خروج',
+    chip_score: 'مدل امتیاز',
+    chip_score_err: 'خطای نسبی امتیاز',
+    chip_tp: 'شبکه TP',
+    chip_sl: 'شبکه SL',
+    chip_lev: 'اهرم',
+    cold_rank: 'سرد (شروع اسکن — بدون پنجره بیرونی قبلی)',
+    warmup_note: 'اولین پنجرهٔ اسکن فقط برای رتبه‌بندی است. pick از first pick و Step-2 از first choice شروع می‌شود. برای روزهای رتبه‌بندی قبلی، اسکن را زودتر شروع کنید.',
+    day_to_day: 'روزبه‌روز',
+    days_n: '{n} روز',
+    days_look: '{n} روز',
+    g_id: 'شناسه',
+    g_is: 'تصمیم روی گذشته',
+    g_oos: 'اجرا روی آینده',
+    g_acct: 'حساب',
+    c_n: '#',
+    c_nm: 'N/M',
+    c_at: 'زمان تصمیم',
+    c_past: 'نتیجه گذشته',
+    c_score: 'امتیاز',
+    c_from: 'شروع اجرا',
+    c_to: 'پایان اجرا',
+    c_strat: 'استراتژی',
+    exit_alts: 'سایر exitهای بررسی‌شده',
+    c_tp: 'TP',
+    c_sl: 'SL',
+    c_lev: 'اهرم',
+    c_pnl: 'Cycle PnL',
+    c_wins: 'برد',
+    c_bal: 'موجودی',
+    c_bh: 'خرید و نگهداری',
+    empty_fold: '(fold خالی)',
+    short_mark: 'کوتاه {a}/{b}',
+    empty_mark: 'خالی',
+    then: 'سپس',
+    p_n: 'N', p_m: 'M', p_total: 'جمع', p_rounds: 'OOS rounds',
+    p_pos: 'سودده', p_trades: 'معاملات', p_tf: 'تایم‌فریم', p_stop: 'توقف',
+    s_ranked: 'رتبه روی', s_used: 'اجرا در', s_note: 'یادداشت', s_traded: 'معامله‌کرده', s_scored: 'امتیازدار',
+    s_pos: 'سودده', s_best: 'بهترین', s_score: 'امتیاز', s_profit: 'سود',
+    s_next: 'روز بعد', s_size: 'منتخبان', s_next_sum: 'جمع روز بعد',
+    tops: '{n} تای برتر {a} → {b}',
+    t_rank: 'رتبه', t_cfg: 'ترکیب', t_drop: 'افت', t_wr: 'نرخ برد',
+    checked: '{n} استراتژی دوباره محاسبه شد؛ معاملات یکسان بودند.',
+    v_strat: 'استراتژی', v_fills: 'پر شدن', v_differ: 'اختلاف', v_time: 'زمان', v_result: 'نتیجه',
+    v_match: 'تأیید', v_mismatch: 'مغایرت',
+    v_skip: 'کنترل موتور جداگانه انجام نشده.',
+    v_status: 'وضعیت', v_ok: 'تأیید شد', v_bad: 'مغایرت', v_pending: 'در انتظار / رد شده',
+    v_pair: 'جفت بررسی‌شده', v_secs: 'ثانیه',
+  },
+};
+
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const fmt = (x, d = 2) => Number.isFinite(x) ? x.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }) : '–';
+const signed = (x, d = 2) => (x > 0 ? '+' : '') + fmt(x, d);
+const cls = (x) => x > 0 ? 'pos' : x < 0 ? 'neg' : '';
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const money = (x) => `<span class="${cls(x)}">${signed(x)}</span>`;
+const int = (x) => Number(x).toLocaleString('en-US');
+const pct = (x) => `${fmt(x, 0)}%`;
+const t = (k, vars = {}) => {
+  let s = (I18N[lang] && I18N[lang][k]) || I18N.en[k] || k;
+  for (const [a, b] of Object.entries(vars)) s = s.replaceAll('{' + a + '}', b);
+  return s;
+};
+
+let lang = LANG0 === 'fa' ? 'fa' : 'en';
+const M = R.meta;
+const C = R.chosen;
+const lookback = M.lookback_days ?? 30;
+const cycles = C.windows.length;
+const policy = M.short_oos_policy || C.short_oos_policy || 'stop';
+const allowShort = policy === 'allow_short';
+const shortFolds = C.short_folds ?? 0;
+const emptyFolds = C.empty_folds ?? 0;
+const fileBase = (() => {
+  const name = (location.pathname.split('/').pop() || '').replace(/_fa\.html$/i, '.html');
+  if (name.includes('allow_short')) return 'nm_walk_forward_allow_short';
+  return 'nm_walk_forward';
+})();
+
+function parseLeg(raw) {
+  const s = String(raw).trim();
+  // Legacy: `15m RSI 8/37 · TP 0.33% · SL 0.46% · 10x`
+  let m = s.match(/^(\d+)m RSI (\d+)\/(\d+)\s*·\s*TP ([\d.]+)%\s*·\s*SL ([\d.]+)%\s*·\s*(\d+)x$/i);
+  if (m) {
+    return { tf: +m[1], fast: +m[2], slow: +m[3], tp: m[4], sl: m[5], shares: '', be: false, lev: +m[6], raw: s };
+  }
+  // Ladder: `15m RSI 8/37 · SL 0.46% · TP 0.46/0.92% · 50/50% · BE · 10x`
+  m = s.match(/^(\d+)m RSI (\d+)\/(\d+)\s*·\s*SL ([\d.]+)%\s*·\s*TP ([\d./]+)%(?:\s*·\s*([\d./]+)%)?(?:\s*·\s*(BE))?\s*·\s*(\d+)x$/i);
+  if (m) {
+    return { tf: +m[1], fast: +m[2], slow: +m[3], sl: m[4], tp: m[5], shares: m[6] || '', be: !!m[7], lev: +m[8], raw: s };
+  }
+  return null;
+}
+function parseLabel(label) {
+  if (!label) return [];
+  return String(label).split(/\s+then\s+/i).map(parseLeg).filter(Boolean);
+}
+function stratCell(label, emptyText, exitAlts) {
+  const legs = parseLabel(label);
+  if (!legs.length) {
+    return `<div class="strat"><span style="color:var(--faint)">${esc(label || emptyText || '')}</span></div>`;
+  }
+  const alts = Array.isArray(exitAlts) && exitAlts.length
+    ? `<details class="exit-alts"><summary>${esc(t('exit_alts'))} (${exitAlts.length})</summary><ul>${
+        exitAlts.map((a) => `<li class="ltr">${esc(a.label || (a.exits && a.exits.label) || '')}</li>`).join('')
+      }</ul></details>`
+    : '';
+  return `<div class="strat">${legs.map((leg, i) => `
+    ${i ? `<div class="strat-then">${esc(t('then'))}</div>` : ''}
+    <div class="strat-leg" title="${esc(leg.raw)}">
+      <div class="strat-name">${leg.tf}m RSI ${leg.fast}/${leg.slow}</div>
+      <div class="badges">
+        <span class="badge tp">TP ${esc(leg.tp)}%</span>
+        <span class="badge sl">SL ${esc(leg.sl)}%</span>
+        ${leg.shares ? `<span class="badge shares">${esc(leg.shares)}%</span>` : ''}
+        ${leg.be ? `<span class="badge be">BE</span>` : ''}
+        <span class="badge lev">${leg.lev}x</span>
+      </div>
+    </div>`).join('')}${alts}</div>`;
+}
+function stratCols(label) {
+  const legs = parseLabel(label);
+  if (!legs.length) return { tpHtml: '–', slHtml: '–', levHtml: '–' };
+  const join = (vals, suf) => vals.map((v) => v + suf).join(' → ');
+  return {
+    tpHtml: `<span class="badge tp">TP ${esc(join(legs.map((l) => l.tp), '%'))}</span>`,
+    slHtml: `<span class="badge sl">SL ${esc(join(legs.map((l) => l.sl), '%'))}</span>`,
+    levHtml: `<span class="badge lev">${esc(join(legs.map((l) => String(l.lev)), 'x'))}</span>`,
+  };
+}
+/** Scan grid meta: object `{min,max,n[,values]}` or legacy `[min,max,n]` / bare array. */
+function gridMeta(raw, fallbackMin = 1) {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const values = Array.isArray(raw.values) ? raw.values : null;
+    const min = Number(raw.min ?? (values ? values[0] : fallbackMin));
+    const max = Number(raw.max ?? (values ? values[values.length - 1] : min));
+    const n = Number(raw.n ?? (values ? values.length : 1));
+    return { min, max, n, values };
+  }
+  if (Array.isArray(raw) && raw.length >= 3 && typeof raw[0] === 'number' && raw.length === 3) {
+    return { min: raw[0], max: raw[1], n: raw[2], values: null };
+  }
+  if (Array.isArray(raw) && raw.length) {
+    return { min: Math.min(...raw), max: Math.max(...raw), n: raw.length, values: raw };
+  }
+  return { min: fallbackMin, max: fallbackMin, n: 1, values: null };
+}
+function levMeta() { return gridMeta(M.leverage, 1); }
+function tpMeta() { return gridMeta(M.tp, 0.01); }
+function slMeta() { return gridMeta(M.sl, 0.01); }
+function fmtGridPct(g) {
+  const a = Number(g.min);
+  const b = Number(g.max);
+  const step = (g.values && g.values.length > 1)
+    ? Math.abs(Number(g.values[1]) - Number(g.values[0]))
+    : (g.n > 1 ? (b - a) / (g.n - 1) : 0);
+  const stepS = step > 0 && step < 1 ? step.toFixed(2).replace(/0+$/, '').replace(/\.$/, '') : String(step);
+  return `${a}–${b}% × ${int(g.n)}${step > 0 ? ` /${stepS}` : ''}`;
+}
+
+function hrefFor(base, fa) {
+  return fa ? `${base}_fa.html` : `${base}.html`;
+}
+
+function applyDocLang() {
+  document.documentElement.lang = lang;
+  document.documentElement.dir = lang === 'fa' ? 'rtl' : 'ltr';
+  document.title = t('title_doc');
+}
+
+function setLang(next) {
+  lang = next === 'fa' ? 'fa' : 'en';
+  applyDocLang();
+  renderChrome();
+  renderAll();
+  try { localStorage.setItem('nm_wf_lang', lang); } catch (_) {}
+}
+
+function renderChrome() {
+  $('#eyebrow').textContent = allowShort ? t('eyebrow_short') : t('eyebrow_stop');
+  $('#title').textContent = t('title');
+  const outer = M.days === 1 ? t('day_to_day') : t('days_n', { n: M.days });
+  $('#sub').textContent =
+    `${M.instrument} · ${M.start} → ${M.end} · ${int(M.combinations)} · ${M.window_pairs} N/M · ${outer} · ` +
+    `lookback ${lookback}d · ${policy} · ${M.size_btc} BTC · ${fmt(M.balance_usdt, 0)} USDT`;
+
+  const lev = levMeta();
+  const tp = tpMeta();
+  const sl = slMeta();
+  const profiles = Array.isArray(M.exit_profiles) ? M.exit_profiles : null;
+  const sm = M.score_model || {};
+  const scoreChip = sm.cold_start
+    ? 'cold-start'
+    : (sm.weights ? `w=[${sm.weights.map((x) => Number(x).toFixed(2)).join(',')}]` : '—');
+  const errPct = (sm.score_rel_err != null)
+    ? `${(Number(sm.score_rel_err) * 100).toFixed(2)}%${sm.score_ok === false ? ' FAIL' : ''}`
+    : '—';
+  const chips = [
+    [t('chip_inst'), M.instrument, ''],
+    [t('chip_range'), `${M.start} → ${M.end}`, ''],
+    [t('chip_warmup'), M.ranking_warmup || M.start, ''],
+    [t('chip_first_pick'), M.first_pick || '—', ''],
+    [t('chip_first_choice'), M.first_choice || '—', ''],
+    [t('chip_tape'), M.tape_from || M.start, ''],
+  ];
+  if (profiles && profiles.length) {
+    chips.push([t('chip_profiles'), profiles.map((p) => p.label || '?').join(', '), 'tp']);
+  } else {
+    chips.push([t('chip_tp'), fmtGridPct(tp), 'tp']);
+  }
+  chips.push(
+    [t('chip_sl'), fmtGridPct(sl), 'sl'],
+    [t('chip_lev'), `${lev.min}–${lev.max}x (${lev.n})`, 'lev'],
+    [t('chip_score'), scoreChip, ''],
+    [t('chip_score_err'), errPct, ''],
+    [t('chip_combos'), int(M.combinations), ''],
+    [t('chip_nm'), int(M.window_pairs), ''],
+    [t('chip_outer'), outer, ''],
+    [t('chip_lookback'), t('days_look', { n: lookback }), ''],
+    [t('chip_size'), `${M.size_btc} BTC`, ''],
+    [t('chip_bal'), `${fmt(M.balance_usdt, 0)} USDT`, ''],
+  );
+  $('#chips').innerHTML = chips.map(([k, v, kind]) =>
+    `<span class="chip${kind ? ' ' + kind : ''}">${esc(k)} <b class="ltr">${esc(String(v))}</b></span>`
+  ).join('');
+
+  $('#policy-seg').innerHTML = `
+    <a class="${allowShort ? '' : 'active'}" href="${hrefFor('nm_walk_forward', lang === 'fa')}">${esc(t('policy_stop'))}</a>
+    <a class="${allowShort ? 'active' : ''}" href="${hrefFor('nm_walk_forward_allow_short', lang === 'fa')}">${esc(t('policy_short'))}</a>`;
+
+  $('#lang-seg').innerHTML = `
+    <button type="button" class="${lang === 'en' ? 'active' : ''}" data-lang="en">EN</button>
+    <button type="button" class="${lang === 'fa' ? 'active' : ''}" data-lang="fa">فارسی</button>`;
+  $$('#lang-seg button').forEach((b) => b.addEventListener('click', () => {
+    const next = b.dataset.lang;
+    const target = hrefFor(fileBase, next === 'fa');
+    const here = (location.pathname.split('/').pop() || '');
+    if (here !== target) location.href = target;
+    else setLang(next);
+  }));
+
+  const tabs = [
+    ['summary', 'tab_summary'],
+    ['cycles', 'tab_cycles'],
+    ['pairs', 'tab_pairs'],
+    ['shortlist', 'tab_shortlist'],
+    ['verify', 'tab_verify'],
+  ];
+  const active = $('.nav button.active')?.dataset.tab || location.hash.replace('#', '') || 'summary';
+  $('#nav').innerHTML = tabs.map(([id, key]) =>
+    `<button type="button" data-tab="${id}" class="${id === active ? 'active' : ''}">${esc(t(key))}</button>`
+  ).join('') + `<p class="nav-hint">${esc(t('nav_hint'))}</p>`;
+  $$('#nav button').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
+}
+
+function showTab(id) {
+  $$('.tab').forEach((el) => el.classList.toggle('active', el.dataset.tab === id));
+  $$('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.tab === id));
+  if (history.replaceState) history.replaceState(null, '', '#' + id);
+}
+
+function renderAll() {
+  $('#help-title').textContent = t('help_title');
+  $('#help-sub').textContent = t('help_sub');
+  $('#help').innerHTML = `
+    <div><h3>${esc(t('help_nm_h'))}</h3><p>${t('help_nm_p')}</p></div>
+    <div><h3>${esc(t('help_strat_h'))}</h3><p>${t('help_strat_p')}</p></div>
+    <div><h3>${esc(t('help_pnl_h'))}</h3><p>${t('help_pnl_p')}</p></div>`;
+  $('#cycles-title').textContent = t('cycles_title');
+  $('#cycles-sub').textContent = t('cycles_sub');
+  $('#pairs-title').textContent = t('pairs_title');
+  $('#pairs-sub').textContent = t('pairs_sub');
+  $('#shortlist-title').textContent = t('shortlist_title');
+  $('#shortlist-sub').textContent = t('shortlist_sub');
+  $('#verify-title').textContent = t('verify_title');
+  $('#verify-sub').textContent = t('verify_sub');
+
+  const lev = levMeta();
+  const tp = tpMeta();
+  const sl = slMeta();
+  const good = C.total > 0 && C.total > C.buy_and_hold_total && C.positive > cycles / 2;
+  $('#kpis').innerHTML = `
+    <article class="kpi primary">
+      <div class="label">${esc(t('kpi_pnl'))}</div>
+      <div>
+        <div class="value ${cls(C.total)}">${signed(C.total)}</div>
+        <div class="hint">${esc(good ? t('kpi_pnl_ok') : t('kpi_pnl_bad'))} · USDT</div>
+      </div>
+    </article>
+    <article class="kpi">
+      <div class="label">${esc(t('kpi_tp'))}</div>
+      <div class="value ltr">${tp.min}–${tp.max}%</div>
+      <div class="hint">${esc(t('kpi_tp_h'))} · ${int(tp.n)}</div>
+    </article>
+    <article class="kpi">
+      <div class="label">${esc(t('kpi_sl'))}</div>
+      <div class="value ltr">${sl.min}–${sl.max}%</div>
+      <div class="hint">${esc(t('kpi_sl_h'))} · ${int(sl.n)}</div>
+    </article>
+    <article class="kpi lev-kpi">
+      <div class="label">${esc(t('kpi_lev'))}</div>
+      <div class="value">${lev.min}–${lev.max}x</div>
+      <div class="hint">${esc(t('kpi_lev_h'))} · ${int(lev.n)}</div>
+    </article>
+    <article class="kpi">
+      <div class="label">${esc(t('kpi_cycles'))}</div>
+      <div class="value">${int(cycles)}</div>
+      <div class="hint">${esc(t('kpi_cycles_h'))}</div>
+    </article>
+    <article class="kpi">
+      <div class="label">${esc(t('kpi_pos'))}</div>
+      <div class="value">${C.positive}<span style="color:var(--faint);font-size:16px;font-weight:500"> / ${cycles}</span></div>
+      <div class="hint">${esc(t('kpi_pos_h'))}</div>
+    </article>
+    <article class="kpi">
+      <div class="label">${esc(allowShort ? t('kpi_short') : t('kpi_bh'))}</div>
+      <div class="value ${allowShort ? '' : cls(C.buy_and_hold_total)}">${allowShort ? `${int(shortFolds)} / ${int(emptyFolds)}` : signed(C.buy_and_hold_total)}</div>
+      <div class="hint">${esc(allowShort ? t('kpi_short_h') : t('kpi_bh_h'))}</div>
+    </article>`;
+
+  $('#stop').innerHTML = `<strong>${esc(t('stop_label'))}</strong><br>${esc(C.stop_reason)}` +
+    (allowShort ? `<br><span style="color:var(--faint)">${esc(t('stop_short_note'))}</span>` : '');
+
+  $('#chosen').innerHTML = `
+  <thead>
+    <tr class="groups">
+      <th colspan="2">${esc(t('g_id'))}</th>
+      <th colspan="3">${esc(t('g_is'))}</th>
+      <th colspan="6">${esc(t('g_oos'))}</th>
+      <th colspan="2">${esc(t('g_acct'))}</th>
+    </tr>
+    <tr>
+      <th class="c">${esc(t('c_n'))}</th>
+      <th class="c">${esc(t('c_nm'))}</th>
+      <th class="l">${esc(t('c_at'))}</th>
+      <th class="c">${esc(t('c_past'))}</th>
+      <th class="c">${esc(t('c_score'))}</th>
+      <th class="l">${esc(t('c_from'))}</th>
+      <th class="l">${esc(t('c_to'))}</th>
+      <th class="l">${esc(t('c_strat'))}</th>
+      <th class="c">${esc(t('c_tp'))}</th>
+      <th class="c">${esc(t('c_sl'))}</th>
+      <th class="c">${esc(t('c_lev'))}</th>
+      <th class="c">${esc(t('c_pnl'))}</th>
+      <th class="c">${esc(t('c_wins'))}</th>
+      <th class="c">${esc(t('c_bal'))}</th>
+      <th class="c">${esc(t('c_bh'))}</th>
+    </tr>
+  </thead>
+  <tbody>${C.windows.map((w, i) => {
+    const label = w.label || '';
+    const cols = stratCols(label);
+    const isTrain = w.exits_train || w.train;
+    const taken = w.oos_trades_taken ?? w.test.trades;
+    const shortMark = w.empty_fold
+      ? t('empty_mark')
+      : (w.short_oos ? t('short_mark', { a: taken, b: w.test_trades }) : '');
+    return `<tr>
+      <td class="c">${i + 1}</td>
+      <td class="c"><code>${w.train_trades}/${w.test_trades}</code>${shortMark ? `<div style="color:var(--faint);font-size:11px">${esc(shortMark)}</div>` : ''}</td>
+      <td class="l ltr">${esc(w.pick_at)}</td>
+      <td class="c">${money(isTrain.profit)} <span style="color:var(--faint)">(${isTrain.trades})</span></td>
+      <td class="c">${fmt(isTrain.score, 3)}</td>
+      <td class="l ltr">${esc(w.test_from)}</td>
+      <td class="l ltr">${esc(w.test_to)}</td>
+      <td class="l">${stratCell(label, t('empty_fold'), w.exit_alts)}</td>
+      <td class="c">${cols.tpHtml}</td>
+      <td class="c">${cols.slHtml}</td>
+      <td class="c">${cols.levHtml}</td>
+      <td class="c emph">${money(w.test_net)}</td>
+      <td class="c">${w.test.wins}/${w.test.trades}</td>
+      <td class="c">${fmt(w.balance)}</td>
+      <td class="c">${money(w.buy_and_hold)}</td>
+    </tr>`;
+  }).join('')}</tbody>`;
+
+  const PAIRS = R.window_pairs.map((p) => ({
+    ...p,
+    mix: p.timeframe_trades.map((n, i) => n ? `${M.timeframes[i]}m ${fmt(100 * n / Math.max(1, p.trades), 0)}%` : '').filter(Boolean).join(', '),
+  }));
+  const rows = [...PAIRS].sort((a, b) => b.total - a.total);
+  $('#pairs').innerHTML = `<thead><tr>
+    <th class="c">${esc(t('p_n'))}</th><th class="c">${esc(t('p_m'))}</th><th class="c">${esc(t('p_total'))}</th>
+    <th class="c">${esc(t('p_rounds'))}</th><th class="c">${esc(t('p_pos'))}</th><th class="c">${esc(t('p_trades'))}</th>
+    <th class="l">${esc(t('p_tf'))}</th><th class="l">${esc(t('p_stop'))}</th>
+  </tr></thead><tbody>${rows.map((p) => `<tr>
+    <td class="c">${p.train_trades}</td><td class="c">${p.test_trades}</td>
+    <td class="c emph">${money(p.total)}</td><td class="c">${p.windows}</td>
+    <td class="c">${p.positive}/${p.windows}</td><td class="c">${int(p.trades)}</td>
+    <td class="l">${esc(p.mix)}</td><td class="l" style="color:var(--faint)">${esc(p.stop_reason)}</td>
+  </tr>`).join('')}</tbody>`;
+
+  const hasCold = R.windows.some((m) => m.cold_rank_source);
+  $('#shortlist-sub').textContent = hasCold
+    ? `${t('shortlist_sub')} ${t('warmup_note')}`
+    : t('shortlist_sub');
+  $('#windows').innerHTML = `<thead><tr>
+    <th class="l">${esc(t('s_ranked'))}</th><th class="l">${esc(t('s_used'))}</th>
+    <th class="l">${esc(t('s_note'))}</th>
+    <th class="c">${esc(t('s_traded'))}</th><th class="c">${esc(t('s_scored'))}</th>
+    <th class="c">${esc(t('s_pos'))}</th><th class="l">${esc(t('s_best'))}</th>
+    <th class="c">${esc(t('s_score'))}</th><th class="c">${esc(t('s_profit'))}</th>
+    <th class="c">${esc(t('s_next'))}</th><th class="c">${esc(t('s_size'))}</th>
+    <th class="c">${esc(t('s_next_sum'))}</th>
+  </tr></thead><tbody>${R.windows.map((m) => {
+    const b = m.top[0] || { scored: {}, next: {}, label: '' };
+    const note = m.cold_rank_source
+      ? `<span class="ok-pill warn">${esc(t('cold_rank'))}</span>`
+      : '';
+    return `<tr>
+      <td class="l ltr">${esc(m.ranked)}</td><td class="l ltr">${esc(m.traded_in)}</td>
+      <td class="l">${note}</td>
+      <td class="c">${int(m.combinations_traded)}</td><td class="c">${int(m.eligible)}</td>
+      <td class="c">${int(m.profitable)}</td>
+      <td class="l">${stratCell(b.label || '', '', b.exit_alts)}</td>
+      <td class="c">${fmt(b.scored.score, 3)}</td><td class="c">${money(b.scored.profit)}</td>
+      <td class="c emph">${money(b.next.profit)}</td>
+      <td class="c">${int(m.finalists)}</td><td class="c">${money(m.finalists_next_total)}</td>
+    </tr>`;
+  }).join('')}</tbody>`;
+
+  $('#window-tops').innerHTML = R.windows.map((m) =>
+    `<details class="tops"><summary>${esc(t('tops', { n: m.top.length, a: m.ranked, b: m.traded_in }))}</summary>
+    <div class="table-wrap" style="margin-top:8px;border:1px solid var(--line);border-radius:8px;max-height:360px">
+    <table><thead><tr>
+      <th class="c">${esc(t('t_rank'))}</th><th class="l">${esc(t('t_cfg'))}</th>
+      <th class="c">${esc(t('c_tp'))}</th><th class="c">${esc(t('c_sl'))}</th><th class="c">${esc(t('c_lev'))}</th>
+      <th class="c">${esc(t('s_score'))}</th><th class="c">${esc(t('s_profit'))}</th>
+      <th class="c">${esc(t('t_drop'))}</th><th class="c">${esc(t('t_wr'))}</th>
+      <th class="c">${esc(t('s_next'))}</th>
+    </tr></thead><tbody>${m.top.map((row) => {
+      const cols = stratCols(row.label);
+      return `<tr>
+      <td class="c">${row.rank}</td>
+      <td class="l">${stratCell(row.label, '', row.exit_alts)}</td>
+      <td class="c">${cols.tpHtml}</td>
+      <td class="c">${cols.slHtml}</td>
+      <td class="c">${cols.levHtml}</td>
+      <td class="c">${fmt(row.scored.score, 3)}</td><td class="c">${money(row.scored.profit)}</td>
+      <td class="c">${fmt(row.scored.drop)}</td>
+      <td class="c">${pct(row.scored.win_rate)}</td>
+      <td class="c emph">${money(row.next.profit)}</td>
+    </tr>`;
+    }).join('')}</tbody></table></div></details>`
+  ).join('');
+
+  const v0 = R.verify[0];
+  let statusClass = 'warn', statusText = t('v_pending');
+  if (v0) {
+    statusClass = v0.ok ? 'good' : 'bad';
+    statusText = v0.ok ? t('v_ok') : t('v_bad');
+  }
+  $('#verify-summary').innerHTML = `
+    <div class="verify-card">
+      <div class="stat"><div class="k">${esc(t('v_status'))}</div><div class="v"><span class="ok-pill ${statusClass}">${esc(statusText)}</span></div></div>
+      <div class="stat"><div class="k">${esc(t('checked').split(':')[0])}</div><div class="v">${int(C.combinations_checked)}</div></div>
+      <div class="stat"><div class="k">${esc(t('v_fills'))}</div><div class="v">${v0 ? int(v0.fills) : '–'}</div></div>
+      <div class="stat"><div class="k">${esc(t('v_secs'))}</div><div class="v">${v0 ? fmt(v0.seconds, 0) + 's' : '–'}</div></div>
+    </div>
+    <p style="margin:0;padding:0 16px 12px;color:var(--muted);font-size:12px">${esc(t('checked', { n: C.combinations_checked }))}</p>
+    ${v0 ? `<p style="margin:0;padding:0 16px 14px;color:var(--ink-soft);font-size:12px"><span class="mono">${esc(v0.pair)}</span></p>` : ''}`;
+
+$('#verify').innerHTML = R.verify.length
+    ? `<thead><tr>
+        <th class="l">${esc(t('v_strat'))}</th><th class="c">${esc(t('v_fills'))}</th>
+        <th class="c">${esc(t('v_differ'))}</th><th class="c">${esc(t('v_time'))}</th>
+        <th class="c">${esc(t('v_result'))}</th>
+      </tr></thead><tbody>${R.verify.map((v) => `<tr>
+        <td class="l">${stratCell(String(v.pair).replace(/\s*\(.*\)$/, ''))}<div style="color:var(--faint);font-size:11px;margin-top:4px">${esc(v.pair)}</div></td>
+        <td class="c">${int(v.fills)}</td>
+        <td class="c ${v.differ ? 'neg' : 'pos'}">${v.differ}</td>
+        <td class="c">${fmt(v.seconds, 0)}s</td>
+        <td class="c ${v.ok ? 'pos' : 'neg'}">${esc(v.ok ? t('v_match') : t('v_mismatch'))}</td>
+      </tr>`).join('')}</tbody>`
+    : `<tbody><tr><td style="color:var(--faint);padding:16px">${esc(t('v_skip'))}</td></tr></tbody>`;
+}
+
+/* File stem wins: *_fa.html is always FA/RTL; EN file stays LTR. */
+if (location.pathname.includes('_fa.html') || LANG0 === 'fa') lang = 'fa';
+else lang = 'en';
+
+applyDocLang();
+renderChrome();
+renderAll();
+const hashTab = location.hash.replace('#', '');
+if (hashTab && $(`.tab[data-tab="${hashTab}"]`)) showTab(hashTab);
+</script>
+<script>/*__TABLE_SORT__*/</script>
+</body>
+</html>

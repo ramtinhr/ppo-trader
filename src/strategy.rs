@@ -31,18 +31,8 @@ use rust_decimal::Decimal;
 
 use crate::{exits::Exits, okx_history::Candle};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Signal {
-    Long,
-    Short,
-    /// Close the position, if any, and open nothing.
-    Flat,
-}
-
-/// Signal logic fed one closed bar at a time, independent of Nautilus.
-pub trait BarSignals: Debug {
-    fn on_bar(&mut self, bar: &Candle) -> Option<Signal>;
-}
+/// Re-export so existing `use dynamic_trader::strategy::{BarSignals, Signal}` keeps working.
+pub use crate::signals::{BarSignals, Signal};
 
 const PRICE_PRECISION: u8 = 1;
 const SIZE_PRECISION: u8 = 4;
