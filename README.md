@@ -4,8 +4,9 @@ Rust research and backtesting for perpetual futures with NautilusTrader `0.65.0`
 OKX BTC-USDT-SWAP perpetual (linear, settled in USDT). Strategy signals use one-hour bars built from
 every recorded trade.
 
-**Architecture (read this first):** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
-[docs/ARCHITECTURE.pdf](docs/ARCHITECTURE.pdf) · [docs/DT.md](docs/DT.md) (`dt` CLI).
+**Architecture (read this first):** [docs/architecture.html](docs/architecture.html)
+(open in a browser) · [docs/ARCHITECTURE.pdf](docs/ARCHITECTURE.pdf) ·
+[docs/DT.md](docs/DT.md) (`dt` CLI).
 
 ## Safety
 

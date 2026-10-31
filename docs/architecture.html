@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Dynamic Trader — Architecture Guide</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+  :root {
+    --ink: #14212b;
+    --muted: #5a6a75;
+    --rule: #d7dde2;
+    --panel: #f4f7f8;
+    --accent: #0b6e6e;
+    --accent-soft: #e6f3f3;
+    --code-bg: #eef2f4;
+    --warn: #8a4b08;
+  }
+
+  * { box-sizing: border-box; }
+  html { font-size: 11pt; }
+  body {
+    margin: 0;
+    color: var(--ink);
+    background: #fff;
+    font-family: "IBM Plex Sans", system-ui, sans-serif;
+    line-height: 1.55;
+  }
+
+  .page {
+    max-width: 820px;
+    margin: 0 auto;
+    padding: 48px 40px 72px;
+  }
+
+  @page {
+    size: A4;
+    margin: 18mm 16mm 20mm;
+  }
+  @media print {
+    .page { max-width: none; padding: 0; }
+    a { color: inherit; text-decoration: none; }
+    .no-print { display: none !important; }
+    h1, h2, h3 { break-after: avoid; }
+    pre, table, .card, .flow { break-inside: avoid; }
+  }
+
+  .hero {
+    border-bottom: 2px solid var(--ink);
+    padding-bottom: 28px;
+    margin-bottom: 36px;
+  }
+  .eyebrow {
+    font-size: 0.75rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 600;
+    margin: 0 0 10px;
+  }
+  h1 {
+    font-family: Fraunces, Georgia, serif;
+    font-weight: 700;
+    font-size: 2.35rem;
+    line-height: 1.15;
+    margin: 0 0 12px;
+    letter-spacing: -0.02em;
+  }
+  .lede {
+    font-size: 1.05rem;
+    color: var(--muted);
+    max-width: 38em;
+    margin: 0;
+  }
+  .meta {
+    margin-top: 18px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 18px;
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  .meta strong { color: var(--ink); font-weight: 600; }
+
+  h2 {
+    font-family: Fraunces, Georgia, serif;
+    font-size: 1.55rem;
+    margin: 42px 0 14px;
+    padding-top: 8px;
+    border-top: 1px solid var(--rule);
+  }
+  h3 {
+    font-family: Fraunces, Georgia, serif;
+    font-size: 1.15rem;
+    margin: 26px 0 8px;
+  }
+  p { margin: 0 0 12px; }
+  ul, ol { margin: 0 0 14px; padding-left: 1.25em; }
+  li { margin: 0 0 6px; }
+
+  code, .mono {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 0.86em;
+  }
+  code {
+    background: var(--code-bg);
+    padding: 0.1em 0.35em;
+    border-radius: 3px;
+  }
+  pre {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 14px 16px;
+    overflow: auto;
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 0.78rem;
+    line-height: 1.45;
+    margin: 0 0 16px;
+  }
+  pre code { background: none; padding: 0; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 0 18px;
+    font-size: 0.9rem;
+  }
+  th, td {
+    text-align: left;
+    vertical-align: top;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--rule);
+  }
+  th {
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+    background: var(--panel);
+  }
+  td.path { font-family: "IBM Plex Mono", monospace; font-size: 0.8rem; white-space: nowrap; }
+  td.lines { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); width: 4.5em; }
+
+  .grid2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin: 0 0 18px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .card h4 {
+    margin: 0 0 6px;
+    font-size: 0.95rem;
+    font-family: Fraunces, Georgia, serif;
+  }
+  .card p { margin: 0; font-size: 0.88rem; color: var(--muted); }
+
+  .flow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 18px;
+  }
+  .flow .step {
+    background: var(--accent-soft);
+    color: var(--accent);
+    border: 1px solid #b7d9d9;
+    border-radius: 999px;
+    padding: 6px 12px;
+    font-size: 0.82rem;
+    font-weight: 600;
+  }
+  .flow .arrow { color: var(--muted); font-size: 0.9rem; }
+
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    padding: 12px 14px;
+    margin: 0 0 18px;
+    border-radius: 0 6px 6px 0;
+  }
+  .callout.warn {
+    border-left-color: var(--warn);
+    background: #fbf3e8;
+  }
+  .toc a {
+    color: var(--ink);
+    text-decoration: none;
+    border-bottom: 1px solid var(--rule);
+  }
+  .toc li { margin-bottom: 4px; }
+  .footer-note {
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid var(--rule);
+    font-size: 0.8rem;
+    color: var(--muted);
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+<header class="hero">
+  <p class="eyebrow">Dynamic Trader · Architecture Guide</p>
+  <h1>How the whole system fits together</h1>
+  <p class="lede">
+    A file-by-file map of the hybrid stack: Rust owns the Nautilus-matching
+    market engine; Go owns research policy, browse UI, and reports.
+    Written for fullstack developers (JS / PHP / Go) who did not write the Rust.
+  </p>
+  <div class="meta">
+    <span><strong>Market</strong> OKX BTC-USDT-SWAP</span>
+    <span><strong>Nautilus</strong> 0.65.0 (verify feature)</span>
+    <span><strong>Branch</strong> ramtin/cleanup-docs-b567</span>
+    <span><strong>Stack</strong> Rust engine + Go <code>dt</code> CLI</span>
+  </div>
+</header>
+
+<section>
+  <h2>1. One-minute mental model</h2>
+  <div class="flow">
+    <span class="step">OKX zips</span><span class="arrow">→</span>
+    <span class="step">Rust tape</span><span class="arrow">→</span>
+    <span class="step">scan .bin</span><span class="arrow">→</span>
+    <span class="step">Go walk-forward</span><span class="arrow">→</span>
+    <span class="step">simulate JSONL</span><span class="arrow">→</span>
+    <span class="step">HTML / JSON</span>
+  </div>
+  <div class="grid2">
+    <div class="card">
+      <h4>Rust = engine</h4>
+      <p>Download archives, build the tick tape, scan millions of RSI×TP/SL combos, batch-simulate fills, optionally verify with NautilusTrader.</p>
+    </div>
+    <div class="card">
+      <h4>Go = product</h4>
+      <p><code>dt</code> ranks windows, runs N/M walk-forward policy, serves the browse UI, writes reports. Changes here compile in seconds.</p>
+    </div>
+  </div>
+  <div class="callout">
+    <strong>Rule:</strong> change fill rules in Rust (<code>scan</code> + <code>strategy</code>) and confirm with <code>verify</code>.
+    Change how winners are picked in Go (<code>internal/walkforward</code>, <code>internal/score</code>).
+  </div>
+</section>
+
+<section>
+  <h2>2. Repository map</h2>
+  <pre><code>ppo-trader/
+├── Cargo.toml              Rust crate + optional feature verify
+├── go.mod / cmd/dt/        Go product CLI entry
+├── config/testnet.toml     Fees, paper_only, max leverage
+├── scripts/
+│   ├── build_dt.sh         macOS-safe Go build (CGO + external linker)
+│   ├── price_iter.sh       Fast price-path iteration loop
+│   └── md_to_pdf.py        Legacy text PDF (superseded by this HTML)
+├── docs/
+│   ├── architecture.html   ← this guide (print to PDF)
+│   ├── ARCHITECTURE.pdf    Generated from the HTML
+│   ├── DT.md               Short CLI cheat sheet
+│   └── ARCHITECTURE.md     Markdown twin
+├── src/                    Rust library (shared by all engine bins)
+├── src/bin/                Rust binaries
+└── internal/               Go packages used by dt
+</code></pre>
+  <p><code>data/</code> is gitignored. Archives and scan outputs live only on your machine.</p>
+</section>
+
+<section>
+  <h2>3. End-to-end data flow</h2>
+  <h3>Research path (99% of compute)</h3>
+  <ol>
+    <li><code>download</code> fetches OKX daily trade zips into <code>data/okx/BTC-USDT-SWAP/archives/</code> and verifies ID continuity + volume vs OKX’s 1D candle.</li>
+    <li><code>Tape::load</code> turns every trade into Nautilus L1 matching prices with a segment tree for TP/SL <code>first_hit</code>.</li>
+    <li><code>scan --bucket window</code> enumerates RSI pairs × TF × TP/SL × leverage into fixed-size <code>window_*.bin</code> + <code>meta.json</code>.</li>
+    <li>Go <code>dt walk-forward</code> ranks those bins, picks finalists, batch-calls Rust <code>simulate</code> (JSONL) for closed trades, runs N/M score policy, writes JSON/HTML.</li>
+  </ol>
+  <h3>Truth path (slow)</h3>
+  <p>Only the last/best combos go through Nautilus via <code>verify</code> / <code>backtest</code> / <code>window_nm_walk_forward --verify</code>. Same fill rules as the scanner; disagreement fails the run.</p>
+</section>
+
+<section>
+  <h2>4. Rust library (<code>src/</code>)</h2>
+  <p>Every library module, what it is for, and roughly how big it is.</p>
+  <table>
+    <thead><tr><th>File</th><th>Lines</th><th>Responsibility</th></tr></thead>
+    <tbody>
+      <tr><td class="path">okx_history.rs</td><td class="lines">551</td><td>OKX download/verify, Trade/Candle types, known gaps &amp; voided IDs, archive paths</td></tr>
+      <tr><td class="path">tape.rs</td><td class="lines">383</td><td>Tick matching tape + first_hit tree (Nautilus L1 rules without Nautilus)</td></tr>
+      <tr><td class="path">scan.rs</td><td class="lines">523</td><td>Fast RSI-cross + exits simulator; Outcome / ClosedTrade / Record</td></tr>
+      <tr><td class="path">tpsl_grid.rs</td><td class="lines">772</td><td>Vectorized single-TP×SL×lev grid (Entries / Frame / Grid)</td></tr>
+      <tr><td class="path">window_score.rs</td><td class="lines">849</td><td>WindowStats (20-byte records), ScoreModel budget-10 fit</td></tr>
+      <tr><td class="path">price_model.rs</td><td class="lines">381</td><td>OLS candle-return features for price-path research</td></tr>
+      <tr><td class="path">exits.rs</td><td class="lines">249</td><td>Stop / TP ladder math + ExitProfile scale-outs</td></tr>
+      <tr><td class="path">filters.rs</td><td class="lines">226</td><td>EMA trend + ATR filters wrapping crosses</td></tr>
+      <tr><td class="path">grid.rs</td><td class="lines">185</td><td>CLI parsers for lengths/ladders + RSI series helpers</td></tr>
+      <tr><td class="path">rsi.rs</td><td class="lines">90</td><td>Wilder RSI</td></tr>
+      <tr><td class="path">rsi_cross.rs</td><td class="lines">114</td><td>Fast/slow RSI cross signals</td></tr>
+      <tr><td class="path">pine_rsi.rs</td><td class="lines">146</td><td>TradingView “RSI Strategy” port</td></tr>
+      <tr><td class="path">fills.rs</td><td class="lines">26</td><td>Fill / FillKind — no Nautilus dependency</td></tr>
+      <tr><td class="path">signals.rs</td><td class="lines">20</td><td>Signal / BarSignals — no Nautilus dependency</td></tr>
+      <tr><td class="path">config.rs</td><td class="lines">91</td><td>TOML load; rejects live trading &amp; bad leverage</td></tr>
+      <tr><td class="path">verify_cmp.rs</td><td class="lines">60</td><td>Compare scanner vs Nautilus fills</td></tr>
+      <tr><td class="path">tradingview.rs</td><td class="lines">371</td><td>TV WebSocket/HTTP client for tv_check</td></tr>
+      <tr><td class="path">strategy.rs</td><td class="lines">319</td><td>Nautilus ReversalStrategy (feature verify)</td></tr>
+      <tr><td class="path">backtest.rs</td><td class="lines">259</td><td>Nautilus BacktestEngine wrapper (feature verify)</td></tr>
+      <tr><td class="path">lib.rs</td><td class="lines">21</td><td>Module exports; gates backtest/strategy on verify</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Key types you will see everywhere</h3>
+  <ul>
+    <li><code>okx_history::Trade</code> / <code>Candle</code> — raw market data</li>
+    <li><code>tape::Tape</code> — matching prices + <code>first_hit(from,to,level,up)</code></li>
+    <li><code>exits::Exits</code> — <code>{ stop_pct, targets:[(pct,share)], breakeven }</code></li>
+    <li><code>scan::simulate</code> / <code>simulate_logged</code> — fast replay API</li>
+    <li><code>fills::Fill</code> — one fill (time, kind, side, size, price, fee)</li>
+    <li><code>window_score::WindowStats</code> — per-combo per-window score inputs</li>
+    <li><code>signals::BarSignals</code> — trait implemented by RSI / Pine / FilteredCross</li>
+  </ul>
+</section>
+
+<section>
+  <h2>5. Rust binaries (<code>src/bin/</code>)</h2>
+  <table>
+    <thead><tr><th>Binary</th><th>Lines</th><th>Needs Nautilus?</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td class="path">download</td><td class="lines">52</td><td>No</td><td>Fetch + verify OKX day archives. Args: <code>START END</code> (end exclusive), <code>--dir</code></td></tr>
+      <tr><td class="path">scan</td><td class="lines">~2.1k</td><td>No</td><td><code>--bucket window|month</code>. Writes meta.json + .bin records</td></tr>
+      <tr><td class="path">simulate</td><td class="lines">438</td><td>No</td><td>Load tape once; JSONL stdin → JSONL stdout batch replay</td></tr>
+      <tr><td class="path">verify</td><td class="lines">192</td><td>Yes</td><td>One combo through Nautilus; compare fills JSON</td></tr>
+      <tr><td class="path">backtest</td><td class="lines">207</td><td>Yes</td><td>Pine RSI strategy table via Nautilus</td></tr>
+      <tr><td class="path">tv_check</td><td class="lines">694</td><td>No engine</td><td>Compare candles/RSI/trades vs TradingView (needs .env cookies)</td></tr>
+      <tr><td class="path">window_nm_walk_forward</td><td class="lines">4749</td><td>Yes (default)</td><td>Legacy score path + <strong>active price path</strong> (<code>--path price</code>)</td></tr>
+    </tbody>
+  </table>
+  <p><code>scan/</code> splits into <code>main.rs</code> (bucket switch), <code>window.rs</code> (equal windows / staged grid), <code>month.rs</code> (calendar months).</p>
+</section>
+
+<section>
+  <h2>6. On-disk formats</h2>
+  <h3>OKX archives</h3>
+  <pre><code>data/okx/BTC-USDT-SWAP/archives/
+  BTC-USDT-SWAP-trades-2026-09-01.zip   # or gz
+  … plus a verified marker used by is_verified()</code></pre>
+  <p>An archive day runs 16:00 UTC previous day → 16:00 UTC (OKX 1D candle window).</p>
+
+  <h3>Window scan (<code>--bucket window</code>)</h3>
+  <ul>
+    <li><code>meta.json</code> — start/end, timeframes, lengths, TP/SL/leverage grids, window list, fees, size_btc, scan_version (1 dense / 3 staged)</li>
+    <li><code>window_*.bin</code> — one <strong>20-byte LE</strong> record per combo:<br/>
+      <code>profit f32 · drop f32 · worst f32 · hold_hours f32 · trades u16 · wins u16</code>
+      (<code>window_score::RECORD = 20</code>)</li>
+  </ul>
+
+  <h3>Month scan (<code>--bucket month</code>)</h3>
+  <ul>
+    <li><code>month_YYYY-MM.bin</code>, <code>all.bin</code> — <strong>12-byte LE</strong> records: <code>sum f32 · drop f32 · trades u32</code></li>
+  </ul>
+</section>
+
+<section>
+  <h2>7. <code>simulate</code> JSONL contract</h2>
+  <p>Go walk-forward must batch. Never spawn one process per combo.</p>
+  <p><strong>Request line</strong></p>
+  <pre><code>{"id":"42","minutes":60,"fast":14,"slow":50,
+ "exits":{"stop_pct":1.0,"targets":[[1.0,1.0]],"breakeven":false},
+ "leverage":2,"logged":true,"record_fills":false}</code></pre>
+  <p><strong>Response line</strong> includes <code>outcome</code> (realized, fees, total, …), optional <code>closed[]</code> trades (<code>exit_ms</code>, <code>entry_ms</code>, <code>net</code>), optional <code>fills[]</code>.</p>
+  <p>CLI: <code>--start --end --config --data --size-btc --balance-usdt --jobs</code>. Send <code>{"flush":true}</code> to force a batch flush.</p>
+</section>
+
+<section>
+  <h2>8. Go product (<code>cmd/dt</code> + <code>internal/</code>)</h2>
+  <table>
+    <thead><tr><th>Package</th><th>Lines</th><th>Job</th></tr></thead>
+    <tbody>
+      <tr><td class="path">cmd/dt</td><td class="lines">180</td><td>CLI router</td></tr>
+      <tr><td class="path">internal/engine</td><td class="lines">277</td><td>Find/exec Rust bins; Simulate batch client</td></tr>
+      <tr><td class="path">internal/browse</td><td class="lines">1166</td><td>HTTP browser over window/month bins</td></tr>
+      <tr><td class="path">internal/walkforward</td><td class="lines">982</td><td>N/M score-path walk-forward</td></tr>
+      <tr><td class="path">internal/score</td><td class="lines">459</td><td>Budget-10 ScoreModel (Rust parity tests)</td></tr>
+      <tr><td class="path">internal/report</td><td class="lines">58</td><td>Embed HTML + regenerate from JSON</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Engine discovery</h3>
+  <pre><code>$DT_ENGINE_DIR
+./target/relfast
+./target/release
+./target/debug
+$PATH</code></pre>
+
+  <h3>Commands</h3>
+  <pre><code>./scripts/build_dt.sh
+./dt download|scan|simulate|verify|backtest|tv-check …
+./dt browse --scan DIR [--port N] [--layout window|month|auto]
+./dt walk-forward --scan DIR [score-path flags…]
+./dt report --json PATH
+./dt price-walk …     # wraps window_nm_walk_forward --path price</code></pre>
+</section>
+
+<section>
+  <h2>9. Feature <code>verify</code> (Nautilus boundary)</h2>
+  <div class="callout warn">
+    Without <code>--features verify</code> (or with <code>--no-default-features</code>), <code>backtest</code> and <code>strategy</code> modules are not compiled and nautilus crates are not linked. Scanner rebuilds drop from ~45s LTO pain toward ~5–15s relfast.
+  </div>
+  <pre><code># Fast engine only
+cargo build --profile relfast --no-default-features \
+  --bin download --bin scan --bin simulate
+
+# Need Nautilus
+cargo build --profile relfast --features verify \
+  --bin verify --bin backtest --bin window_nm_walk_forward</code></pre>
+</section>
+
+<section>
+  <h2>10. Config &amp; safety</h2>
+  <p><code>config/testnet.toml</code></p>
+  <ul>
+    <li><code>risk.paper_only</code> must be <code>true</code> (live rejected)</li>
+    <li><code>risk.max_leverage</code> validated (1–10 in config; research often caps lower)</li>
+    <li><code>venues.okx.maker_fee_bps</code> / <code>taker_fee_bps</code></li>
+  </ul>
+  <p>Secrets only in <code>.env</code> (gitignored). <code>tv_check</code> needs TradingView <code>sessionid</code> cookies. Never commit keys.</p>
+</section>
+
+<section>
+  <h2>11. Typical workflow</h2>
+  <pre><code># 1) Two years of trades (end exclusive)
+cargo run --release --bin download -- 2024-10-31 2026-10-31
+
+# 2) Window scan
+cargo run --release --bin scan -- --bucket window \
+  --start 2025-10-01 --end 2026-10-01 --hours 24
+
+# 3) Browse
+./scripts/build_dt.sh
+./dt browse --scan data/windowscan/&lt;dir&gt; --port 8091
+
+# 4) Score walk-forward (Go)
+./dt walk-forward --scan data/windowscan/&lt;dir&gt;
+
+# 5) Price path (still Rust)
+./dt price-walk --scan data/windowscan/&lt;dir&gt; --verify 0</code></pre>
+</section>
+
+<section>
+  <h2>12. What cleanup removed</h2>
+  <p>Deleted as unused after the hybrid split (~7.8k lines):</p>
+  <ul>
+    <li><code>browse_full_scan</code> / <code>browse_window_scan</code> → replaced by <code>dt browse</code></li>
+    <li>Thin <code>full_scan</code> / <code>window_scan</code> wrappers → use <code>scan --bucket …</code></li>
+    <li>Legacy orchestration: <code>rsi_combos</code>, <code>walk_forward</code>, <code>walk_forward_trades</code>, <code>full_walk_forward</code>, <code>window_walk_forward</code> (+ HTML)</li>
+  </ul>
+  <p>Still present: engine bins + <code>window_nm_walk_forward</code> for price path.</p>
+</section>
+
+<section>
+  <h2>13. Where to edit what</h2>
+  <table>
+    <thead><tr><th>You want to…</th><th>Edit</th></tr></thead>
+    <tbody>
+      <tr><td>Change how TP/SL fills</td><td class="path">src/scan.rs + src/strategy.rs, then verify</td></tr>
+      <tr><td>Change OKX download / gaps</td><td class="path">src/okx_history.rs</td></tr>
+      <tr><td>Change scan grid / staged survivors</td><td class="path">src/bin/scan/window.rs</td></tr>
+      <tr><td>Change ranking formula</td><td class="path">src/window_score.rs and internal/score</td></tr>
+      <tr><td>Change N/M walk-forward policy</td><td class="path">internal/walkforward/nm.go</td></tr>
+      <tr><td>Change browse UI</td><td class="path">internal/browse/</td></tr>
+      <tr><td>Change price-path experiment</td><td class="path">src/bin/window_nm_walk_forward.rs + price_model.rs</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<p class="footer-note">
+  Generated for Dynamic Trader · open <code>docs/architecture.html</code> in a browser, or use the PDF built from it.
+  Companion CLI notes: <code>docs/DT.md</code>.
+</p>
+
+</div>
+</body>
+</html>
