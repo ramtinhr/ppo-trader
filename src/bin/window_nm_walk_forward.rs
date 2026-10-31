@@ -150,6 +150,10 @@ const PRICE_HORIZON_AUTO_CAP: usize = 500;
 const PRICE_SIGNAL_CONFIRM_BARS: usize = 4;
 /// Skip stops that need a higher break-even win rate than this after fees.
 const PRICE_MAX_BREAKEVEN_WIN: f64 = 0.75;
+/// Cap stop%×leverage (balance risk if SL hits). Stops 10x blow-ups on flat paths.
+const PRICE_MAX_IMPLIED_RISK_PCT: f64 = 5.0;
+/// Scale |h=1 return| → path span % for exit search (flat OLS paths need shape).
+const PRICE_PATH_SPAN_FROM_RHAT: f64 = 20.0;
 /// Combinations shown per window in the report.
 const SHOWN: usize = 20;
 /// Minimum IS (training) profit in USDT required before a pick/choice is traded.
@@ -2919,6 +2923,61 @@ fn predicted_closes(
         .collect()
 }
 
+/// OLS multi-h paths are often nearly flat; build a clean directional span so TP/SL levels compete.
+/// Monotone favorable ramp to `span_pct` by path end (no adverse spikes that false-trigger SL).
+fn shaped_predicted_path(raw: &[f64], entry: f64, long: bool, span_pct: f64) -> Vec<f64> {
+    if raw.is_empty() || !(entry > 0.0) || !(span_pct > 0.0) {
+        return raw.to_vec();
+    }
+    let n = raw.len() as f64;
+    let target = span_pct / 100.0;
+    (1..=raw.len())
+        .map(|i| {
+            let shaped_fav = target * (i as f64 / n);
+            if long {
+                entry * (1.0 + shaped_fav)
+            } else {
+                entry * (1.0 - shaped_fav)
+            }
+        })
+        .collect()
+}
+
+fn path_span_pct_for_signal(
+    raw: &[f64],
+    entry: f64,
+    long: bool,
+    rhat: f64,
+    stop_lo: f64,
+    stop_hi: f64,
+) -> f64 {
+    let max_fav = raw
+        .iter()
+        .map(|&px| {
+            if long {
+                (px - entry) / entry
+            } else {
+                (entry - px) / entry
+            }
+        })
+        .fold(0.0_f64, f64::max)
+        * 100.0;
+    let from_rhat = rhat.abs() * 100.0 * PRICE_PATH_SPAN_FROM_RHAT;
+    max_fav
+        .max(from_rhat)
+        .max(stop_lo)
+        .min(stop_hi)
+}
+
+fn exit_reason_rank(reason: &str) -> i32 {
+    match reason {
+        "tp" | "ladder" => 2,
+        "timeout" => 1,
+        "stop" => 0,
+        _ => 0,
+    }
+}
+
 fn actual_closes(candles: &[Candle], entry_bar: usize, h_max: usize) -> Vec<f64> {
     let mut out = Vec::with_capacity(h_max);
     for h in 1..=h_max {
@@ -2989,6 +3048,11 @@ fn run_price_strategy_per_trade(
     let taker = mk.costs.taker;
     let maker = mk.costs.maker;
     let max_lev = f64::from(*args.price_leverage.iter().max().unwrap_or(&1));
+    let max_risk_pct = args
+        .price_risk
+        .iter()
+        .copied()
+        .fold(PRICE_MAX_IMPLIED_RISK_PCT, f64::max);
     let (usable_stops, skipped_fee): (Vec<f64>, Vec<f64>) = args
         .price_stops
         .iter()
@@ -3006,8 +3070,10 @@ fn run_price_strategy_per_trade(
         "{label}: all stops failed fee floor"
     );
 
+    let stop_lo = usable_stops.iter().copied().fold(f64::INFINITY, f64::min);
+    let stop_hi = usable_stops.iter().copied().fold(0.0_f64, f64::max);
     println!(
-        "  {label} per-trade exits: H={h_max} · stops={} · lev={:?} · debounce={PRICE_SIGNAL_CONFIRM_BARS} · signals={} · OOS {}..{}",
+        "  {label} per-trade exits: H={h_max} · stops={} · lev={:?} · max_risk={max_risk_pct}% · debounce={PRICE_SIGNAL_CONFIRM_BARS} · signals={} · OOS {}..{}",
         usable_stops.len(),
         args.price_leverage,
         signals.len(),
@@ -3041,13 +3107,23 @@ fn run_price_strategy_per_trade(
             continue;
         }
         let long = dir > 0;
-        let pred_path = predicted_closes(models, ref_px, &feat);
-        if pred_path.is_empty() {
+        let raw_path = predicted_closes(models, ref_px, &feat);
+        if raw_path.is_empty() {
             continue;
         }
+        let rhat = h1.predict_return(&feat);
+        let span_pct = path_span_pct_for_signal(&raw_path, entry, long, rhat, stop_lo, stop_hi);
+        // Search exits on a shaped path so different TP/SL actually compete (raw OLS path is ~flat).
+        let pred_path = shaped_predicted_path(&raw_path, entry, long, span_pct);
         let act_path = actual_closes(candles, i, h_max);
 
-        // Per signal: search TP/SL/ladder × leverage on the predicted path; enter the best liquid-safe.
+        // TP/SL distance for this bar ≈ how far this signal's path is expected to run.
+        let target_stop = usable_stops
+            .iter()
+            .copied()
+            .filter(|&s| s <= span_pct + 1e-9)
+            .fold(stop_lo, f64::max);
+
         let mut best: Option<PathPick> = None;
         let mut oracle_best_pnl = f64::NAN;
         let mut oracle_label = Value::Null;
@@ -3056,6 +3132,10 @@ fn run_price_strategy_per_trade(
                 for &lev_u in &args.price_leverage {
                     let lev = f64::from(lev_u);
                     if lev > max_lev + 1e-12 {
+                        continue;
+                    }
+                    let risk_pct = implied_risk_pct(exits.stop_pct, lev);
+                    if risk_pct > max_risk_pct + 1e-12 {
                         continue;
                     }
                     let steps = size_for_leverage(balance, lev, entry);
@@ -3069,14 +3149,33 @@ fn run_price_strategy_per_trade(
                     let sim = simulate_exits_on_path(
                         long, entry, &exits, steps, &pred_path, taker, maker,
                     );
-                    let risk_pct = implied_risk_pct(exits.stop_pct, lev);
+                    if !act_path.is_empty() {
+                        let o = simulate_exits_on_path(
+                            long, entry, &exits, steps, &act_path, taker, maker,
+                        );
+                        if !oracle_best_pnl.is_finite() || o.pnl > oracle_best_pnl {
+                            oracle_best_pnl = o.pnl;
+                            oracle_label = json!(exits.label());
+                        }
+                    }
+                    // Live pick: only stops at this signal's target distance; must take profit on path.
+                    if (exits.stop_pct - target_stop).abs() > 1e-9 {
+                        continue;
+                    }
+                    if sim.pnl <= 0.0 || exit_reason_rank(sim.reason) < 2 {
+                        continue;
+                    }
                     let path_r = sim.pnl / (balance * risk_pct / 100.0).max(1e-9);
                     let dist = liquid_distance_pct(exits.stop_pct, lev);
                     let better = match &best {
                         None => true,
                         Some(b) => {
+                            // Max path profit at this TP/SL, then R, then safer liquid.
                             sim.pnl > b.path_pnl + 1e-9
-                                || ((sim.pnl - b.path_pnl).abs() <= 1e-9 && dist > b.liquid_dist)
+                                || ((sim.pnl - b.path_pnl).abs() <= 1e-9 && path_r > b.path_r + 1e-9)
+                                || ((sim.pnl - b.path_pnl).abs() <= 1e-9
+                                    && (path_r - b.path_r).abs() <= 1e-9
+                                    && dist > b.liquid_dist)
                         }
                     };
                     if better {
@@ -3089,15 +3188,6 @@ fn run_price_strategy_per_trade(
                             path_r,
                             liquid_dist: dist,
                         });
-                    }
-                    if !act_path.is_empty() {
-                        let o = simulate_exits_on_path(
-                            long, entry, &exits, steps, &act_path, taker, maker,
-                        );
-                        if !oracle_best_pnl.is_finite() || o.pnl > oracle_best_pnl {
-                            oracle_best_pnl = o.pnl;
-                            oracle_label = json!(exits.label());
-                        }
                     }
                 }
             }
@@ -3182,7 +3272,9 @@ fn run_price_strategy_per_trade(
     );
 
     Ok(json!({
-        "selection_rule": "per signal: enter on debounced direction; pick TP/SL/ladder × leverage maximizing predicted-path PnL among liquid-safe; oracle peeks actuals for report only",
+        "selection_rule": format!(
+            "per signal: path span from |rhat|; TP/SL≈that span; among ladders×lev at that stop pick max path PnL (TP hit, liquid-safe, stop×lev≤{max_risk_pct}%); oracle peeks actuals only"
+        ),
         "summary": {
             "exits_mode": "per_trade",
             "horizon": h_max,

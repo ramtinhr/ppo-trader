@@ -32,12 +32,12 @@
   .kpi .v { font-family: var(--mono); font-size: 18px; margin-top: 6px; }
   .pos { color: var(--pos); } .neg { color: var(--neg); }
   table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12.5px; }
-  th, td { border-bottom: 1px solid var(--line); padding: 8px 6px; text-align: left; }
-  th { white-space: nowrap; }
-  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
-  td.wrap { white-space: normal; min-width: 9rem; }
-  th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+  th, td { border-bottom: 1px solid var(--line); padding: 8px 8px; text-align: left; white-space: nowrap; vertical-align: middle; }
+  th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); z-index: 1; }
+  td.num { font-variant-numeric: tabular-nums; }
   .table-wrap { overflow: auto; max-height: 70vh; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  .oracle-col { color: var(--muted); }
+  .oracle-col .v { color: var(--ink); }
   .note { color: var(--muted); font-size: 13px; margin-top: 12px; line-height: 1.45; }
   .chart-card {
     margin-top: 16px; background: var(--panel); border: 1px solid var(--line);
@@ -190,35 +190,39 @@ $('#eq').textContent = [
   ...eqBits,
 ].filter(Boolean).join(' · ');
 
-$('#trade-note').innerHTML = `Forecast candles (${S.length}) are not trades. Each direction signal <b>enters</b> and picks that bar's best TP/SL/ladder + risk on the predicted path (max path PnL, liquid-safe). Oracle peeks actuals for comparison only — <b>not used to trade</b>.`;
+$('#trade-note').innerHTML = `Each direction signal enters with the best <b>TP/SL/lev</b> for that bar on the <b>predicted</b> path (live-safe). <b>Realized</b> = what actually happened. <b>Oracle</b> = if we had peeked at future candles (comparison only — not used to trade). Forecast candles (${S.length}) are not trades.`;
 
 $('#trades-intro').textContent = trades.length
-  ? `${trades.length} trades · each row = that point's TP/SL/lev/size · oracle = peeked actuals, not used`
+  ? `${trades.length} trades · PnL ${signed(ST.total_pnl ?? total)} · columns after Realized/Running are just the running total; Oracle is a what-if peek`
   : 'No strategy trades (no direction signals in OOS, or strategy was off).';
 
 const th = $('#trades thead');
 const tb = $('#trades tbody');
 th.innerHTML = `<tr>
-  <th>#</th><th>Side</th><th>Entry</th><th>Price</th><th>This trade's exits</th>
-  <th>Risk%</th><th>Lev</th><th>Size BTC</th><th>Why closed</th>
-  <th>Path R</th><th>Path PnL</th><th>Realized</th><th>Running</th>
-  <th>Oracle PnL <span class="pill">not used</span></th>
+  <th>#</th>
+  <th>Side</th>
+  <th>Entry time</th>
+  <th>Entry</th>
+  <th>TP / SL used</th>
+  <th>Lev</th>
+  <th>Size</th>
+  <th>Closed</th>
+  <th>Profit</th>
+  <th>Running</th>
+  <th class="oracle-col">Oracle peek <span class="pill">not used</span></th>
 </tr>`;
 tb.innerHTML = trades.map((t, i) => `<tr>
   <td class="num">${i+1}</td>
   <td>${t.side || ''}</td>
   <td class="num">${t.entry_at || ''}</td>
   <td class="num">${fmt(t.entry_price, 2)}</td>
-  <td class="wrap">${t.exits?.label || ''}</td>
-  <td class="num">${fmt(t.risk_pct, 2)}</td>
+  <td>${t.exits?.label || ''}</td>
   <td class="num">${fmt(t.leverage, 2)}x</td>
   <td class="num">${fmt(t.size_btc, 4)}</td>
-  <td class="wrap">${t.reason || ''} @h=${t.exit_h ?? '—'}</td>
-  <td class="num ${cls(t.path_r)}">${t.path_r == null ? '—' : fmt(t.path_r, 2)}</td>
-  <td class="num ${cls(t.path_pnl)}">${signed(t.path_pnl || 0)}</td>
+  <td>${t.reason || ''}</td>
   <td class="num ${cls(t.pnl)}">${signed(t.pnl || 0)}</td>
   <td class="num ${cls(t.running_pnl)}">${signed(t.running_pnl || 0)}</td>
-  <td class="num ${cls(t.oracle_pnl)}">${t.oracle_pnl == null ? '—' : signed(t.oracle_pnl)}${t.oracle_exits ? `<div style="color:var(--muted);font-size:11px">${t.oracle_exits}</div>` : ''}</td>
+  <td class="num oracle-col"><span class="v ${cls(t.oracle_pnl)}">${t.oracle_pnl == null ? '—' : signed(t.oracle_pnl)}</span></td>
 </tr>`).join('');
 
 const HZ = M.horizons || [];
