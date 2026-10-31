@@ -223,6 +223,18 @@ Configured fees are per side, in basis points. The round-trip estimate is:
 2 × trading fee + spread + 2 × slippage + absolute funding
 ```
 
+## Product CLI (`dt`)
+
+Go owns the product layer (browse HTTP, N/M score walk-forward, HTML reports). Rust remains the
+engine (`download`, `scan`, `simulate`, `verify`, …). See [docs/DT.md](docs/DT.md).
+
+```bash
+go build -o dt ./cmd/dt
+dt browse --scan data/windowscan/… --port 8091
+dt walk-forward --scan data/windowscan/… --require-fit 0
+dt report --json data/windowscan/…/nm_walk_forward.json
+```
+
 ## Next steps
 
 1. Model funding, spread, and slippage.
