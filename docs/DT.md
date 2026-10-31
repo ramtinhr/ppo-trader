@@ -19,7 +19,10 @@ cargo build --profile relfast --no-default-features --bin download --bin scan --
 Download only (no Go):
 
 ```bash
-cargo run --release --bin download -- 2024-10-31 2026-10-31
+# SOCKS5 when OKX is blocked (Clash/V2Ray local port — change if yours differs)
+cargo run --release --bin download -- 2024-10-30 2026-10-30 \
+  --proxy socks5://127.0.0.1:1080
+# or: export OKX_PROXY=socks5://127.0.0.1:1080
 ```
 
 Engine discovery order: `$DT_ENGINE_DIR`, `./target/relfast`, `./target/release`, `./target/debug`, then `PATH`.

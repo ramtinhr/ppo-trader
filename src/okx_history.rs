@@ -16,11 +16,39 @@ use std::{
     fs::{self, File},
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
+use ureq::Proxy;
+
+/// Optional override for [`http`], set once from the download CLI (`--proxy`).
+static PROXY_OVERRIDE: OnceLock<String> = OnceLock::new();
+
+/// Force every OKX HTTP call through this proxy URL (e.g. `socks5://127.0.0.1:1080`).
+/// Call before the first request. Ignored if already set.
+pub fn set_proxy(url: impl Into<String>) {
+    let url = url.into();
+    let _ = PROXY_OVERRIDE.set(url);
+}
+
+/// Proxy URL from CLI override or env (`OKX_PROXY`, `ALL_PROXY`, `all_proxy`, `SOCKS5_PROXY`).
+pub fn proxy_url() -> Option<String> {
+    if let Some(url) = PROXY_OVERRIDE.get() {
+        return Some(url.clone());
+    }
+    for key in ["OKX_PROXY", "ALL_PROXY", "all_proxy", "SOCKS5_PROXY"] {
+        if let Ok(v) = std::env::var(key) {
+            let v = v.trim().to_string();
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
 
 pub const INSTRUMENT: &str = "BTC-USDT-SWAP";
 /// BTC per contract.
@@ -140,12 +168,18 @@ pub fn fetch_day(dir: &Path, day: NaiveDate, previous: Option<&DaySummary>) -> R
 }
 
 /// HTTP client whose requests fail instead of hanging forever when OKX stalls.
+/// Routes through [`proxy_url`] when set (SOCKS5 / HTTP CONNECT).
 fn http() -> ureq::Agent {
-    ureq::Agent::config_builder()
+    let mut builder = ureq::Agent::config_builder()
         .timeout_connect(Some(std::time::Duration::from_secs(30)))
-        .timeout_global(Some(std::time::Duration::from_secs(600)))
-        .build()
-        .new_agent()
+        .timeout_global(Some(std::time::Duration::from_secs(600)));
+    if let Some(url) = proxy_url() {
+        let proxy = Proxy::new(&url).unwrap_or_else(|e| {
+            panic!("invalid OKX proxy URL {url:?}: {e:#} (example: socks5://127.0.0.1:1080)")
+        });
+        builder = builder.proxy(Some(proxy));
+    }
+    builder.build().new_agent()
 }
 
 fn download(day: NaiveDate, path: &Path) -> Result<()> {
