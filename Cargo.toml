@@ -71,11 +71,6 @@ required-features = ["verify"]
 name = "tv_check"
 path = "src/bin/tv_check.rs"
 
-[[bin]]
-name = "window_nm_walk_forward"
-path = "src/bin/window_nm_walk_forward.rs"
-required-features = ["verify"]
-
 [profile.release]
 lto = "thin"
 codegen-units = 1

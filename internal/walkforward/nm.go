@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ramtin/dynamic-trader/internal/engine"
+	"github.com/ramtin/dynamic-trader/internal/logx"
 	"github.com/ramtin/dynamic-trader/internal/report"
 	"github.com/ramtin/dynamic-trader/internal/score"
 )
@@ -696,6 +697,7 @@ func RunScorePath(args Args) error {
 	if args.HTMLOnly {
 		return regenerateHTML(args.Scan)
 	}
+	logx.Infof("score-path walk-forward scan=%s lookback=%dd", args.Scan, args.LookbackDays)
 	meta, space, err := loadMeta(args.Scan)
 	if err != nil {
 		return err

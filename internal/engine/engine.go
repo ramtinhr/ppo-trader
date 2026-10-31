@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/ramtin/dynamic-trader/internal/logx"
 )
 
 // SearchDirs returns candidate directories for Rust binaries.
@@ -61,6 +63,7 @@ func Run(name string, aliases []string, args []string) error {
 	if err != nil {
 		return err
 	}
+	logx.Debugf("engine exec %s %v", bin, args)
 	cmd := exec.Command(bin, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout

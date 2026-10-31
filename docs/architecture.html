@@ -288,7 +288,7 @@ table.data td.num {
   <p class="lede">
     Complete map of the hybrid stack for perpetual-futures research on OKX BTC-USDT-SWAP.
     Rust is the Nautilus-matching engine. Go (<code>dt</code>) is the product layer for ranking,
-    walk-forward policy, browse UI, and reports. Written for fullstack developers who did not
+    score and price walk-forward, browse UI, and reports. Written for fullstack developers who did not
     author the Rust.
   </p>
   </div>
@@ -297,7 +297,7 @@ table.data td.num {
     <tr><th>Market</th><td>OKX BTC-USDT-SWAP (linear, USDT-settled)</td></tr>
     <tr><th>Engine</th><td>Rust 2024 edition · NautilusTrader 0.65.0 behind feature <code>verify</code></td></tr>
     <tr><th>Product CLI</th><td>Go module <code>github.com/ramtin/dynamic-trader</code> · binary <code>dt</code></td></tr>
-    <tr><th>Branch</th><td><code>ramtin/cleanup-docs-b567</code></td></tr>
+    <tr><th>Branch</th><td><code>cursor/go-pricewalk-cleanup-b567</code></td></tr>
     <tr><th>How to read</th><td>This PDF, or open <code>docs/architecture.html</code> in a browser</td></tr>
   </table>
   <h2 style="margin-top:22px;border:none;padding:0;font-size:12pt;">Contents</h2>
@@ -339,13 +339,13 @@ table.data td.num {
       </td>
       <td>
         <h4>Go = product (<code>dt</code>)</h4>
-        <p>Rank windows, run N/M walk-forward policy, serve browse HTTP, write reports. Changes compile in seconds without linking Nautilus.</p>
+        <p>Rank windows, run N/M score walk-forward, candle OLS price-walk + oracle exits, serve browse HTTP, write reports. Changes compile in seconds without linking Nautilus.</p>
       </td>
     </tr>
   </table>
   <div class="callout">
     <strong>Rule of thumb.</strong> Change fill rules in Rust (<code>src/scan.rs</code> + <code>src/strategy.rs</code>) and confirm with <code>verify</code>.
-    Change how winners are picked in Go (<code>internal/walkforward</code>, <code>internal/score</code>).
+    Change how winners are picked in Go (<code>internal/walkforward</code>, <code>internal/score</code>, <code>internal/pricewalk</code>).
   </div>
 </section>
 
@@ -378,9 +378,10 @@ data/   gitignored — OKX archives + scan outputs live only on disk</code></pre
     <li><code>Tape::load</code> converts every trade into Nautilus L1 matching prices and builds a segment tree for TP/SL <code>first_hit</code>.</li>
     <li><code>scan --bucket window</code> enumerates RSI pairs × timeframe × TP/SL × leverage into fixed-size <code>window_*.bin</code> files plus <code>meta.json</code>.</li>
     <li>Go <code>dt walk-forward</code> ranks those bins, picks finalists, batch-calls Rust <code>simulate</code> (JSONL) for closed trades, runs N/M score policy, writes JSON/HTML.</li>
+    <li>Go <code>dt price-walk</code> loads 1m candles (M1C1 disk cache), fits OLS return features per bar size, optionally runs oracle TP/SL on actual future closes, writes <code>nm_price_walk_forward*</code>.</li>
   </ol>
   <h2>Truth path (slow)</h2>
-  <p>Only the last / best combos go through Nautilus via <code>verify</code>, <code>backtest</code>, or <code>window_nm_walk_forward --verify</code>. Same fill rules as the scanner; disagreement fails the run.</p>
+  <p>Only the last / best combos go through Nautilus via <code>verify</code> or <code>backtest</code>. Same fill rules as the scanner; disagreement fails the run. The price path is pure Go and does not use Nautilus.</p>
 </section>
 
 <section class="section">
@@ -394,7 +395,6 @@ data/   gitignored — OKX archives + scan outputs live only on disk</code></pre
       <tr><td class="path">scan.rs</td><td class="num">523</td><td>Fast RSI-cross + exits simulator; Outcome / ClosedTrade / Record</td></tr>
       <tr><td class="path">tpsl_grid.rs</td><td class="num">772</td><td>Vectorized single-TP×SL×lev grid (Entries / Frame / Grid)</td></tr>
       <tr><td class="path">window_score.rs</td><td class="num">849</td><td>WindowStats (20-byte records), ScoreModel budget-10 fit</td></tr>
-      <tr><td class="path">price_model.rs</td><td class="num">381</td><td>OLS candle-return features for price-path research</td></tr>
       <tr><td class="path">exits.rs</td><td class="num">249</td><td>Stop / TP ladder math + ExitProfile scale-outs</td></tr>
       <tr><td class="path">filters.rs</td><td class="num">226</td><td>EMA trend + ATR filters wrapping crosses</td></tr>
       <tr><td class="path">grid.rs</td><td class="num">185</td><td>CLI parsers for lengths/ladders + RSI series helpers</td></tr>
@@ -435,9 +435,9 @@ data/   gitignored — OKX archives + scan outputs live only on disk</code></pre
       <tr><td class="path">verify</td><td class="num">192</td><td>Yes</td><td>One combo through Nautilus; compare fills JSON</td></tr>
       <tr><td class="path">backtest</td><td class="num">207</td><td>Yes</td><td>Pine RSI strategy table via Nautilus</td></tr>
       <tr><td class="path">tv_check</td><td class="num">694</td><td>No engine</td><td>Compare candles/RSI/trades vs TradingView (needs .env cookies)</td></tr>
-      <tr><td class="path">window_nm_walk_forward</td><td class="num">4749</td><td>Yes (default)</td><td>Legacy score path + <strong>active price path</strong> (<code>--path price</code>)</td></tr>
     </tbody>
   </table>
+  <p><code>window_nm_walk_forward</code> and <code>price_model.rs</code> were removed after the Go port (<code>dt walk-forward</code> / <code>dt price-walk</code>).</p>
 </section>
 
 <section class="section">
@@ -481,12 +481,18 @@ data/   gitignored — OKX archives + scan outputs live only on disk</code></pre
   <table class="data">
     <thead><tr><th>Package</th><th>Lines</th><th>Job</th></tr></thead>
     <tbody>
-      <tr><td class="path">cmd/dt</td><td class="num">180</td><td>CLI router</td></tr>
-      <tr><td class="path">internal/engine</td><td class="num">277</td><td>Find/exec Rust bins; Simulate JSONL client</td></tr>
+      <tr><td class="path">cmd/dt</td><td class="num">~210</td><td>CLI router (logrus via logx)</td></tr>
+      <tr><td class="path">internal/engine</td><td class="num">~280</td><td>Find/exec Rust bins; Simulate JSONL client</td></tr>
       <tr><td class="path">internal/browse</td><td class="num">1166</td><td>HTTP browser over window/month bins</td></tr>
-      <tr><td class="path">internal/walkforward</td><td class="num">982</td><td>N/M score-path walk-forward</td></tr>
+      <tr><td class="path">internal/walkforward</td><td class="num">~985</td><td>N/M score-path walk-forward</td></tr>
+      <tr><td class="path">internal/pricewalk</td><td class="num">~1200</td><td>Candle OLS + oracle exits (former Rust --path price)</td></tr>
+      <tr><td class="path">internal/pricemodel</td><td class="num">~220</td><td>OLS candle-return features</td></tr>
+      <tr><td class="path">internal/candles</td><td class="num">~330</td><td>OHLC aggregate, M1C1 cache, archive trades</td></tr>
       <tr><td class="path">internal/score</td><td class="num">459</td><td>Budget-10 ScoreModel (Rust parity tests)</td></tr>
-      <tr><td class="path">internal/report</td><td class="num">58</td><td>Embed HTML + regenerate from JSON</td></tr>
+      <tr><td class="path">internal/report</td><td class="num">~80</td><td>Embed score + price HTML; regenerate from JSON</td></tr>
+      <tr><td class="path">internal/logx</td><td class="num">~30</td><td>Shared logrus logger</td></tr>
+      <tr><td class="path">internal/config</td><td class="num">~50</td><td>TOML paper config (go-toml)</td></tr>
+      <tr><td class="path">internal/exits</td><td class="num">~115</td><td>TP/SL ladder types shared by price path</td></tr>
     </tbody>
   </table>
   <h2>Engine discovery order</h2>
@@ -500,8 +506,8 @@ $PATH</code></pre>
 ./dt download|scan|simulate|verify|backtest|tv-check …
 ./dt browse --scan DIR [--port N] [--layout window|month|auto]
 ./dt walk-forward --scan DIR [score-path flags…]
-./dt report --json PATH
-./dt price-walk …     # wraps window_nm_walk_forward --path price</code></pre>
+./dt price-walk --scan DIR [price flags…]   # pure Go; see scripts/price_iter.sh
+./dt report --json PATH</code></pre>
 </section>
 
 <section class="section">
@@ -515,7 +521,7 @@ cargo build --profile relfast --no-default-features \
 
 # Need Nautilus
 cargo build --profile relfast --features verify \
-  --bin verify --bin backtest --bin window_nm_walk_forward</code></pre>
+  --bin verify --bin backtest</code></pre>
 </section>
 
 <section class="section">
@@ -545,8 +551,9 @@ cargo run --release --bin scan -- --bucket window \
 # 4) Score walk-forward (Go)
 ./dt walk-forward --scan data/windowscan/&lt;dir&gt;
 
-# 5) Price path (still Rust)
-./dt price-walk --scan data/windowscan/&lt;dir&gt; --verify 0</code></pre>
+# 5) Price path (Go; M1C1 candle cache under scan/.cache/)
+./dt price-walk --scan data/windowscan/&lt;dir&gt; --price-bars 15m --price-strategy 1 --verify 0
+# or: ./scripts/price_iter.sh</code></pre>
 </section>
 
 <section class="section">
@@ -557,7 +564,7 @@ cargo run --release --bin scan -- --bucket window \
     <li>Thin <code>full_scan</code> / <code>window_scan</code> wrappers → use <code>scan --bucket …</code></li>
     <li>Legacy orchestration: <code>rsi_combos</code>, <code>walk_forward</code>, <code>walk_forward_trades</code>, <code>full_walk_forward</code>, <code>window_walk_forward</code> (+ HTML reports)</li>
   </ul>
-  <p>Still present: engine bins + <code>window_nm_walk_forward</code> for the price path.</p>
+  <p>Also removed in the price-path Go port: <code>window_nm_walk_forward</code>, <code>price_model.rs</code>, and the embedded HTML/JS under <code>src/bin/</code>. Still present: engine bins only (<code>download</code>, <code>scan</code>, <code>simulate</code>, <code>verify</code>, <code>backtest</code>, <code>tv_check</code>).</p>
 </section>
 
 <section class="section">
@@ -571,7 +578,7 @@ cargo run --release --bin scan -- --bucket window \
       <tr><td>Change ranking formula</td><td class="path">src/window_score.rs and internal/score</td></tr>
       <tr><td>Change N/M walk-forward policy</td><td class="path">internal/walkforward/nm.go</td></tr>
       <tr><td>Change browse UI</td><td class="path">internal/browse/</td></tr>
-      <tr><td>Change price-path experiment</td><td class="path">src/bin/window_nm_walk_forward.rs + price_model.rs</td></tr>
+      <tr><td>Change price-path experiment</td><td class="path">internal/pricewalk/ + internal/pricemodel/</td></tr>
     </tbody>
   </table>
   <div class="callout" style="margin-top:16px">

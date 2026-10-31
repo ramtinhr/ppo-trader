@@ -1,1 +1,2 @@
-# Use: cargo build --profile relfast --bin window_nm_walk_forward
+# Fast iteration profile for engine rebuilds:
+#   cargo build --profile relfast --bin scan --bin simulate --bin download

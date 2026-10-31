@@ -1,15 +1,15 @@
 # `dt` — Go product CLI
 
-Rust remains the engine (`download`, `scan`, `simulate`, `verify`, `backtest`, `tv_check`,
-`window_nm_walk_forward` for the price path). Go owns the product CLI: walk-forward score path,
-HTML reports, and the browse HTTP server.
+Rust is the research engine (`download`, `scan`, `simulate`, `verify`, `backtest`, `tv_check`).
+Go owns the product CLI: score walk-forward, **price walk-forward**, HTML reports, and browse.
 
 ## Build
 
 ```bash
 # Rust engine. This crate has its own [workspace] so a parent Cargo.toml is ignored.
 cargo build --profile relfast --no-default-features --bin download --bin scan --bin simulate
-# optional: cargo build --profile relfast --features verify --bin verify --bin window_nm_walk_forward
+# optional Nautilus:
+cargo build --profile relfast --features verify --bin verify --bin backtest
 
 # Go CLI — on macOS use the script (plain `go build` can abort with missing LC_UUID)
 ./scripts/build_dt.sh
@@ -39,8 +39,8 @@ Engine discovery order: `$DT_ENGINE_DIR`, `./target/relfast`, `./target/release`
 | `dt tv-check [args…]` | exec Rust `tv_check` |
 | `dt browse --scan DIR [--port N] [--layout window\|month\|auto]` | merged browse HTTP API |
 | `dt walk-forward --scan DIR [flags…]` | N/M score-path walk-forward (Go + Rust `simulate`) |
-| `dt report --json PATH` | regenerate EN/FA HTML from saved JSON |
-| `dt price-walk [args…]` | exec `window_nm_walk_forward --path price …` |
+| `dt price-walk --scan DIR [flags…]` | candle OLS + oracle exits (pure Go; M1C1 cache) |
+| `dt report --json PATH` | regenerate EN/FA HTML from saved JSON (score or price) |
 
 ## Browse
 
@@ -53,8 +53,23 @@ Loads `meta.json` + ranks `window_*.bin` finalists, batch-calls Rust `simulate` 
 runs the N/M pick loop with a learned `ScoreModel` (near→far TRAIN → LOCK → TRADE), and writes
 `nm_walk_forward.json` plus embedded HTML.
 
+## Price walk-forward
+
+Pure Go (`internal/pricewalk`). Aggregates 1m candles (M1C1 cache under `scan/.cache/`), fits
+OLS return features per bar size, optionally runs the oracle per-trade TP/SL grid
+(`--price-strategy 1`). Soft-fails OKX official candles when the network is blocked.
+
+```bash
+./scripts/price_iter.sh
+# or:
+./dt price-walk --scan data/windowscan/<dir> --price-bars 15m --price-strategy 1 --verify 0
+```
+
+Writes `nm_price_walk_forward.json` / `.html` (selected bar) plus per-bar grid reports.
+
 ## Tests
 
 ```bash
 go test ./...
+cargo check --no-default-features
 ```

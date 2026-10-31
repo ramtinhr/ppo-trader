@@ -31,11 +31,14 @@ PY
 5. Every remaining binary
 6. On-disk formats (archives, 20-byte vs 12-byte records, meta.json)
 7. `simulate` JSONL contract
-8. Go packages + engine discovery
+8. Go packages + engine discovery (including `pricewalk` / `pricemodel` / `candles`)
 9. Feature `verify` / Nautilus boundary
 10. Config & safety
 11. Typical workflow commands
 12. Cleanup removals vs replacements
 13. Where to edit what
+
+**Price path** is pure Go (`dt price-walk`); the former Rust `window_nm_walk_forward` binary and
+`price_model.rs` are deleted. See [DT.md](DT.md) and `scripts/price_iter.sh`.
 
 The old plain-text PDF generator (`scripts/md_to_pdf.py`) is obsolete for the main guide; keep the HTML as the source of truth.

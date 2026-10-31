@@ -7,7 +7,6 @@ pub mod filters;
 pub mod grid;
 pub mod okx_history;
 pub mod pine_rsi;
-pub mod price_model;
 pub mod rsi;
 pub mod rsi_cross;
 pub mod scan;
