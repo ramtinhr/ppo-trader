@@ -5,6 +5,9 @@ edition = "2024"
 rust-version = "1.98.1"
 default-run = "scan"
 
+# Standalone crate: ignore any parent Cargo workspace (e.g. ../Cargo.toml).
+[workspace]
+
 [features]
 default = ["verify"]
 # NautilusTrader fill-by-fill verifier and Pine backtest. The fast scanner does not need this.

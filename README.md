@@ -230,10 +230,16 @@ Go owns the product layer (browse HTTP, N/M score walk-forward, HTML reports). R
 engine (`download`, `scan`, `simulate`, `verify`, …). See [docs/DT.md](docs/DT.md).
 
 ```bash
-go build -o dt ./cmd/dt
-dt browse --scan data/windowscan/… --port 8091
-dt walk-forward --scan data/windowscan/… --require-fit 0
-dt report --json data/windowscan/…/nm_walk_forward.json
+./scripts/build_dt.sh   # macOS: needs CGO / external linker (see docs/DT.md)
+./dt browse --scan data/windowscan/… --port 8091
+./dt walk-forward --scan data/windowscan/… --require-fit 0
+./dt report --json data/windowscan/…/nm_walk_forward.json
+```
+
+Download two years of OKX trades (no Go needed):
+
+```bash
+cargo run --release --bin download -- 2024-10-31 2026-10-31
 ```
 
 ## Next steps
