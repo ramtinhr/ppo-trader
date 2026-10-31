@@ -17,19 +17,19 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use dynamic_trader::{
     backtest::{Fill, Run, run_backtest},
     config::AppConfig,
-    exits::{ExitProfile, Exits},
+    exits::{ExitProfile, Exits, default_scaleout_profiles},
     filters::{Filter, FilteredCross},
     grid::{exit_settings, parse_groups},
     okx_history::{self, Candle},
     rsi::Rsi,
     rsi_cross::RsiCrossParams,
-    scan::{self, ClosedTrade, Costs, Market, Outcome, Record, STEP_BTC},
+    scan::{self, ClosedTrade, Costs, Market, Record, STEP_BTC},
     strategy::BarSignals,
     tape::{CloseRanges, Tape},
-    tpsl_grid::{Entries, Frame, Grid, GridTrade},
+    tpsl_grid::{Entries, Frame, Grid, GridTrade, parse_range},
     price_model::{
-        PriceModel, PriceSample, PRICE_FEATURE_NAMES, aggregate_candles, candle_features,
-        samples_from_candles, samples_from_candles_horizon,
+        PRICE_FEATURES, PriceModel, PriceSample, PRICE_FEATURE_NAMES, aggregate_candles,
+        candle_features, samples_from_candles, samples_from_candles_horizon,
     },
     window_score::{
         MAX_SCORE_REL_ERR, MIN_DROP, MIN_FIT_SAMPLES, MIN_TRADES, RECORD, SCORE_BUDGET,
@@ -114,11 +114,14 @@ Usage: cargo run --release --bin window_nm_walk_forward -- [options]
                               both  = run both, separate reports.
   --price-bars <list>         Candle sizes for the price path grid (default: 5m,15m,1h,4h).
                               Each bar is fit separately; best locked becomes nm_price_walk_forward.*.
-  --price-horizon <n>         Candles ahead to forecast (default: 20). One OLS per horizon h=1..n
-                              from the last finished close (h=1 next bar, h=20 = twenty ahead).
-  --price-strategy <0|1>      Optional TP/SL×lev grid (default: 0 = off).
-  --price-stops <list>        Stops if --price-strategy 1 (default: 0.25,0.5,1,1.5,2).
-  --price-leverage <list>     Leverage if --price-strategy 1 (default: 1,2,3,5).
+  --price-horizon <n|auto>    Candles ahead to forecast (default: auto). One OLS per horizon h.
+                              auto = grow while OOS mean miss stays under --max-rel-err (cap 500).
+                              Also reports forward-until-1% vs OKX (~162-style).
+  --price-strategy <0|1>      Per-trade TP/SL on predicted path (default: 0 = off).
+  --price-stops <list|range>  Stop % grid for single TP=SL (default: 1-10/1). TP = stop unless a
+                              ladder profile scores better on that trade's predicted path.
+  --price-risk <list>         % of balance risked if stop hits (default: 0.25,0.5,1,2,3,5).
+  --price-leverage <list>     Max leverage cap for risk-derived size (default: 1,2,3,5,8,10).
   --html-only                 Rebuild HTML reports from existing nm_walk_forward*.json (no rescan)
   --rerank                    Force day-by-day shortlist again (ignore nm_finalists_cache.bin).
                               Default: reuse cache when lookback/max-finalists/memory-gb/scan match";
@@ -141,6 +144,12 @@ impl PathMode {
 
 /// Balance of the whole-period replays, as in window_scan.
 const REPLAY_BALANCE: f64 = 1e9;
+/// Cap for `--price-horizon auto` and forward-until-1% path.
+const PRICE_HORIZON_AUTO_CAP: usize = 500;
+/// Debounce bars before reversing direction.
+const PRICE_SIGNAL_CONFIRM_BARS: usize = 4;
+/// Skip stops that need a higher break-even win rate than this after fees.
+const PRICE_MAX_BREAKEVEN_WIN: f64 = 0.75;
 /// Combinations shown per window in the report.
 const SHOWN: usize = 20;
 /// Minimum IS (training) profit in USDT required before a pick/choice is traded.
@@ -186,13 +195,16 @@ struct Args {
     path: PathMode,
     /// Candle bar sizes for the price path (label, bar_ms).
     price_bars: Vec<(String, i64)>,
-    /// Forecast horizons 1..=price_horizon (candles ahead).
+    /// Forecast horizons 1..=price_horizon (candles ahead); cap when auto.
     price_horizon: usize,
-    /// Optional TP/SL×lev strategy on price signals (off by default).
+    price_horizon_auto: bool,
+    /// Per-trade TP/SL on the predicted path (off by default).
     price_strategy: bool,
-    /// Stop-loss % values for the price-path TP/SL strategy grid.
+    /// Stop-loss % grid (single TP=SL candidates).
     price_stops: Vec<f64>,
-    /// Leverage multipliers for the price-path strategy grid.
+    /// % of balance risked if the stop hits.
+    price_risk: Vec<f64>,
+    /// Leverage caps; max of the list bounds risk-derived size.
     price_leverage: Vec<u32>,
 }
 
@@ -224,10 +236,12 @@ fn parse_args() -> Result<Args> {
         rerank: false,
         path: PathMode::Score,
         price_bars: parse_price_bars("5m,15m,1h,4h").expect("default price bars"),
-        price_horizon: 20,
+        price_horizon: PRICE_HORIZON_AUTO_CAP,
+        price_horizon_auto: true,
         price_strategy: false,
-        price_stops: vec![0.25, 0.5, 1.0, 1.5, 2.0],
-        price_leverage: vec![1, 2, 3, 5],
+        price_stops: parse_range("1-10/1")?,
+        price_risk: vec![0.25, 0.5, 1.0, 2.0, 3.0, 5.0],
+        price_leverage: vec![1, 2, 3, 5, 8, 10],
     };
     let mut raw = std::env::args().skip(1);
     while let Some(flag) = raw.next() {
@@ -330,11 +344,17 @@ fn parse_args() -> Result<Args> {
                 args.price_bars = parse_price_bars(&value).with_context(bad)?;
             }
             "--price-horizon" => {
-                args.price_horizon = value.parse().with_context(bad)?;
-                ensure!(
-                    (1..=200).contains(&args.price_horizon),
-                    "--price-horizon must be 1..200"
-                );
+                if value == "auto" {
+                    args.price_horizon = PRICE_HORIZON_AUTO_CAP;
+                    args.price_horizon_auto = true;
+                } else {
+                    args.price_horizon = value.parse().with_context(bad)?;
+                    args.price_horizon_auto = false;
+                    ensure!(
+                        (1..=PRICE_HORIZON_AUTO_CAP).contains(&args.price_horizon),
+                        "--price-horizon must be auto or 1..{PRICE_HORIZON_AUTO_CAP}"
+                    );
+                }
             }
             "--price-strategy" => {
                 let n: u8 = value.parse().with_context(bad)?;
@@ -342,15 +362,31 @@ fn parse_args() -> Result<Args> {
                 args.price_strategy = n == 1;
             }
             "--price-stops" => {
-                args.price_stops = value
+                args.price_stops = if value.contains('/') {
+                    parse_range(&value).with_context(bad)?
+                } else {
+                    value
+                        .split(',')
+                        .map(|v| v.trim().parse())
+                        .collect::<Result<_, _>>()
+                        .with_context(bad)?
+                };
+                ensure!(
+                    !args.price_stops.is_empty()
+                        && args.price_stops.iter().all(|s| *s > 0.0 && *s < 50.0),
+                    "--price-stops must be in (0, 50)"
+                );
+            }
+            "--price-risk" => {
+                args.price_risk = value
                     .split(',')
                     .map(|v| v.trim().parse())
                     .collect::<Result<_, _>>()
                     .with_context(bad)?;
                 ensure!(
-                    !args.price_stops.is_empty()
-                        && args.price_stops.iter().all(|s| *s > 0.0 && *s < 50.0),
-                    "--price-stops must be in (0, 50)"
+                    !args.price_risk.is_empty()
+                        && args.price_risk.iter().all(|r| *r > 0.0 && *r <= 20.0),
+                    "--price-risk must be in (0, 20]"
                 );
             }
             "--price-leverage" => {
@@ -666,6 +702,10 @@ fn utc(ms: i64) -> String {
 
 fn round2(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
+}
+
+fn round4(x: f64) -> f64 {
+    (x * 10_000.0).round() / 10_000.0
 }
 
 /// Test window size for a training window of `n` trades.
@@ -2185,30 +2225,39 @@ fn run_one_price_bar(
         );
     }
 
-    let horizon_n = args.price_horizon.max(1);
     let horizons = eval_price_horizons(
         &price_model,
         &bars,
         typical,
-        horizon_n,
+        args.price_horizon.max(1),
         bar_ms,
         train_cutoff_ms,
         trade_start_ms,
         trade_end_ms,
         args.max_rel_err,
+        args.price_horizon_auto,
     )?;
+    let horizon_n = horizons.horizon.max(1);
     println!(
-        "  {label} horizons 1..{horizon_n}: OOS h=1 price_err={:.3}% (base {:.3}%) · h={horizon_n} price_err={:.3}% (base {:.3}%)",
+        "  {label} OOS trading horizon 1..{horizon_n}: h=1 err={:.3}% (base {:.3}%) · h={horizon_n} err={:.3}% (base {:.3}%) · forward-until-1% path = {} candles",
         horizons.oos_h1_price_err * 100.0,
         horizons.oos_h1_base_err * 100.0,
         horizons.oos_hmax_price_err * 100.0,
-        horizons.oos_hmax_base_err * 100.0
+        horizons.oos_hmax_base_err * 100.0,
+        horizons.path_under_1pct
     );
     if let Some(fwd) = horizons.path_example.as_object() {
+        let fwd_n = fwd
+            .get("steps")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(horizon_n);
         println!(
-            "  {label} FORWARD from last candle {} (close {}) → next {horizon_n} bars:",
+            "  {label} FORWARD from last candle {} (close {}) → {} steps (under-1% path {}):",
             fwd.get("origin").and_then(|v| v.as_str()).unwrap_or("?"),
-            fwd.get("origin_close").and_then(|v| v.as_f64()).unwrap_or(f64::NAN)
+            fwd.get("origin_close").and_then(|v| v.as_f64()).unwrap_or(f64::NAN),
+            fwd_n,
+            horizons.path_under_1pct
         );
         if let Some(steps) = fwd.get("steps").and_then(|v| v.as_array()) {
             let show = |s: &Value| {
@@ -2256,24 +2305,21 @@ fn run_one_price_bar(
     }
 
     let strategy = if args.price_strategy {
-        Some(run_price_strategy_grid(
+        Some(run_price_strategy_per_trade(
             args,
-            meta,
             mk,
-            &price_model,
+            &horizons.models,
             label,
             bar_ms,
             trade_start_ms,
             trade_end_ms,
-            lookback_days,
         )?)
     } else {
         None
     };
     let balance_pnl = strategy
         .as_ref()
-        .and_then(|s| s.get("oos"))
-        .and_then(|o| o.get("total_pnl"))
+        .and_then(|s| s.get("total_pnl"))
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
 
@@ -2286,8 +2332,15 @@ fn run_one_price_bar(
             "bar": label,
             "bar_ms": bar_ms,
             "price_horizon": horizon_n,
+            "price_horizon_auto": args.price_horizon_auto,
+            "path_under_1pct": horizons.path_under_1pct,
+            "horizon_rule": if args.price_horizon_auto {
+                "auto: last h whose OOS mean |pred-spot|/spot < max_rel_err; path_under_1pct = forward from last candle vs tape/OKX until miss ≥ max_rel_err"
+            } else {
+                "fixed --price-horizon"
+            },
             "signal_rule": format!(
-                "at close_t forecast close for t+1..t+{horizon_n}; lock on h=1 vs last-close baseline"
+                "debounced dir from h=1 return ({PRICE_SIGNAL_CONFIRM_BARS} bars); per-trade TP/SL/lev on predicted path t+1..t+{horizon_n}; oracle peeks actuals for report only"
             ),
             "lookback_days": lookback_days,
             "max_rel_err": args.max_rel_err,
@@ -2299,6 +2352,7 @@ fn run_one_price_bar(
             "trade_start": utc(trade_start_ms),
             "trade_end": utc(trade_end_ms),
             "size_btc": meta.size_btc,
+            "balance_usdt": args.balance_usdt,
             "taker_fee_bps": mk.costs.taker * 10_000.0,
             "maker_fee_bps": mk.costs.maker * 10_000.0,
             "price_model": {
@@ -2315,7 +2369,7 @@ fn run_one_price_bar(
             },
             "horizons": horizons.table,
             "path_example": horizons.path_example,
-            "strategy": strategy.as_ref().and_then(|s| s.get("selected")).cloned().unwrap_or(Value::Null),
+            "strategy": strategy.as_ref().and_then(|s| s.get("summary")).cloned().unwrap_or(Value::Null),
             "fit_trace": score_models_json,
             "generated_utc": Utc::now().format("%Y-%m-%d %H:%M").to_string(),
         },
@@ -2341,13 +2395,22 @@ fn run_one_price_bar(
 struct HorizonEval {
     table: Vec<Value>,
     path_example: Value,
+    /// Trading horizon: last h with OOS mean miss < max_rel_err when `auto`.
+    horizon: usize,
+    /// Forward path candles that stayed under 1% vs actual (OKX/tape).
+    path_under_1pct: usize,
+    /// `models[h]` forecasts h bars ahead; index 0 is unused.
+    models: Vec<PriceModel>,
     oos_h1_price_err: f64,
     oos_h1_base_err: f64,
     oos_hmax_price_err: f64,
     oos_hmax_base_err: f64,
 }
 
-/// Fit one model per horizon h=1..H on pre-TRADE data; score OOS price error vs last-close baseline.
+/// Fit one model per horizon on pre-TRADE data; score **OOS** miss vs last-close baseline.
+/// `auto`: keep growing while the **OOS** mean price miss stays under `max_rel_err`.
+/// Also walk a forward path from the last candle vs tape/OKX until that path's miss hits 1%.
+#[allow(clippy::too_many_arguments)]
 fn eval_price_horizons(
     h1_model: &PriceModel,
     bars: &[Candle],
@@ -2358,6 +2421,7 @@ fn eval_price_horizons(
     trade_start_ms: i64,
     trade_end_ms: i64,
     max_rel_err: f64,
+    auto: bool,
 ) -> Result<HorizonEval> {
     let mut table = Vec::with_capacity(horizon_n);
     let mut oos_h1_price_err = f64::NAN;
@@ -2366,6 +2430,8 @@ fn eval_price_horizons(
     let mut oos_hmax_base_err = f64::NAN;
     let mut models: Vec<PriceModel> = Vec::with_capacity(horizon_n + 1);
     models.push(PriceModel::cold_start(typical)); // unused index 0
+    let mut oos_horizon = 0usize;
+    let mut oos_stopped = false;
 
     for h in 1..=horizon_n {
         let all_h = samples_from_candles_horizon(bars, h);
@@ -2385,38 +2451,68 @@ fn eval_price_horizons(
             .filter(|s| s.origin_ms >= trade_start_ms && s.at_ms < trade_end_ms)
             .collect();
         let (ret_mae, price_err, base_err) = oos_horizon_errors(&model, &oos);
-        let under_1pct = price_err.is_finite() && price_err < 0.01;
+        let under_1pct = price_err.is_finite() && price_err < max_rel_err;
         let beats_base = price_err.is_finite()
             && base_err.is_finite()
             && price_err + 1e-12 < base_err;
-        table.push(json!({
-            "h": h,
-            "train_n": train.len(),
-            "oos_n": oos.len(),
-            "alphas": model.alphas.iter().map(|a| round2(*a * 1e6) / 1e6).collect::<Vec<_>>(),
-            "oos_return_mae": ret_mae,
-            "oos_price_err": price_err,
-            "oos_baseline_err": base_err,
-            "under_1pct": under_1pct,
-            "beats_baseline": beats_base,
-            "gate_ok": !model.cold_start && price_err.is_finite() && price_err < max_rel_err && beats_base,
-        }));
-        if h == 1 {
-            oos_h1_price_err = price_err;
-            oos_h1_base_err = base_err;
-        }
-        if h == horizon_n {
-            oos_hmax_price_err = price_err;
-            oos_hmax_base_err = base_err;
-        }
-        models.push(model);
-    }
 
-    // Live-style: last finished candle on the tape → forecast the next H future bars.
-    let path_example = {
+        if auto && !oos_stopped {
+            if h > 1 && (model.cold_start || !price_err.is_finite() || price_err >= max_rel_err) {
+                println!(
+                    "    auto horizon (OOS): stop at h={h} (OOS price_err {:.3}% ≥ {:.2}%) → keep 1..{}",
+                    price_err * 100.0,
+                    max_rel_err * 100.0,
+                    h - 1
+                );
+                oos_stopped = true;
+            } else {
+                oos_horizon = h;
+            }
+        }
+
+        // Keep fitting past the OOS stop so the forward-until-1% path can go further.
+        if !auto || !oos_stopped || h <= oos_horizon.max(1) + 200 {
+            table.push(json!({
+                "h": h,
+                "train_n": train.len(),
+                "oos_n": oos.len(),
+                "train_price_err": model.price_rel_err,
+                "alphas": model.alphas.iter().map(|a| round2(*a * 1e6) / 1e6).collect::<Vec<_>>(),
+                "oos_return_mae": ret_mae,
+                "oos_price_err": price_err,
+                "oos_baseline_err": base_err,
+                "under_1pct": under_1pct,
+                "beats_baseline": beats_base,
+                "gate_ok": !model.cold_start && under_1pct && beats_base,
+                "in_trading_horizon": !auto || h <= oos_horizon.max(1),
+            }));
+            if h == 1 {
+                oos_h1_price_err = price_err;
+                oos_h1_base_err = base_err;
+            }
+            if !auto || h <= oos_horizon.max(1) {
+                oos_hmax_price_err = price_err;
+                oos_hmax_base_err = base_err;
+            }
+            models.push(model);
+        } else {
+            break;
+        }
+        if auto && oos_stopped && h >= oos_horizon.max(1) + 200 {
+            break;
+        }
+    }
+    if !auto {
+        oos_horizon = models.len().saturating_sub(1);
+    }
+    if oos_horizon == 0 {
+        oos_horizon = models.len().saturating_sub(1).max(1);
+    }
+    let fit_n = models.len() - 1;
+
+    let (path_example, path_under_1pct) = {
         let mut origin_t = None;
         for t in 1..bars.len() {
-            // Prefer the last bar we actually "know" at TRADE end (same idea as last signal row).
             if bars[t].time_ms < trade_end_ms {
                 origin_t = Some(t);
             }
@@ -2425,46 +2521,108 @@ fn eval_price_horizons(
             let feat = candle_features(&bars[t], bars[t - 1].close)?;
             let ref_px = bars[t].close;
             let origin_ms = bars[t].time_ms;
+            let lo = origin_ms + bar_ms;
+            let hi = origin_ms + fit_n as i64 * bar_ms;
+            let okx_closes: Vec<(i64, f64)> = okx_history::official_candles(bar_ms, lo, hi)
+                .map(|cs| {
+                    println!(
+                        "    OKX actuals for forward-until-1%: {} candles {} → {}",
+                        cs.len(),
+                        utc(lo),
+                        utc(hi)
+                    );
+                    cs.into_iter().map(|c| (c.time_ms, c.close)).collect()
+                })
+                .unwrap_or_else(|e| {
+                    println!("    OKX actuals unavailable ({e:#})");
+                    Vec::new()
+                });
+            let spot_at = |h: usize, future_ms: i64| -> (Option<f64>, &str) {
+                if let Some(bar) = bars.get(t + h) {
+                    (Some(bar.close), "tape")
+                } else if let Some((_, px)) = okx_closes.iter().find(|(ms, _)| *ms == future_ms) {
+                    (Some(*px), "okx")
+                } else {
+                    (None, "none")
+                }
+            };
             let mut steps = Vec::new();
-            for h in 1..=horizon_n {
+            let mut under = 0usize;
+            let mut breached = false;
+            for h in 1..=fit_n {
                 let pred = models[h].predict_close(ref_px, &feat);
                 let future_ms = origin_ms + h as i64 * bar_ms;
-                let (spot, err_pct, base_err_pct) = if let Some(bar) = bars.get(t + h) {
-                    let spot = bar.close;
-                    (
-                        Some(round2(spot)),
-                        Some(round2(100.0 * (pred - spot).abs() / spot.max(1e-12))),
-                        Some(round2(100.0 * (ref_px - spot).abs() / spot.max(1e-12))),
-                    )
-                } else {
-                    (None, None, None)
-                };
+                let (spot, source) = spot_at(h, future_ms);
+                let err_pct = spot.map(|s| 100.0 * (pred - s).abs() / s.max(1e-12));
+                let base_err_pct = spot.map(|s| 100.0 * (ref_px - s).abs() / s.max(1e-12));
+                let over = err_pct.map(|e| e >= max_rel_err * 100.0).unwrap_or(false);
+                if !breached {
+                    if spot.is_none() {
+                        break;
+                    }
+                    if over {
+                        breached = true;
+                        println!(
+                            "    forward-until-1%: breach at h={h} err={:.3}% (actual {}) → under-1% path = {} candles",
+                            err_pct.unwrap_or(f64::NAN),
+                            source,
+                            under
+                        );
+                    } else {
+                        under = h;
+                    }
+                }
                 steps.push(json!({
                     "h": h,
                     "at": utc(future_ms),
-                    "spot": spot,
+                    "spot": spot.map(round2),
                     "predicted": round2(pred),
                     "ref": round2(ref_px),
-                    "err_pct": err_pct,
-                    "base_err_pct": base_err_pct,
-                    "beyond_tape": spot.is_none(),
+                    "err_pct": err_pct.map(round2),
+                    "base_err_pct": base_err_pct.map(round2),
+                    "beyond_tape": source != "tape",
+                    "actual_source": source,
+                    "over_1pct": over,
+                    "in_under_1pct_path": h <= under,
                 }));
+                if breached && h >= under + 3 {
+                    break;
+                }
             }
-            Some(json!({
-                "origin": utc(origin_ms),
-                "origin_close": round2(ref_px),
-                "kind": "forward_from_last_candle",
-                "steps": steps,
-            }))
+            if !breached && under > 0 {
+                println!(
+                    "    forward-until-1%: still under {:.2}% for {under} candles (no breach in available actuals)",
+                    max_rel_err * 100.0
+                );
+            }
+            Some((
+                json!({
+                    "origin": utc(origin_ms),
+                    "origin_close": round2(ref_px),
+                    "kind": "forward_from_last_candle",
+                    "path_under_1pct": under,
+                    "oos_trading_horizon": oos_horizon,
+                    "steps": steps,
+                }),
+                under,
+            ))
         }) {
             Some(v) => v,
-            None => Value::Null,
+            None => (Value::Null, 0),
         }
     };
+
+    let mut trade_models = models;
+    if auto && oos_horizon > 0 && trade_models.len() > oos_horizon + 1 {
+        trade_models.truncate(oos_horizon + 1);
+    }
 
     Ok(HorizonEval {
         table,
         path_example,
+        horizon: oos_horizon,
+        path_under_1pct,
+        models: trade_models,
         oos_h1_price_err,
         oos_h1_base_err,
         oos_hmax_price_err,
@@ -2499,10 +2657,37 @@ fn oos_horizon_errors(model: &PriceModel, oos: &[PriceSample]) -> (f64, f64, f64
     (ret_sum / n, price_sum / n, base_sum / n)
 }
 
-/// Predicted-return sign → bar index signal (fills at that bar's open in `scan::simulate`).
-fn price_dir_signals(model: &PriceModel, candles: &[Candle]) -> Vec<(u32, i8)> {
+/// Approx. price move (%) that wipes the margin at this leverage (~100/lev).
+fn liquid_pct_at_lev(lev: f64) -> f64 {
+    if lev <= 0.0 {
+        return f64::INFINITY;
+    }
+    100.0 / lev
+}
+
+/// True when the stop is so wide the account can liquidate before (or at) the stop.
+fn combo_can_liquid(stop_pct: f64, lev: f64) -> bool {
+    if lev < 1.0 {
+        return false;
+    }
+    stop_pct + 1e-12 >= liquid_pct_at_lev(lev) * 0.85
+}
+
+fn liquid_distance_pct(stop_pct: f64, lev: f64) -> f64 {
+    liquid_pct_at_lev(lev) - stop_pct
+}
+
+/// Debounced predicted-return sign → bar index (fills at that bar's open).
+fn price_dir_signals_debounced(
+    model: &PriceModel,
+    candles: &[Candle],
+    confirm: usize,
+) -> Vec<(u32, i8)> {
+    let confirm = confirm.max(1);
     let mut out = Vec::new();
-    let mut last_dir: i8 = 0;
+    let mut live_dir: i8 = 0;
+    let mut pending_dir: i8 = 0;
+    let mut pending_n: usize = 0;
     for i in 2..candles.len() {
         let Some(feat) = candle_features(&candles[i - 1], candles[i - 2].close) else {
             continue;
@@ -2512,11 +2697,23 @@ fn price_dir_signals(model: &PriceModel, candles: &[Candle]) -> Vec<(u32, i8)> {
             continue;
         }
         let dir: i8 = if r > 0.0 { 1 } else { -1 };
-        if dir == last_dir {
+        if dir == live_dir {
+            pending_dir = 0;
+            pending_n = 0;
             continue;
         }
-        last_dir = dir;
-        out.push((i as u32, dir));
+        if dir == pending_dir {
+            pending_n += 1;
+        } else {
+            pending_dir = dir;
+            pending_n = 1;
+        }
+        if pending_n >= confirm {
+            live_dir = dir;
+            pending_dir = 0;
+            pending_n = 0;
+            out.push((i as u32, dir));
+        }
     }
     out
 }
@@ -2527,39 +2724,256 @@ fn frame_bar_range(candles: &[Candle], start_ms: i64, end_ms: i64) -> std::ops::
     lo..hi.max(lo)
 }
 
-fn outcome_json(o: &Outcome) -> Value {
-    json!({
-        "total_pnl": round2(o.total()),
-        "realized": round2(o.realized),
-        "fees": round2(o.fees),
-        "open_pnl": round2(o.open_pnl),
-        "closed_trades": o.closed_trades,
-        "wins": o.wins,
-        "win_rate": if o.closed_trades > 0 {
-            round2(100.0 * o.wins as f64 / o.closed_trades as f64)
-        } else {
-            0.0
-        },
-        "target_fills": o.target_fills,
-        "stop_fills": o.stop_fills,
-        "orders": o.orders,
-        "refused": o.refused,
-        "max_drawdown": round2(o.max_drawdown),
-    })
+fn breakeven_win_tp_eq_sl(stop_pct: f64, taker: f64, maker: f64) -> f64 {
+    let s = stop_pct / 100.0;
+    let t = taker;
+    let m = maker;
+    // Entry taker + win exit maker vs entry taker + loss exit taker.
+    (s + 2.0 * t) / (2.0 * s + t - m)
 }
 
-/// Pick TP/SL × leverage on IS (lookback before TRADE), then score OOS with taker/maker fees.
-fn run_price_strategy_grid(
+fn size_for_leverage(balance: f64, lev: f64, entry_px: f64) -> i64 {
+    if balance <= 0.0 || lev <= 0.0 || entry_px <= 0.0 {
+        return 0;
+    }
+    let btc = balance * lev / entry_px;
+    (btc / STEP_BTC).floor() as i64
+}
+
+fn implied_risk_pct(stop_pct: f64, lev: f64) -> f64 {
+    stop_pct * lev
+}
+
+#[derive(Clone, Debug)]
+struct PathExitFill {
+    kind: &'static str,
+    price: f64,
+    steps: i64,
+    fee: f64,
+    h: usize,
+}
+
+#[derive(Clone, Debug)]
+struct PathSim {
+    pnl: f64,
+    fees: f64,
+    reason: &'static str,
+    exit_h: usize,
+    fills: Vec<PathExitFill>,
+}
+
+/// Mark-to-path exit rules on a close series after entry (predicted or actual).
+fn simulate_exits_on_path(
+    long: bool,
+    entry: f64,
+    exits: &Exits,
+    steps: i64,
+    path: &[f64],
+    taker: f64,
+    maker: f64,
+) -> PathSim {
+    let qty0 = steps as f64 * STEP_BTC;
+    let entry_fee = taker * qty0 * entry;
+    let sign = if long { 1.0 } else { -1.0 };
+    let mut stop_pct = exits.stop_pct;
+    let mut remaining = steps;
+    let mut realized = 0.0;
+    let mut fees = entry_fee;
+    let mut fills = Vec::new();
+    let target_steps = exits.target_steps(steps);
+    let mut next_tp = 0usize;
+
+    let stop_px = |sp: f64| {
+        if long {
+            entry * (1.0 - sp / 100.0)
+        } else {
+            entry * (1.0 + sp / 100.0)
+        }
+    };
+    let tp_px = |tp: f64| {
+        if long {
+            entry * (1.0 + tp / 100.0)
+        } else {
+            entry * (1.0 - tp / 100.0)
+        }
+    };
+    let hit_stop = |px: f64, sp: f64| {
+        let s = stop_px(sp);
+        if long {
+            px <= s
+        } else {
+            px >= s
+        }
+    };
+    let hit_tp = |px: f64, tp: f64| {
+        let t = tp_px(tp);
+        if long {
+            px >= t
+        } else {
+            px <= t
+        }
+    };
+
+    for (hi, &px) in path.iter().enumerate() {
+        let h = hi + 1;
+        if !px.is_finite() || px <= 0.0 {
+            continue;
+        }
+        // Adverse first when both could hit on the same close.
+        if hit_stop(px, stop_pct) {
+            let fill_px = stop_px(stop_pct);
+            let qty = remaining as f64 * STEP_BTC;
+            let fee = taker * qty * fill_px;
+            let pnl_part = sign * (fill_px - entry) * qty;
+            realized += pnl_part;
+            fees += fee;
+            fills.push(PathExitFill {
+                kind: "stop",
+                price: fill_px,
+                steps: remaining,
+                fee,
+                h,
+            });
+            return PathSim {
+                pnl: realized - fees,
+                fees,
+                reason: "stop",
+                exit_h: h,
+                fills,
+            };
+        }
+        while next_tp < exits.targets.len() && remaining > 0 {
+            let (tp, _) = exits.targets[next_tp];
+            if !hit_tp(px, tp) {
+                break;
+            }
+            let fill_px = tp_px(tp);
+            let take = target_steps[next_tp].min(remaining);
+            if take <= 0 {
+                next_tp += 1;
+                continue;
+            }
+            let qty = take as f64 * STEP_BTC;
+            let fee = maker * qty * fill_px;
+            realized += sign * (fill_px - entry) * qty;
+            fees += fee;
+            fills.push(PathExitFill {
+                kind: "tp",
+                price: fill_px,
+                steps: take,
+                fee,
+                h,
+            });
+            remaining -= take;
+            next_tp += 1;
+            if exits.breakeven && next_tp == 1 {
+                stop_pct = 0.0; // BE at entry
+            }
+            if remaining <= 0 {
+                return PathSim {
+                    pnl: realized - fees,
+                    fees,
+                    reason: if exits.targets.len() > 1 {
+                        "ladder"
+                    } else {
+                        "tp"
+                    },
+                    exit_h: h,
+                    fills,
+                };
+            }
+        }
+    }
+
+    if remaining > 0 {
+        let fill_px = path.last().copied().unwrap_or(entry);
+        let qty = remaining as f64 * STEP_BTC;
+        let fee = taker * qty * fill_px;
+        realized += sign * (fill_px - entry) * qty;
+        fees += fee;
+        fills.push(PathExitFill {
+            kind: "timeout",
+            price: fill_px,
+            steps: remaining,
+            fee,
+            h: path.len(),
+        });
+    }
+    PathSim {
+        pnl: realized - fees,
+        fees,
+        reason: "timeout",
+        exit_h: path.len(),
+        fills,
+    }
+}
+
+fn predicted_closes(
+    models: &[PriceModel],
+    ref_px: f64,
+    feat: &[f64; PRICE_FEATURES],
+) -> Vec<f64> {
+    let h_max = models.len().saturating_sub(1);
+    (1..=h_max)
+        .map(|h| models[h].predict_close(ref_px, feat))
+        .collect()
+}
+
+fn actual_closes(candles: &[Candle], entry_bar: usize, h_max: usize) -> Vec<f64> {
+    let mut out = Vec::with_capacity(h_max);
+    for h in 1..=h_max {
+        match candles.get(entry_bar + h - 1) {
+            Some(c) if c.close.is_finite() && c.close > 0.0 => out.push(c.close),
+            _ => break,
+        }
+    }
+    out
+}
+
+/// Candidate exit profiles for one stop: single TP=SL plus scale-out ladders.
+fn exit_candidates_for_stop(stop_pct: f64) -> Vec<Exits> {
+    let mut out = vec![Exits {
+        stop_pct,
+        targets: vec![(stop_pct, 1.0)],
+        breakeven: false,
+    }];
+    for p in default_scaleout_profiles() {
+        if p.ladder_r.len() == 1 && (p.ladder_r[0] - 1.0).abs() < 1e-12 {
+            continue; // same as TP=SL
+        }
+        let e = p.to_exits(stop_pct);
+        if e.validate(10_000).is_ok() {
+            out.push(e);
+        }
+    }
+    out
+}
+
+#[derive(Clone)]
+struct PathPick {
+    exits: Exits,
+    risk_pct: f64,
+    steps: i64,
+    lev: f64,
+    path_pnl: f64,
+    /// path_pnl / (balance · risk%) — prefer better edge, not just bigger size.
+    path_r: f64,
+    liquid_dist: f64,
+}
+
+/// At each OOS signal: pick TP/SL/ladder/risk on the **predicted** path only; oracle peeks actuals.
+fn run_price_strategy_per_trade(
     args: &Args,
-    meta: &Meta,
     mk: &Market1m<'_>,
-    model: &PriceModel,
+    models: &[PriceModel],
     label: &str,
     bar_ms: i64,
     trade_start_ms: i64,
     trade_end_ms: i64,
-    lookback_days: u64,
 ) -> Result<Value> {
+    ensure!(models.len() > 1, "{label}: need horizon models for strategy");
+    let h1 = &models[1];
+    let h_max = models.len() - 1;
     let bar_minutes = (bar_ms / 60_000) as usize;
     ensure!(bar_minutes >= 1, "bar must be at least 1m");
     let frame = Frame::from_minutes(mk.minutes, &mk.tape.bar_start, bar_minutes);
@@ -2567,193 +2981,235 @@ fn run_price_strategy_grid(
         frame.candles.len() >= 3,
         "{label}: not enough frame candles for strategy"
     );
-    let signals = price_dir_signals(model, &frame.candles);
-    ensure!(
-        !signals.is_empty(),
-        "{label}: price model produced no direction signals"
-    );
-
-    let is_start_ms = trade_start_ms.saturating_sub(lookback_days as i64 * 86_400_000);
-    let is_range = frame_bar_range(&frame.candles, is_start_ms, trade_start_ms);
-    let oos_range = frame_bar_range(&frame.candles, trade_start_ms, trade_end_ms);
+    let candles = &frame.candles;
+    let signals = price_dir_signals_debounced(h1, candles, PRICE_SIGNAL_CONFIRM_BARS);
+    let oos_range = frame_bar_range(candles, trade_start_ms, trade_end_ms);
     ensure!(!oos_range.is_empty(), "{label}: empty OOS bar range");
 
-    let base_steps = mk.costs.steps;
-    let exit_opts = exit_settings(
-        &args.price_stops,
-        &args.ladders,
-        &args.shares,
-        &args.breakeven,
-        base_steps,
-    )?;
-    let exits: Vec<Exits> = exit_opts.into_iter().flatten().collect();
-    ensure!(!exits.is_empty(), "{label}: no TP/SL exit settings");
-
-    let closes = CloseRanges::new(
-        &frame
-            .candles
-            .iter()
-            .map(|c| c.close)
-            .collect::<Vec<_>>(),
+    let taker = mk.costs.taker;
+    let maker = mk.costs.maker;
+    let max_lev = f64::from(*args.price_leverage.iter().max().unwrap_or(&1));
+    let (usable_stops, skipped_fee): (Vec<f64>, Vec<f64>) = args
+        .price_stops
+        .iter()
+        .copied()
+        .partition(|&s| breakeven_win_tp_eq_sl(s, taker, maker) <= PRICE_MAX_BREAKEVEN_WIN);
+    if !skipped_fee.is_empty() {
+        println!(
+            "  {label} fee-floor skip stops {:?} (need win > {:.0}%)",
+            skipped_fee,
+            100.0 * PRICE_MAX_BREAKEVEN_WIN
+        );
+    }
+    ensure!(
+        !usable_stops.is_empty(),
+        "{label}: all stops failed fee floor"
     );
-    let market = Market {
-        candles: &frame.candles,
-        tape: mk.tape,
-        bar_start: &frame.bar_start,
-        closes: &closes,
-    };
 
     println!(
-        "  {label} strategy grid: {} exits × {} lev = {} · signals={} · IS bars {}..{} · OOS {}..{}",
-        exits.len(),
-        args.price_leverage.len(),
-        exits.len() * args.price_leverage.len(),
+        "  {label} per-trade exits: H={h_max} · stops={} · lev={:?} · debounce={PRICE_SIGNAL_CONFIRM_BARS} · signals={} · OOS {}..{}",
+        usable_stops.len(),
+        args.price_leverage,
         signals.len(),
-        is_range.start,
-        is_range.end,
         oos_range.start,
         oos_range.end
     );
-    println!(
-        "  fees: taker {:.1} bps · maker {:.1} bps · base size {} BTC",
-        mk.costs.taker * 10_000.0,
-        mk.costs.maker * 10_000.0,
-        meta.size_btc
-    );
 
-    struct Cand {
-        exits: Exits,
-        lev: u32,
-        is: Outcome,
-    }
-    let mut ranked: Vec<Cand> = Vec::new();
-    for exits in &exits {
-        for &lev in &args.price_leverage {
-            let mut costs = mk.costs;
-            costs.steps = base_steps.saturating_mul(i64::from(lev));
-            costs.balance = REPLAY_BALANCE;
-            if exits.validate(costs.steps).is_err() {
-                continue;
-            }
-            let is = scan::simulate(
-                (0, 0, 0),
-                &signals,
-                Some(exits),
-                &market,
-                is_range.clone(),
-                costs,
-                None,
-            );
-            if is.closed_trades < MIN_TRADES || is.refused > 0 {
-                continue;
-            }
-            ranked.push(Cand {
-                exits: exits.clone(),
-                lev,
-                is,
-            });
+    let mut balance = args.balance_usdt;
+    let mut running = 0.0;
+    let mut free_after = oos_range.start;
+    let mut trades_json = Vec::new();
+    let mut wins = 0u32;
+    let mut skipped_liquid = 0usize;
+    let mut signal_seen = 0usize;
+
+    for &(bar_u, dir) in &signals {
+        let i = bar_u as usize;
+        if i < oos_range.start || i >= oos_range.end || i < 2 {
+            continue;
         }
-    }
-    ensure!(
-        !ranked.is_empty(),
-        "{label}: no price strategy combo passed IS (need ≥{MIN_TRADES} closed trades, fees applied)"
-    );
-    ranked.sort_by(|a, b| {
-        b.is.total()
-            .partial_cmp(&a.is.total())
-            .unwrap_or(Ordering::Equal)
-    });
+        if i < free_after {
+            continue;
+        }
+        signal_seen += 1;
+        let Some(feat) = candle_features(&candles[i - 1], candles[i - 2].close) else {
+            continue;
+        };
+        let ref_px = candles[i - 1].close;
+        let entry = candles[i].open;
+        if !(entry.is_finite() && entry > 0.0 && ref_px.is_finite() && ref_px > 0.0) {
+            continue;
+        }
+        let long = dir > 0;
+        let pred_path = predicted_closes(models, ref_px, &feat);
+        if pred_path.is_empty() {
+            continue;
+        }
+        let act_path = actual_closes(candles, i, h_max);
 
-    let top_n = ranked.len().min(15);
-    let top_json: Vec<Value> = ranked[..top_n]
-        .iter()
-        .map(|c| {
-            json!({
-                "exits": exits_to_json(&c.exits),
-                "leverage": c.lev,
-                "size_btc": round2(meta.size_btc * f64::from(c.lev)),
-                "is": outcome_json(&c.is),
-            })
-        })
-        .collect();
+        // Per signal: search TP/SL/ladder × leverage on the predicted path; enter the best liquid-safe.
+        let mut best: Option<PathPick> = None;
+        let mut oracle_best_pnl = f64::NAN;
+        let mut oracle_label = Value::Null;
+        for &stop in &usable_stops {
+            for exits in exit_candidates_for_stop(stop) {
+                for &lev_u in &args.price_leverage {
+                    let lev = f64::from(lev_u);
+                    if lev > max_lev + 1e-12 {
+                        continue;
+                    }
+                    let steps = size_for_leverage(balance, lev, entry);
+                    if steps <= 0 || exits.validate(steps).is_err() {
+                        continue;
+                    }
+                    if combo_can_liquid(exits.stop_pct, lev) {
+                        skipped_liquid += 1;
+                        continue;
+                    }
+                    let sim = simulate_exits_on_path(
+                        long, entry, &exits, steps, &pred_path, taker, maker,
+                    );
+                    let risk_pct = implied_risk_pct(exits.stop_pct, lev);
+                    let path_r = sim.pnl / (balance * risk_pct / 100.0).max(1e-9);
+                    let dist = liquid_distance_pct(exits.stop_pct, lev);
+                    let better = match &best {
+                        None => true,
+                        Some(b) => {
+                            sim.pnl > b.path_pnl + 1e-9
+                                || ((sim.pnl - b.path_pnl).abs() <= 1e-9 && dist > b.liquid_dist)
+                        }
+                    };
+                    if better {
+                        best = Some(PathPick {
+                            exits: exits.clone(),
+                            risk_pct,
+                            steps,
+                            lev,
+                            path_pnl: sim.pnl,
+                            path_r,
+                            liquid_dist: dist,
+                        });
+                    }
+                    if !act_path.is_empty() {
+                        let o = simulate_exits_on_path(
+                            long, entry, &exits, steps, &act_path, taker, maker,
+                        );
+                        if !oracle_best_pnl.is_finite() || o.pnl > oracle_best_pnl {
+                            oracle_best_pnl = o.pnl;
+                            oracle_label = json!(exits.label());
+                        }
+                    }
+                }
+            }
+        }
 
-    let best = &ranked[0];
-    let mut costs = mk.costs;
-    costs.steps = base_steps.saturating_mul(i64::from(best.lev));
-    costs.balance = REPLAY_BALANCE;
-    let mut record = Record::default();
-    let oos = scan::simulate(
-        (0, 0, 0),
-        &signals,
-        Some(&best.exits),
-        &market,
-        oos_range.clone(),
-        costs,
-        Some(&mut record),
-    );
+        let Some(pick) = best else {
+            continue;
+        };
+        if pick.steps <= 0 {
+            continue;
+        }
+        let path_sim =
+            simulate_exits_on_path(long, entry, &pick.exits, pick.steps, &pred_path, taker, maker);
+        let real_sim = if act_path.is_empty() {
+            PathSim {
+                pnl: 0.0,
+                fees: 0.0,
+                reason: "no_actuals",
+                exit_h: 0,
+                fills: vec![],
+            }
+        } else {
+            simulate_exits_on_path(long, entry, &pick.exits, pick.steps, &act_path, taker, maker)
+        };
 
-    println!(
-        "  {label} SELECTED {} · {}x · IS {:+.2} (fees {:.2}, {} trades) → OOS {:+.2} (fees {:.2}, {} trades)",
-        best.exits.label(),
-        best.lev,
-        best.is.total(),
-        best.is.fees,
-        best.is.closed_trades,
-        oos.total(),
-        oos.fees,
-        oos.closed_trades
-    );
+        let pnl = if act_path.is_empty() {
+            path_sim.pnl
+        } else {
+            real_sim.pnl
+        };
+        balance += pnl;
+        running += pnl;
+        if pnl > 0.0 {
+            wins += 1;
+        }
+        free_after = i + real_sim.exit_h.max(path_sim.exit_h).max(1);
 
-    let trades_json: Vec<Value> = record
-        .trades
-        .iter()
-        .map(|t| {
-            let exit_fees: f64 = t.exits.iter().map(|e| e.fee).sum();
-            let exit_pnl: f64 = t
-                .exits
+        trades_json.push(json!({
+            "side": if long { "buy" } else { "sell" },
+            "entry_at": utc(candles[i].time_ms),
+            "entry_bar": i,
+            "entry_price": round2(entry),
+            "exits": exits_to_json(&pick.exits),
+            "stop_pct": pick.exits.stop_pct,
+            "risk_pct": pick.risk_pct,
+            "leverage": round2(pick.lev * 100.0) / 100.0,
+            "size_btc": round4(pick.steps as f64 * STEP_BTC),
+            "liquid_distance_pct": round2(pick.liquid_dist),
+            "path_pnl": round2(path_sim.pnl),
+            "path_r": round2(pick.path_r * 100.0) / 100.0,
+            "path_reason": path_sim.reason,
+            "path_exit_h": path_sim.exit_h,
+            "pnl": round2(pnl),
+            "reason": if act_path.is_empty() { path_sim.reason } else { real_sim.reason },
+            "exit_h": if act_path.is_empty() { path_sim.exit_h } else { real_sim.exit_h },
+            "fees": round2(if act_path.is_empty() { path_sim.fees } else { real_sim.fees }),
+            "running_pnl": round2(running),
+            "balance": round2(balance),
+            "oracle_pnl": if oracle_best_pnl.is_finite() {
+                Value::from(round2(oracle_best_pnl))
+            } else {
+                Value::Null
+            },
+            "oracle_exits": oracle_label,
+            "oracle_note": "best combo on actual future closes — not used to trade",
+            "fills": (if act_path.is_empty() { &path_sim.fills } else { &real_sim.fills })
                 .iter()
-                .map(|e| {
-                    let qty = e.steps as f64 * STEP_BTC;
-                    let sign = if t.long { 1.0 } else { -1.0 };
-                    sign * (e.price - t.entry_price) * qty - e.fee
-                })
-                .sum();
-            json!({
-                "side": if t.long { "buy" } else { "sell" },
-                "entry_at": utc(t.entry_ms),
-                "entry_price": round2(t.entry_price),
-                "size_btc": round2(t.steps as f64 * STEP_BTC),
-                "entry_fee": round2(t.entry_fee),
-                "exit_fee": round2(exit_fees),
-                "pnl": round2(exit_pnl - t.entry_fee),
-                "open": t.open,
-                "exits": t.exits.iter().map(|e| json!({
-                    "at": utc(e.time_ms),
-                    "price": round2(e.price),
-                    "size_btc": round2(e.steps as f64 * STEP_BTC),
-                    "fee": round2(e.fee),
-                    "kind": e.kind,
-                })).collect::<Vec<_>>(),
-            })
-        })
-        .collect();
+                .map(|f| json!({
+                    "kind": f.kind,
+                    "price": round2(f.price),
+                    "size_btc": round4(f.steps as f64 * STEP_BTC),
+                    "fee": round2(f.fee),
+                    "h": f.h,
+                }))
+                .collect::<Vec<_>>(),
+        }));
+    }
+
+    let n = trades_json.len() as u32;
+    println!(
+        "  {label} per-trade done: {n} trades · PnL {running:+.2} · signals_in_oos={signal_seen} · liquid_skips≈{skipped_liquid}"
+    );
 
     Ok(json!({
-        "selected": {
-            "exits": exits_to_json(&best.exits),
-            "leverage": best.lev,
-            "size_btc": round2(meta.size_btc * f64::from(best.lev)),
-            "taker_fee_bps": mk.costs.taker * 10_000.0,
-            "maker_fee_bps": mk.costs.maker * 10_000.0,
+        "selection_rule": "per signal: enter on debounced direction; pick TP/SL/ladder × leverage maximizing predicted-path PnL among liquid-safe; oracle peeks actuals for report only",
+        "summary": {
+            "exits_mode": "per_trade",
+            "horizon": h_max,
+            "confirm_bars": PRICE_SIGNAL_CONFIRM_BARS,
+            "max_leverage": max_lev,
+            "taker_fee_bps": taker * 10_000.0,
+            "maker_fee_bps": maker * 10_000.0,
+            "balance_start": args.balance_usdt,
+            "balance_end": round2(balance),
         },
-        "is": outcome_json(&best.is),
-        "oos": outcome_json(&oos),
-        "top": top_json,
-        "combos_tested": ranked.len(),
-        "trades": trades_json,
+        "total_pnl": round2(running),
+        "closed_trades": n,
+        "wins": wins,
+        "win_rate": if n > 0 {
+            round2(100.0 * wins as f64 / n as f64)
+        } else {
+            0.0
+        },
         "signal_count": signals.len(),
-        "is_bars": [is_range.start, is_range.end],
+        "signals_in_oos": signal_seen,
         "oos_bars": [oos_range.start, oos_range.end],
+        "fee_floor": {
+            "max_breakeven_win_pct": 100.0 * PRICE_MAX_BREAKEVEN_WIN,
+            "skipped_stops": skipped_fee,
+            "usable_stops": usable_stops,
+        },
+        "trades": trades_json,
     }))
 }
 

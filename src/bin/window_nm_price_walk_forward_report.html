@@ -14,7 +14,7 @@
   }
   * { box-sizing: border-box; }
   body { margin: 0; font-family: var(--sans); background: var(--bg); color: var(--ink); }
-  .wrap { max-width: 1100px; margin: 0 auto; padding: 28px 20px 80px; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 28px 20px 80px; }
   .eyebrow { color: var(--accent); text-transform: uppercase; letter-spacing: .12em; font-size: 12px; }
   h1 { font-size: 28px; margin: 8px 0 6px; }
   .sub { color: var(--muted); margin: 0 0 20px; }
@@ -33,9 +33,12 @@
   .pos { color: var(--pos); } .neg { color: var(--neg); }
   table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12.5px; }
   th, td { border-bottom: 1px solid var(--line); padding: 8px 6px; text-align: left; }
+  th { white-space: nowrap; }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.wrap { white-space: normal; min-width: 9rem; }
   th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
   .table-wrap { overflow: auto; max-height: 70vh; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
-  .note { color: var(--muted); font-size: 13px; margin-top: 12px; }
+  .note { color: var(--muted); font-size: 13px; margin-top: 12px; line-height: 1.45; }
   .chart-card {
     margin-top: 16px; background: var(--panel); border: 1px solid var(--line);
     border-radius: 10px; padding: 12px 12px 8px;
@@ -47,9 +50,7 @@
   .chart-title { font-size: 14px; color: var(--ink); }
   .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--muted); }
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
-  .swatch {
-    width: 18px; height: 3px; border-radius: 2px; display: inline-block;
-  }
+  .swatch { width: 18px; height: 3px; border-radius: 2px; display: inline-block; }
   .swatch.spot { background: var(--spot); }
   .swatch.pred { background: var(--pred); }
   .mark {
@@ -64,6 +65,10 @@
     background: #1c1c20; border: 1px solid var(--line); border-radius: 8px;
     padding: 8px 10px; font-family: var(--mono); font-size: 12px; max-width: 280px;
   }
+  .pill {
+    display: inline-block; border: 1px solid var(--line); color: var(--accent);
+    font-size: 11px; padding: 1px 6px; border-radius: 999px; margin-left: 4px;
+  }
 </style>
 </head>
 <body>
@@ -73,34 +78,38 @@
   <p class="sub" id="sub"></p>
   <div class="tabs">
     <button type="button" class="active" data-tab="summary">Summary</button>
+    <button type="button" data-tab="trades">Trades</button>
     <button type="button" data-tab="horizons">Horizons</button>
     <button type="button" data-tab="chart">Chart</button>
-    <button type="button" data-tab="signals">Signals</button>
+    <button type="button" data-tab="signals">Forecasts</button>
   </div>
   <section class="tab active" data-tab="summary">
     <div class="kpis" id="kpis"></div>
     <p class="note" id="eq"></p>
+    <p class="note" id="trade-note"></p>
     <div class="table-wrap" id="grid-wrap" style="display:none;margin:14px 0;max-height:none">
       <table id="bar-grid"><thead></thead><tbody></tbody></table>
     </div>
     <div class="chart-card">
       <div class="chart-head">
-        <div class="chart-title">Spot vs predicted (OOS) with signals</div>
+        <div class="chart-title">Spot vs predicted (OOS) — forecasts, not trades</div>
         <div class="legend">
           <span><i class="swatch spot"></i> Spot</span>
           <span><i class="swatch pred"></i> Predicted</span>
-          <span><i class="mark buy"></i> Buy</span>
-          <span><i class="mark sell"></i> Sell</span>
         </div>
       </div>
       <canvas id="price-chart-summary" height="320"></canvas>
     </div>
   </section>
+  <section class="tab" data-tab="trades">
+    <p class="note" id="trades-intro"></p>
+    <div class="table-wrap"><table id="trades"><thead></thead><tbody></tbody></table></div>
+  </section>
   <section class="tab" data-tab="horizons">
-    <p class="note">OOS error by candles-ahead (h). Baseline = hold last close. Mentor bar: under 1% and beat baseline.</p>
+    <p class="note">OOS mean miss by candles-ahead (h). Trading horizon = last h under the 1% gate when auto. Forward-until-1% path uses OKX/tape actuals from the last candle.</p>
     <div class="table-wrap" style="max-height:none"><table id="horizons"><thead></thead><tbody></tbody></table></div>
     <div class="chart-card" id="path-card" style="display:none;margin-top:14px">
-      <div class="chart-title" id="path-title">Example: forecast made at origin → next H future candles</div>
+      <div class="chart-title" id="path-title">Forward-until-1% path</div>
       <p class="note" id="path-note"></p>
       <div class="table-wrap" style="max-height:none;margin-top:8px"><table id="path-ex"><thead></thead><tbody></tbody></table></div>
     </div>
@@ -112,15 +121,14 @@
         <div class="legend">
           <span><i class="swatch spot"></i> Spot</span>
           <span><i class="swatch pred"></i> Predicted</span>
-          <span><i class="mark buy"></i> Buy</span>
-          <span><i class="mark sell"></i> Sell</span>
         </div>
       </div>
       <canvas id="price-chart" height="420"></canvas>
-      <p class="note">Hover a point for spot, predicted, and side.</p>
+      <p class="note">Hover a point for spot and predicted. Trade markers are on the Trades tab.</p>
     </div>
   </section>
   <section class="tab" data-tab="signals">
+    <p class="note">Each row is one forecast candle (h=1), not a trade. Trade count is usually much smaller because entries need a debounced direction change and an open slot.</p>
     <div class="table-wrap"><table id="signals"><thead></thead><tbody></tbody></table></div>
   </section>
 </div>
@@ -139,7 +147,6 @@ document.querySelectorAll('.tabs button').forEach((b) => {
     document.querySelectorAll('.tab').forEach((x) => x.classList.remove('active'));
     b.classList.add('active');
     document.querySelector(`.tab[data-tab="${b.dataset.tab}"]`).classList.add('active');
-    // Redraw when chart tab becomes visible (canvas width was 0 while hidden).
     if (b.dataset.tab === 'chart' || b.dataset.tab === 'summary') requestAnimationFrame(drawAll);
   });
 });
@@ -151,76 +158,106 @@ const barLabel = M.bar || (M.bar_ms ? `${Math.round(M.bar_ms/60000)}m` : '');
 $('#title').textContent = barLabel
   ? `Predicted price vs market (${barLabel}${M.is_selected ? ' · selected' : ''})`
   : 'Predicted price vs market';
-$('#sub').textContent = `${M.trade_start || ''} → ${M.trade_end || ''} · ${barLabel || 'candle'} · lock rel_err ${(100 * (M.price_model?.rel_err ?? 0)).toFixed(3)}% · ${S.length} signals`;
+$('#sub').textContent = `${M.trade_start || ''} → ${M.trade_end || ''} · ${barLabel || 'candle'} · lock rel_err ${(100 * (M.price_model?.rel_err ?? 0)).toFixed(3)}% · ${S.length} forecast steps`;
+
 const ST = REPORT.strategy || {};
-const oos = ST.oos || {};
-const sel = ST.selected || M.strategy || {};
-const feeNote = (sel.taker_fee_bps != null)
-  ? `taker ${fmt(sel.taker_fee_bps,1)} / maker ${fmt(sel.maker_fee_bps,1)} bps`
+const trades = ST.trades || [];
+const sum = ST.summary || M.strategy || {};
+const feeNote = (sum.taker_fee_bps != null)
+  ? `taker ${fmt(sum.taker_fee_bps,1)} / maker ${fmt(sum.maker_fee_bps,1)} bps`
   : '';
+
 $('#kpis').innerHTML = [
   ['Bar', barLabel || '—', ''],
-  ['OOS PnL (fees in)', signed(oos.total_pnl ?? total), cls(oos.total_pnl ?? total)],
-  ['OOS fees', fmt(oos.fees ?? 0), ''],
-  ['OOS trades', String(oos.closed_trades ?? 0), ''],
-  ['Win rate', oos.closed_trades ? `${fmt(oos.win_rate ?? 0,1)}%` : '—', ''],
-  ['Leverage', String(sel.leverage ?? '—'), ''],
-  ['Size BTC', fmt(sel.size_btc ?? M.size_btc, 4), ''],
+  ['Total PnL', signed(ST.total_pnl ?? total), cls(ST.total_pnl ?? total)],
+  ['Trades', String(ST.closed_trades ?? trades.length ?? 0), ''],
+  ['Win rate', ST.closed_trades ? `${fmt(ST.win_rate ?? 0,1)}%` : '—', ''],
+  ['Trading horizon', String(M.price_horizon ?? sum.horizon ?? '—'), ''],
+  ['Path under 1%', String(M.path_under_1pct ?? (M.path_example && M.path_example.path_under_1pct) ?? '—'), ''],
+  ['Forecast steps', String(S.length), ''],
   ['Fit samples', String(M.fit_pairs ?? 0), ''],
-  ['Return MAE', `${(100 * (M.price_model?.rel_err ?? 0)).toFixed(3)}%`, ''],
 ].map(([l,v,c]) => `<div class="kpi"><div class="l">${l}</div><div class="v ${c}">${v}</div></div>`).join('');
+
 const a = M.price_model?.alphas || [];
 const names = M.feature_names || ['prev_return','range','body','typical_dev'];
-const exitsLab = sel.exits?.label || '';
-const stratBits = [
-  exitsLab ? `Strategy: ${exitsLab}${sel.leverage ? ` · ${sel.leverage}x` : ''}` : '',
-  feeNote,
-].filter(Boolean);
 const eqBits = a.length
   ? [(M.equation || `(close_t/close_t-1)-1 = ${names.map((n,i) => `${fmt(a[i], 4)}·${n}`).join(' + ')}`)
-    + (M.price_model ? ` · return_mae=${(100*(M.price_model.return_mae ?? M.price_model.rel_err ?? 0)).toFixed(3)}% baseline=${(100*(M.price_model.baseline_rel_err ?? 0)).toFixed(3)}%` : '')]
+    + (M.price_model ? ` · return_mae=${(100*(M.price_model.return_mae ?? M.price_model.rel_err ?? 0)).toFixed(3)}%` : '')]
   : [];
-$('#eq').textContent = [...stratBits, ...eqBits].join(' · ');
+$('#eq').textContent = [
+  ST.selection_rule || M.signal_rule || '',
+  feeNote,
+  ...eqBits,
+].filter(Boolean).join(' · ');
+
+$('#trade-note').innerHTML = `Forecast candles (${S.length}) are not trades. Each direction signal <b>enters</b> and picks that bar's best TP/SL/ladder + risk on the predicted path (max path PnL, liquid-safe). Oracle peeks actuals for comparison only — <b>not used to trade</b>.`;
+
+$('#trades-intro').textContent = trades.length
+  ? `${trades.length} trades · each row = that point's TP/SL/lev/size · oracle = peeked actuals, not used`
+  : 'No strategy trades (no direction signals in OOS, or strategy was off).';
+
+const th = $('#trades thead');
+const tb = $('#trades tbody');
+th.innerHTML = `<tr>
+  <th>#</th><th>Side</th><th>Entry</th><th>Price</th><th>This trade's exits</th>
+  <th>Risk%</th><th>Lev</th><th>Size BTC</th><th>Why closed</th>
+  <th>Path R</th><th>Path PnL</th><th>Realized</th><th>Running</th>
+  <th>Oracle PnL <span class="pill">not used</span></th>
+</tr>`;
+tb.innerHTML = trades.map((t, i) => `<tr>
+  <td class="num">${i+1}</td>
+  <td>${t.side || ''}</td>
+  <td class="num">${t.entry_at || ''}</td>
+  <td class="num">${fmt(t.entry_price, 2)}</td>
+  <td class="wrap">${t.exits?.label || ''}</td>
+  <td class="num">${fmt(t.risk_pct, 2)}</td>
+  <td class="num">${fmt(t.leverage, 2)}x</td>
+  <td class="num">${fmt(t.size_btc, 4)}</td>
+  <td class="wrap">${t.reason || ''} @h=${t.exit_h ?? '—'}</td>
+  <td class="num ${cls(t.path_r)}">${t.path_r == null ? '—' : fmt(t.path_r, 2)}</td>
+  <td class="num ${cls(t.path_pnl)}">${signed(t.path_pnl || 0)}</td>
+  <td class="num ${cls(t.pnl)}">${signed(t.pnl || 0)}</td>
+  <td class="num ${cls(t.running_pnl)}">${signed(t.running_pnl || 0)}</td>
+  <td class="num ${cls(t.oracle_pnl)}">${t.oracle_pnl == null ? '—' : signed(t.oracle_pnl)}${t.oracle_exits ? `<div style="color:var(--muted);font-size:11px">${t.oracle_exits}</div>` : ''}</td>
+</tr>`).join('');
 
 const HZ = M.horizons || [];
 if (HZ.length) {
-  const hh = $('#horizons thead');
-  const hb = $('#horizons tbody');
-  hh.innerHTML = `<tr><th>h</th><th>OOS n</th><th>Price err%</th><th>Baseline%</th><th>Under 1%</th><th>Beats base</th><th>Gate</th></tr>`;
-  hb.innerHTML = HZ.map((r) => `<tr>
+  $('#horizons thead').innerHTML = `<tr><th>h</th><th>OOS n</th><th>Price err%</th><th>Baseline%</th><th>Under 1%</th><th>Beats base</th><th>Trading H?</th></tr>`;
+  $('#horizons tbody').innerHTML = HZ.map((r) => `<tr style="${r.in_trading_horizon === false ? 'opacity:.45' : ''}">
     <td>${r.h}</td>
     <td>${r.oos_n ?? '—'}</td>
     <td>${r.oos_price_err == null || Number.isNaN(r.oos_price_err) ? '—' : fmt(100*r.oos_price_err, 3)}</td>
     <td>${r.oos_baseline_err == null || Number.isNaN(r.oos_baseline_err) ? '—' : fmt(100*r.oos_baseline_err, 3)}</td>
     <td>${r.under_1pct ? 'yes' : 'no'}</td>
     <td>${r.beats_baseline ? 'yes' : 'no'}</td>
-    <td>${r.gate_ok ? 'ok' : '—'}</td>
+    <td>${r.in_trading_horizon === false ? 'no' : 'yes'}</td>
   </tr>`).join('');
 }
+
 const PE = M.path_example;
 if (PE && PE.steps && PE.steps.length) {
   $('#path-card').style.display = '';
-  $('#path-title').textContent = `From last candle ${PE.origin || '?'} (close ${fmt(PE.origin_close, 2)}) → next ${PE.steps.length} candles`;
-  $('#path-note').textContent = 'This is what you want live: after the last known bar, predict +1…+H. Spot is filled only if that future bar already exists on the tape; otherwise spot = n/a.';
-  $('#path-ex thead').innerHTML = `<tr><th>h ahead</th><th>Future bar time</th><th>Predicted</th><th>Actual (if known)</th><th>Err%</th><th>&lt;1%?</th></tr>`;
+  const under = PE.path_under_1pct ?? M.path_under_1pct;
+  $('#path-title').textContent = `From last candle ${PE.origin || '?'} (close ${fmt(PE.origin_close, 2)}) · under-1% path = ${under ?? '—'} candles`;
+  $('#path-note').textContent = 'Actuals prefer tape, then OKX. Trading horizon is separate (OOS auto). Forecast step count ≠ trade count.';
+  $('#path-ex thead').innerHTML = `<tr><th>h</th><th>Time</th><th>Predicted</th><th>Actual</th><th>Source</th><th>Err%</th><th>In under-1% path</th></tr>`;
   $('#path-ex tbody').innerHTML = PE.steps.map((s) => {
-    const ok = s.err_pct != null && s.err_pct < 1;
-    const spot = s.beyond_tape || s.spot == null ? 'n/a (future)' : fmt(s.spot, 2);
-    return `<tr>
-    <td>+${s.h}</td><td>${s.at||''}</td><td>${fmt(s.predicted,2)}</td><td>${spot}</td>
-    <td>${s.err_pct == null ? '—' : fmt(s.err_pct,3)}</td>
-    <td>${s.err_pct == null ? '—' : (ok ? 'yes' : 'no')}</td>
-  </tr>`;
+    const spot = s.spot == null ? 'n/a' : fmt(s.spot, 2);
+    return `<tr style="${s.in_under_1pct_path ? '' : (s.over_1pct ? 'opacity:.7' : '')}">
+      <td>+${s.h}</td><td>${s.at||''}</td><td>${fmt(s.predicted,2)}</td><td>${spot}</td>
+      <td>${s.actual_source || (s.beyond_tape ? '—' : 'tape')}</td>
+      <td>${s.err_pct == null ? '—' : fmt(s.err_pct,3)}</td>
+      <td>${s.in_under_1pct_path ? 'yes' : (s.over_1pct ? 'breach' : '—')}</td>
+    </tr>`;
   }).join('');
 }
 
 const grid = M.bar_grid || [];
 if (grid.length) {
   $('#grid-wrap').style.display = '';
-  const gh = $('#bar-grid thead');
-  const gb = $('#bar-grid tbody');
-  gh.innerHTML = `<tr><th>Bar</th><th>Locked</th><th>Fit</th><th>Return MAE</th><th>Price err</th><th>Baseline</th><th>PnL</th><th>Signals</th><th></th></tr>`;
-  gb.innerHTML = grid.map((r) => {
+  $('#bar-grid thead').innerHTML = `<tr><th>Bar</th><th>Locked</th><th>Fit</th><th>Return MAE</th><th>Price err</th><th>Baseline</th><th>PnL</th><th>Forecasts</th><th></th></tr>`;
+  $('#bar-grid tbody').innerHTML = grid.map((r) => {
     const sel = r.bar === M.selected_bar;
     return `<tr style="${sel ? 'color:var(--accent)' : ''}">
       <td>${r.bar || ''}</td>
@@ -236,23 +273,19 @@ if (grid.length) {
   }).join('');
 }
 
-const thead = $('#signals thead');
-const tbody = $('#signals tbody');
-thead.innerHTML = `<tr><th>#</th><th>Time</th><th>Spot</th><th>Ref</th><th>Predicted</th><th>Err%</th><th>Side</th><th>PnL</th><th>Combo</th></tr>`;
-tbody.innerHTML = (REPORT.signals || []).map((r, i) => {
+$('#signals thead').innerHTML = `<tr><th>#</th><th>Time</th><th>Spot</th><th>Ref</th><th>Predicted</th><th>Err%</th><th>Kind</th></tr>`;
+$('#signals tbody').innerHTML = (REPORT.signals || []).map((r, i) => {
   const err = (r.rel_err != null) ? (100 * r.rel_err) : (r.spot && r.predicted != null ? 100 * Math.abs(r.predicted - r.spot) / r.spot : null);
   return `<tr>
   <td>${i+1}</td><td>${r.at || ''}</td><td>${fmt(r.spot, 2)}</td><td>${fmt(r.ref, 2)}</td><td>${fmt(r.predicted, 2)}</td>
   <td>${err == null ? '—' : fmt(err, 3)}</td>
-  <td>${r.side || ''}</td><td class="${cls(r.pnl)}">${signed(r.pnl || 0)}</td><td>${r.label || ''}</td>
+  <td>${r.side || 'h1'}</td>
 </tr>`;
 }).join('');
 
 function parseAt(s) {
   if (!s) return NaN;
-  // "YYYY-MM-DD HH:MM:SS" UTC from report
-  const t = Date.parse(String(s).replace(' ', 'T') + 'Z');
-  return t;
+  return Date.parse(String(s).replace(' ', 'T') + 'Z');
 }
 
 const POINTS = (REPORT.signals || [])
@@ -295,7 +328,6 @@ function drawChart(canvas) {
   const xOf = (t) => pad.l + ((t - t0) / (t1 - t0)) * w;
   const yOf = (v) => pad.t + (1 - (v - y0) / (y1 - y0)) * h;
 
-  // grid
   ctx.strokeStyle = '#2a2a2e';
   ctx.lineWidth = 1;
   for (let i = 0; i <= 4; i++) {
@@ -309,7 +341,6 @@ function drawChart(canvas) {
     ctx.fillText(fmt(val, 0), pad.l - 8, y);
   }
 
-  // spot line
   ctx.strokeStyle = '#e2e8f0';
   ctx.lineWidth = 1.75;
   ctx.beginPath();
@@ -319,7 +350,6 @@ function drawChart(canvas) {
   });
   ctx.stroke();
 
-  // predicted line (skip nulls)
   ctx.strokeStyle = '#60a5fa';
   ctx.lineWidth = 1.75;
   ctx.setLineDash([5, 4]);
@@ -333,28 +363,25 @@ function drawChart(canvas) {
   ctx.stroke();
   ctx.setLineDash([]);
 
-  // signal markers
-  POINTS.forEach((p) => {
-    if (p.side !== 'buy' && p.side !== 'sell') return;
-    const x = xOf(p.t);
-    const y = yOf(p.spot);
+  // Trade entry markers
+  trades.forEach((t) => {
+    const tt = parseAt(t.entry_at);
+    if (!Number.isFinite(tt)) return;
+    const px = Number(t.entry_price);
+    if (!Number.isFinite(px)) return;
+    const x = xOf(tt), y = yOf(px);
     ctx.beginPath();
-    if (p.side === 'buy') {
+    if (t.side === 'buy') {
       ctx.fillStyle = '#4ade80';
-      ctx.moveTo(x, y - 10);
-      ctx.lineTo(x - 6, y + 2);
-      ctx.lineTo(x + 6, y + 2);
+      ctx.moveTo(x, y - 10); ctx.lineTo(x - 6, y + 2); ctx.lineTo(x + 6, y + 2);
     } else {
       ctx.fillStyle = '#f87171';
-      ctx.moveTo(x, y + 10);
-      ctx.lineTo(x - 6, y - 2);
-      ctx.lineTo(x + 6, y - 2);
+      ctx.moveTo(x, y + 10); ctx.lineTo(x - 6, y - 2); ctx.lineTo(x + 6, y - 2);
     }
     ctx.closePath();
     ctx.fill();
   });
 
-  // x labels
   ctx.fillStyle = '#9a9aa2';
   ctx.font = '11px ui-monospace, monospace';
   ctx.textAlign = 'center';
@@ -390,8 +417,7 @@ function bindTip(canvas) {
     tip.style.top = (ev.clientY + 14) + 'px';
     tip.innerHTML = `<b>${p.at || ''}</b><br>
       Spot ${fmt(p.spot)} · Pred ${fmt(p.pred)}<br>
-      ${p.side || '—'} · PnL <span class="${cls(p.pnl)}">${signed(p.pnl)}</span><br>
-      <span style="color:#9a9aa2">${p.label || ''}</span>`;
+      <span style="color:#9a9aa2">forecast (not a trade)</span>`;
   });
   canvas.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
 }

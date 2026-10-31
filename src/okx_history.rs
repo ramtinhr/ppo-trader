@@ -330,6 +330,74 @@ pub fn official_candle(bar_ms: i64, time_ms: i64) -> Result<Candle> {
     })
 }
 
+/// Official OKX candles whose open is in `from_ms..=to_ms`, oldest first.
+pub fn official_candles(bar_ms: i64, from_ms: i64, to_ms: i64) -> Result<Vec<Candle>> {
+    if to_ms < from_ms {
+        return Ok(Vec::new());
+    }
+    let minutes = bar_ms / 60_000;
+    let bar = match minutes {
+        1 | 3 | 5 | 15 | 30 => format!("{minutes}m"),
+        60 | 120 | 240 => format!("{}H", minutes / 60),
+        _ => bail!("OKX publishes no {minutes}-minute candles"),
+    };
+    let parse = |c: &serde_json::Value| -> Result<Candle> {
+        let time_ms: i64 = c[0].as_str().context("candle ts")?.parse()?;
+        let f = |i: usize| -> Result<f64> { Ok(c[i].as_str().context("candle field")?.parse()?) };
+        Ok(Candle {
+            time_ms,
+            open: f(1)?,
+            high: f(2)?,
+            low: f(3)?,
+            close: f(4)?,
+        })
+    };
+    let mut out = Vec::new();
+    let mut after = to_ms + bar_ms + 1;
+    while after > from_ms {
+        let fetch = || -> Result<serde_json::Value> {
+            Ok(http()
+                .get(CANDLE_URL)
+                .query("instId", INSTRUMENT)
+                .query("bar", &bar)
+                .query("after", after.to_string())
+                .query("limit", "100")
+                .call()?
+                .body_mut()
+                .read_json()?)
+        };
+        let mut attempt = 0;
+        let reply = loop {
+            attempt += 1;
+            match fetch() {
+                Ok(reply) if reply["code"] == "0" => break reply,
+                Ok(reply) if attempt >= 5 => bail!("OKX candle request failed: {reply}"),
+                Err(e) if attempt >= 5 => return Err(e),
+                _ => std::thread::sleep(std::time::Duration::from_secs(attempt)),
+            }
+        };
+        let data = reply["data"].as_array().cloned().unwrap_or_default();
+        if data.is_empty() {
+            break;
+        }
+        let mut oldest = after;
+        for c in &data {
+            let candle = parse(c)?;
+            oldest = oldest.min(candle.time_ms);
+            if (from_ms..=to_ms).contains(&candle.time_ms) {
+                out.push(candle);
+            }
+        }
+        if data.len() < 100 || oldest <= from_ms {
+            break;
+        }
+        after = oldest;
+    }
+    out.sort_by_key(|c| c.time_ms);
+    out.dedup_by_key(|c| c.time_ms);
+    Ok(out)
+}
+
 /// Parses a decimal with at most 2 decimal places into hundredths, exactly.
 fn hundredths(text: &str) -> Result<u64> {
     let (whole, frac) = text.split_once('.').unwrap_or((text, ""));
