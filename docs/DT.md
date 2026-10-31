@@ -42,8 +42,7 @@ Engine discovery order: `$DT_ENGINE_DIR`, `./target/relfast`, `./target/release`
 ## Browse
 
 Auto-detects layout from `meta.json` (`windows` / `scan_version` → 20-byte window records;
-`months` → 12-byte month records). Same query/CSV/combo APIs as the former Rust
-`browse_window_scan` / `browse_full_scan` binaries.
+`months` → 12-byte month records). Replaces the old Rust `browse_*` binaries (removed).
 
 ## Walk-forward (score)
 
