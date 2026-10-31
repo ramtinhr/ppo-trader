@@ -25,10 +25,11 @@ checked before it is marked verified:
 
 ```bash
 # The archives covering the previous calendar month (UTC)
-cargo run --release --bin download_okx_trades
+cargo run --release --bin download
+# or: dt download
 
 # Custom UTC range: START inclusive, END exclusive
-cargo run --release --bin download_okx_trades -- 2026-09-01 2026-10-01
+cargo run --release --bin download -- 2026-09-01 2026-10-01
 ```
 
 Verified days are skipped, so an interrupted run resumes when rerun.
