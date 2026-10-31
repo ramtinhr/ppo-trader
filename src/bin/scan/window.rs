@@ -44,8 +44,8 @@ version 1. Use --full-grid for the previous single-pass fine TP×SL×lev grid ov
 
 In each window every combination starts flat at the window's first minute, trades every signal
 inside it, and a trade still open at the end is closed at the window's last price with the taker
-fee. Leverage scales position size (qty = size_btc × leverage). window_walk_forward /
-browse_window_scan / window_nm_walk_forward consume the results.
+fee. Leverage scales position size (qty = size_btc × leverage). Go `dt browse`,
+`dt walk-forward`, and `dt price-walk` consume the results.
 
 Examples:
   cargo run --release --bin window_scan -- \\
@@ -60,7 +60,7 @@ Examples:
 Usage: cargo run --release --bin window_scan -- [options]
 
   --start <YYYY-MM-DD>      First UTC day, inclusive (default: 2025-10-01).
-                            For window_nm_walk_forward, the first outer window is ranking-only;
+                            For dt walk-forward / price-walk, the first outer window is ranking-only;
                             include warmup days before the OOS month (e.g. 2026-08-27 for Sept).
   --end <YYYY-MM-DD>        Last UTC day, exclusive (default: 2026-10-01)
   --days <n>                Days per outer window (default: 10). Ignored if --hours is set.
