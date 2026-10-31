@@ -17,7 +17,7 @@
 
 use crate::{
     rsi::Rsi,
-    strategy::{BarSignals, Signal},
+    signals::{BarSignals, Signal},
 };
 
 #[derive(Debug, Clone, Copy)]

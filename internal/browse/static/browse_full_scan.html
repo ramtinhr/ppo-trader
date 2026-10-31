@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Every combination</title>
+<style>
+  :root { --bg: #09090b; --panel: #121214; --panel-2: #1a1a1e; --border: #27272a; --text: #fafafa; --muted: #a1a1aa; --accent: #2dd4bf; --green: #4ade80; --red: #fb7185; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: radial-gradient(900px 420px at 12% -18%, rgba(45,212,191,.10), transparent 55%), var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { border-bottom: 1px solid var(--border); padding: 14px 24px; }
+  header h1 { font-size: 18px; margin: 0; font-weight: 650; }
+  main { padding: 16px 24px 48px; max-width: 1500px; margin: 0 auto; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 16px; padding: 14px 16px; }
+  .filters { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+  label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 3px; }
+  select, input { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; font: inherit; }
+  input[type=number] { width: 90px; }
+  button, a.btn { background: var(--accent); color: white; border: 0; border-radius: 6px; padding: 7px 14px; font: inherit; cursor: pointer; text-decoration: none; }
+  button.ghost { background: var(--panel-2); border: 1px solid var(--border); }
+  button:disabled { opacity: .4; cursor: default; }
+  .muted { color: var(--muted); } .pos { color: var(--green); } .neg { color: var(--red); }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { padding: 6px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--border); }
+  th { background: var(--panel-2); color: var(--muted); font-weight: 600; font-size: 12px; }
+  tbody tr { cursor: pointer; } tbody tr:hover { background: rgba(45,212,191,.10); }
+  .pager { display: flex; gap: 10px; align-items: center; margin: 10px 0; flex-wrap: wrap; }
+  #detail { display: none; }
+</style>
+</head>
+<body>
+<header><h1>Every combination (RSI pair × timeframe × TP × SL × leverage)</h1><span class="muted" id="sub"></span></header>
+<main>
+  <div class="card">
+    <div class="filters">
+      <label>Period<select id="period"></select></label>
+      <label>Timeframe<select id="tf"></select></label>
+      <label>RSI fast<select id="fast"></select></label>
+      <label>RSI slow<select id="slow"></select></label>
+      <label>Take-profit %<select id="tp"></select></label>
+      <label>Stop-loss %<select id="sl"></select></label>
+      <label>Leverage<select id="leverage"></select></label>
+      <label>Min. trades<input type="number" id="min_trades" min="0" value="0"></label>
+      <label>Only profitable<select id="profitable"><option value="0">no</option><option value="1">yes</option></select></label>
+      <label>Rows per page<select id="per"><option>50</option><option selected>100</option><option>500</option></select></label>
+      <button id="go">Search</button>
+      <a class="btn" id="csv" href="#">Download CSV</a>
+    </div>
+    <p class="muted" style="margin:10px 0 0">Score = profit after fees ÷ largest drop (at least <span id="mindrop"></span> USDT). Searching everything reads every combination and takes a few seconds; choosing a timeframe or RSI lengths is instant. Click a column title to sort (Shift+click to add more columns); click a row to see it month by month.</p>
+  </div>
+  <div class="card" id="detail"></div>
+  <div class="card">
+    <div class="pager"><button class="ghost" id="first">« First</button><button class="ghost" id="prev">‹ Previous</button><span id="info" class="muted"></span><button class="ghost" id="next">Next ›</button>
+      <label style="flex-direction:row;align-items:center;gap:6px">Go to page<input type="number" id="jump" min="1" style="width:100px"></label></div>
+    <div style="overflow:auto"><table id="rows" data-no-auto-sort></table></div>
+  </div>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+const fmt = (x, d = 2) => Number(x).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+const money = (x) => `<span class="${x > 0 ? 'pos' : x < 0 ? 'neg' : ''}">${x > 0 ? '+' : ''}${fmt(x)}</span>`;
+let META, page = 0, last;
+const opts = (el, values, label = (v) => v) => { el.innerHTML = '<option value="any">any</option>' + values.map((v) => `<option value="${v}">${label(v)}</option>`).join(''); };
+const params = () => new URLSearchParams(Object.fromEntries(['period', 'tf', 'fast', 'slow', 'tp', 'sl', 'leverage', 'min_trades', 'profitable', 'per'].map((k) => [k, $('#' + k).value]).concat([['sort', sortParam()]])));
+// The server sorts every match: click a column title to sort by it, Shift+click to add it as the next column.
+let SORT = [{ key: 'score', dir: -1 }];
+function clickSort(key, add) {
+  const i = SORT.findIndex((s) => s.key === key);
+  if (!add) SORT = SORT.length === 1 && i === 0 ? [{ key, dir: -SORT[0].dir }] : [{ key, dir: -1 }];
+  else if (i < 0) SORT = [...SORT, { key, dir: -1 }];
+  else if (SORT[i].dir < 0) SORT = SORT.map((s, j) => (j === i ? { key, dir: 1 } : s));
+  else SORT = SORT.filter((_, j) => j !== i);
+  if (!SORT.length) SORT = [{ key: 'score', dir: -1 }];
+  search(0);
+}
+const sortParam = () => SORT.map((s) => `${s.key}-${s.dir > 0 ? 'asc' : 'desc'}`).join('.');
+const sortHead = (cols) => cols.map(([label, key]) => {
+  if (!key) return `<th>${label}</th>`;
+  const i = SORT.findIndex((s) => s.key === key);
+  const arrow = i < 0 ? '' : `<span class="ts-ind">${SORT[i].dir > 0 ? '▲' : '▼'}${SORT.length > 1 ? i + 1 : ''}</span>`;
+  return `<th data-key="${key}" style="cursor:pointer" title="Click to sort · Shift+click to sort by more columns">${label}${arrow}</th>`;
+}).join('');
+const COLS = [['Rank'], ['Timeframe', 'tf'], ['RSI fast', 'fast'], ['RSI slow', 'slow'], ['TP %', 'tp'], ['SL %', 'sl'], ['Lev', 'leverage'], ['Profit after fees', 'profit'], ['Largest drop', 'drop'], ['Score', 'score'], ['Trades', 'trades']];
+
+async function load() {
+  META = await (await fetch('/api/meta')).json();
+  const lev = META.leverage || [1];
+  $('#sub').textContent = ` ${META.combinations.toLocaleString()} combinations · ${META.timeframes.length} timeframes · ${META.lengths.length} RSI lengths · ${META.tp.length} TP × ${META.sl.length} SL × ${lev.length} lev`;
+  $('#mindrop').textContent = META.min_drop;
+  $('#period').innerHTML = '<option value="all">whole period</option>' + META.months.map((m) => `<option>${m}</option>`).join('');
+  opts($('#tf'), META.timeframes, (v) => v + 'm');
+  opts($('#fast'), META.lengths); opts($('#slow'), META.lengths);
+  opts($('#tp'), META.tp); opts($('#sl'), META.sl); opts($('#leverage'), lev, (v) => v + 'x');
+  search(0);
+}
+
+async function search(p) {
+  page = Math.max(0, p);
+  const q = params(); q.set('page', page);
+  $('#csv').href = '/api/csv?' + params();
+  $('#info').textContent = 'Searching…';
+  $('#go').disabled = true;
+  const r = await (await fetch('/api/query?' + q)).json();
+  $('#go').disabled = false;
+  if (r.error) { $('#info').textContent = r.error; return; }
+  last = r;
+  const pages = Math.max(1, Math.ceil(r.kept / r.per));
+  $('#info').innerHTML = `Page ${(page + 1).toLocaleString()} of ${pages.toLocaleString()} · ${r.matched.toLocaleString()} combinations match${r.kept < r.matched ? ` (the best ${r.kept.toLocaleString()} can be paged and downloaded; narrow the filters to see others)` : ''}${r.seconds ? ` · ${fmt(r.seconds, 1)} s` : ''}`;
+  $('#prev').disabled = $('#first').disabled = page === 0;
+  $('#next').disabled = page + 1 >= pages;
+  $('#rows').innerHTML = `<thead><tr>${sortHead(COLS)}</tr></thead><tbody>${
+    r.rows.map((x) => `<tr data-id="${x.id}"><td>${x.rank.toLocaleString()}</td><td>${x.tf}m</td><td>${x.fast}</td><td>${x.slow}</td><td>${x.tp}</td><td>${x.sl}</td><td>${x.leverage}x</td><td><b>${money(x.profit)}</b></td><td>${fmt(x.drop)}</td><td>${fmt(x.score)}</td><td>${x.trades.toLocaleString()}</td></tr>`).join('')}</tbody>`;
+  document.querySelectorAll('#rows tbody tr').forEach((tr) => tr.addEventListener('click', () => detail(tr.dataset.id)));
+  document.querySelectorAll('#rows th[data-key]').forEach((th) => th.addEventListener('click', (e) => clickSort(th.dataset.key, e.shiftKey || e.ctrlKey || e.metaKey)));
+}
+
+async function detail(id) {
+  const d = await (await fetch('/api/combo/' + id)).json();
+  const c = d.combo;
+  $('#detail').style.display = 'block';
+  $('#detail').innerHTML = `<b>${c.tf}m · RSI ${c.fast}/${c.slow} · TP ${c.tp}% · SL ${c.sl}% · ${c.leverage}x</b> <span class="muted">month by month</span>
+    <table style="margin-top:8px"><thead><tr><th style="text-align:left">Period</th><th>Profit after fees</th><th>Largest drop</th><th>Score</th><th>Trades</th></tr></thead><tbody>${
+    d.months.map((m) => `<tr><td style="text-align:left">${m.period}</td><td><b>${money(m.profit)}</b></td><td>${fmt(m.drop)}</td><td>${fmt(m.score)}</td><td>${m.trades.toLocaleString()}</td></tr>`).join('')}</tbody></table>`;
+  $('#detail').scrollIntoView({ behavior: 'smooth' });
+}
+
+$('#go').addEventListener('click', () => search(0));
+$('#first').addEventListener('click', () => search(0));
+$('#prev').addEventListener('click', () => search(page - 1));
+$('#next').addEventListener('click', () => search(page + 1));
+$('#jump').addEventListener('change', (e) => search(Number(e.target.value) - 1));
+load();
+</script>
+<script>/*__TABLE_SORT__*/</script>
+</body>
+</html>

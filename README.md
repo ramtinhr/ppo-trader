@@ -25,10 +25,11 @@ checked before it is marked verified:
 
 ```bash
 # The archives covering the previous calendar month (UTC)
-cargo run --release --bin download_okx_trades
+cargo run --release --bin download
+# or: dt download
 
 # Custom UTC range: START inclusive, END exclusive
-cargo run --release --bin download_okx_trades -- 2026-09-01 2026-10-01
+cargo run --release --bin download -- 2026-09-01 2026-10-01
 ```
 
 Verified days are skipped, so an interrupted run resumes when rerun.
@@ -221,6 +222,24 @@ Configured fees are per side, in basis points. The round-trip estimate is:
 
 ```text
 2 × trading fee + spread + 2 × slippage + absolute funding
+```
+
+## Product CLI (`dt`)
+
+Go owns the product layer (browse HTTP, N/M score walk-forward, HTML reports). Rust remains the
+engine (`download`, `scan`, `simulate`, `verify`, …). See [docs/DT.md](docs/DT.md).
+
+```bash
+./scripts/build_dt.sh   # macOS: needs CGO / external linker (see docs/DT.md)
+./dt browse --scan data/windowscan/… --port 8091
+./dt walk-forward --scan data/windowscan/… --require-fit 0
+./dt report --json data/windowscan/…/nm_walk_forward.json
+```
+
+Download two years of OKX trades (no Go needed):
+
+```bash
+cargo run --release --bin download -- 2024-10-31 2026-10-31
 ```
 
 ## Next steps

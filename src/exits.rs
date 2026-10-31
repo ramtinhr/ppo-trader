@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// percent away from the entry price, and take-profits each closing its share of the position.
 /// With `breakeven`, the stop moves to the entry price once the first take-profit fills. Prices
 /// are in ticks of 0.1 USDT, sizes in steps of 0.0001 BTC.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Exits {
     pub stop_pct: f64,
     /// (distance in % of the entry price, share of the position), nearest first.
