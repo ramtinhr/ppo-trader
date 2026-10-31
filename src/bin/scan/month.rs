@@ -118,6 +118,7 @@ fn parse_args() -> Result<Args> {
             "--config" => args.config = value.into(),
             "--data" => args.data = value.into(),
             "--out" => args.out = value.into(),
+            "--bucket" => {} // handled by bin/scan; ignored here
             _ => bail!("unknown option {flag}\n\n{USAGE}"),
         }
     }
@@ -192,7 +193,7 @@ impl Tally {
     }
 }
 
-fn main() -> Result<()> {
+pub fn run() -> Result<()> {
     let args = parse_args()?;
     let config = AppConfig::load(&args.config)?;
     let costs = Costs {

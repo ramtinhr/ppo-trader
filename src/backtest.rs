@@ -27,8 +27,12 @@ use crate::{
     config::{AppConfig, VenueConfig},
     exits::Exits,
     okx_history::{self, CONTRACT_VALUE, Trade, archive_days},
-    strategy::{BarSignals, ReversalStrategy},
+    signals::BarSignals,
+    strategy::ReversalStrategy,
 };
+
+/// Re-export for bins that still `use dynamic_trader::backtest::{Fill, …}`.
+pub use crate::fills::{Fill, FillKind};
 
 pub const OKX_VENUE: &str = "OKX";
 pub const BTC_PERPETUAL: &str = "BTC-USDT-SWAP.OKX";
@@ -93,26 +97,6 @@ pub struct Run<'a> {
     pub bar_minutes: u64,
     pub size_btc: f64,
     pub balance_usdt: f64,
-}
-
-/// What a filled order was for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum FillKind {
-    /// Market order opening or reversing a position on a signal.
-    Signal,
-    TakeProfit,
-    StopLoss,
-}
-
-/// One filled order of a backtest.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Fill {
-    pub time_ms: i64,
-    pub kind: FillKind,
-    pub buy: bool,
-    pub size_btc: f64,
-    pub price: f64,
-    pub fee_usdt: f64,
 }
 
 /// Replays every trade through Nautilus, one archive at a time, with `signals` driving a

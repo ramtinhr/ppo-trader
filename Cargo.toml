@@ -3,6 +3,22 @@ name = "dynamic-trader"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.98.1"
+default-run = "scan"
+
+# Standalone crate: ignore any parent Cargo workspace (e.g. ../Cargo.toml).
+[workspace]
+
+[features]
+default = ["verify"]
+# NautilusTrader fill-by-fill verifier and Pine backtest. The fast scanner does not need this.
+verify = [
+    "dep:nautilus-backtest",
+    "dep:nautilus-common",
+    "dep:nautilus-core",
+    "dep:nautilus-execution",
+    "dep:nautilus-model",
+    "dep:nautilus-trading",
+]
 
 [dependencies]
 anyhow = "1"
@@ -10,12 +26,12 @@ chrono = { version = "0.4.45", features = ["serde"] }
 dotenvy = "0.15"
 flate2 = "1.1.10"
 rayon = "1.11"
-nautilus-backtest = "0.65.0"
-nautilus-common = "0.65.0"
-nautilus-core = "0.65.0"
-nautilus-execution = "0.65.0"
-nautilus-model = "0.65.0"
-nautilus-trading = "0.65.0"
+nautilus-backtest = { version = "0.65.0", optional = true }
+nautilus-common = { version = "0.65.0", optional = true }
+nautilus-core = { version = "0.65.0", optional = true }
+nautilus-execution = { version = "0.65.0", optional = true }
+nautilus-model = { version = "0.65.0", optional = true }
+nautilus-trading = { version = "0.65.0", optional = true }
 rust_decimal = "1.43.0"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = { version = "1", features = ["derive"] }
@@ -25,13 +41,46 @@ tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 ureq = { version = "3.4.2", features = ["json"] }
 zip = { version = "6", default-features = false, features = ["deflate"] }
 
+[[bin]]
+name = "download"
+path = "src/bin/download_okx_trades.rs"
+
+[[bin]]
+name = "download_okx_trades"
+path = "src/bin/download_okx_trades.rs"
+
+[[bin]]
+name = "scan"
+path = "src/bin/scan/main.rs"
+
+[[bin]]
+name = "simulate"
+path = "src/bin/simulate.rs"
+
+[[bin]]
+name = "verify"
+path = "src/bin/verify.rs"
+required-features = ["verify"]
+
+[[bin]]
+name = "backtest"
+path = "src/bin/backtest.rs"
+required-features = ["verify"]
+
+[[bin]]
+name = "tv_check"
+path = "src/bin/tv_check.rs"
+
+[[bin]]
+name = "window_nm_walk_forward"
+path = "src/bin/window_nm_walk_forward.rs"
+required-features = ["verify"]
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
 
 # Fast iteration (price strategy tweaks): ~5–15s rebuilds instead of ~45s LTO.
-#   cargo build --profile relfast --bin window_nm_walk_forward
-#   ./target/relfast/window_nm_walk_forward --path price ...
 [profile.relfast]
 inherits = "release"
 lto = false
