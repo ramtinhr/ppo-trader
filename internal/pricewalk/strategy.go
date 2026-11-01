@@ -709,48 +709,21 @@ func runPriceStrategyPerTrade(
 		return nil, fmt.Errorf("%s: empty TP/SL grid", label)
 	}
 
+	oosLo, oosHi := frameBarRange(bars, tradeStartMs, tradeEndMs)
+	if oosLo >= oosHi {
+		return nil, fmt.Errorf("%s: empty OOS / TRADE bar range", label)
+	}
+
 	if oracle {
 		signals := priceDirSignalsDebounced(h1, bars, PriceSignalConfirmBars)
-		oosLo, oosHi := frameBarRange(bars, tradeStartMs, tradeEndMs)
-		if oosLo >= oosHi {
-			return nil, fmt.Errorf("%s: empty OOS bar range", label)
-		}
 		return runOracleGrid(args, bars, models, label, oosLo, oosHi, signals, usable, targets, exitGrid,
 			maxLev, maxRiskPct, errBand, taker, maker, skippedFee)
 	}
 
-	// Option B: start at FORWARD origin (last bar before tradeEnd), not at TRADE start.
-	origin := forwardOriginIndex(bars, tradeEndMs)
-	if origin < 2 {
-		return nil, fmt.Errorf("%s: no FORWARD origin before trade_end", label)
-	}
-	oosLo := origin + 1 // first entry = first candle after origin (e.g. 10-10 00:00)
-	nBefore := len(bars)
-	// FORWARD live: tape usually ends at origin — always pull OKX actuals past it.
-	need := pathWindow * 4
-	if need < 200 {
-		need = 200
-	}
-	if len(bars)-oosLo < pathWindow {
-		bars = extendBarsWithOfficial(bars, barMs, need)
-	}
-	oosHi := len(bars)
-	logx.Infof("  %s FORWARD TRADE (option B): origin=%s · tape_bars=%d → after_extend=%d (+%d) · look_ahead=%d",
-		label, utc(bars[origin].TimeMs), nBefore, len(bars), len(bars)-nBefore, pathWindow)
-	if oosLo >= oosHi {
-		logx.Warnf("  %s FORWARD TRADE: 0 trades — no actuals after origin %s (OKX/tape empty). Check network/OKX.",
-			label, utc(bars[origin].TimeMs))
-		return map[string]any{
-			"selection_rule": "option B FORWARD: no actuals after origin",
-			"summary":        map[string]any{"pick_mode": "rolling-predicted", "exits_mode": "forward_only", "zero_reason": "no_actuals"},
-			"total_pnl":      0.0, "closed_trades": uint32(0), "wins": uint32(0), "win_rate": 0.0,
-			"signal_count": 0, "signals_in_oos": 0, "oos_bars": []int{oosLo, oosHi},
-			"skips":  map[string]any{"liquid": 0, "tp_floor": 0, "robust": 0, "flat": 0},
-			"trades": []map[string]any{},
-		}, nil
-	}
-	logx.Infof("  %s FORWARD TRADE (option B): first_entry≥%s · bars %d..%d (not trading TRADE window before origin)",
-		label, utc(bars[oosLo].TimeMs), oosLo, oosHi)
+	// Live year trade: walk the full TRADE window (e.g. 2025) with live-safe rules.
+	// FORWARD path in the report remains a post-period demo only.
+	logx.Infof("  %s TRADE-year predicted: %s → %s · bars %d..%d · look_ahead=%d (live rules: min_peak, h1 agree, lev≤%.0f)",
+		label, utc(tradeStartMs), utc(tradeEndMs), oosLo, oosHi, pathWindow, math.Min(maxLev, PathLiveMaxLev))
 
 	return runRollingPredicted(args, bars, models, label, oosLo, oosHi, pathWindow,
 		usable, targets, exitGrid, maxLev, maxRiskPct, errBand, taker, maker)

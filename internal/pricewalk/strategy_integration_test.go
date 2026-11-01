@@ -57,8 +57,7 @@ func TestRollingRetestsGridEachTrade(t *testing.T) {
 	const barMs = int64(15 * 60_000)
 	start := int64(1_700_000_000_000)
 	start = start - (start % barMs)
-	// Option B: trades start AFTER tradeEnd origin — need bars past tradeEnd.
-	minutes := synthMinutes(320, barMs, start)
+	minutes := synthMinutes(240, barMs, start)
 	h1 := pricemodel.Model{Alphas: [4]float64{3.0, 0, 0, 0}}
 	models := []pricemodel.Model{pricemodel.ColdStart(), h1}
 	for h := 2; h <= 40; h++ {
@@ -71,9 +70,10 @@ func TestRollingRetestsGridEachTrade(t *testing.T) {
 	args.PriceTargets = []float64{0.1, 0.5, 1.0}
 	args.PriceLeverage = []uint32{1, 2, 3}
 	args.PriceRisk = []float64{5}
+	tradeStart := start + 40*barMs
 	tradeEnd := start + 200*barMs
 	out, err := runPriceStrategyPerTrade(args, minutes, models, "15m", barMs,
-		start+40*barMs, tradeEnd, 0.0005, 0.0002, 40)
+		tradeStart, tradeEnd, 0.0005, 0.0002, 40)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,21 +87,17 @@ func TestRollingRetestsGridEachTrade(t *testing.T) {
 		t.Fatalf("exits_mode=%v", sum["exits_mode"])
 	}
 	if n == 0 {
-		t.Fatalf("expected FORWARD trades after origin; skips=%v", out["skips"])
+		t.Fatalf("expected TRADE-year trades; skips=%v", out["skips"])
 	}
 	trades, _ := out["trades"].([]map[string]any)
 	prevEnd := 0
 	labels := map[string]int{}
-	minEntryBar := 0
-	if oos, ok := out["oos_bars"].([]int); ok && len(oos) == 2 {
-		minEntryBar = oos[0]
-	}
+	oos, _ := out["oos_bars"].([]int)
 	for _, tr := range trades {
 		eb, _ := tr["entry_bar"].(int)
 		eh, _ := tr["exit_h"].(int)
-		// Option B: only after FORWARD origin (oos_lo).
-		if eb < minEntryBar {
-			t.Fatalf("option B must not trade before FORWARD oos_lo=%d; entry_bar=%d", minEntryBar, eb)
+		if len(oos) == 2 && (eb < oos[0] || eb >= oos[1]) {
+			t.Fatalf("trade outside TRADE window: entry_bar=%d oos=%v", eb, oos)
 		}
 		if eb < prevEnd {
 			t.Fatalf("overlap: entry %d < prevEnd %d", eb, prevEnd)
@@ -142,7 +138,7 @@ func TestLiveSitsOutFlatRawPath(t *testing.T) {
 	args.PriceTargets = []float64{0.1, 0.5}
 	args.PriceLeverage = []uint32{1, 2, 10}
 	out, err := runPriceStrategyPerTrade(args, minutes, models, "15m", barMs,
-		start+10*barMs, start+40*barMs, 0.0005, 0.0002, 20)
+		start+10*barMs, start+80*barMs, 0.0005, 0.0002, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,9 +177,8 @@ func TestRollingSkipsWhenNoProfitableCombo(t *testing.T) {
 	args.PriceStops = []float64{0.5, 1.0}
 	args.PriceTargets = []float64{0.5, 1.0} // TP too far for flat path
 	args.PriceLeverage = []uint32{1}
-	// tradeEnd mid-range; remaining bars are FORWARD segment (flat → 0 trades).
 	out, err := runPriceStrategyPerTrade(args, minutes, models, "15m", barMs,
-		start+10*barMs, start+40*barMs, 0.0005, 0.0002, 20)
+		start+10*barMs, start+70*barMs, 0.0005, 0.0002, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +250,7 @@ func TestRejectsStopInsideErrBand(t *testing.T) {
 	const barMs = int64(15 * 60_000)
 	start := int64(1_700_000_000_000)
 	start = start - (start % barMs)
-	minutes := synthMinutes(200, barMs, start) // bars after tradeEnd for option B
+	minutes := synthMinutes(160, barMs, start)
 	models := []pricemodel.Model{pricemodel.ColdStart()}
 	for h := 1; h <= 30; h++ {
 		models = append(models, pricemodel.Model{Alphas: [4]float64{2.0, 0, 0, 0}})
@@ -268,7 +263,7 @@ func TestRejectsStopInsideErrBand(t *testing.T) {
 	args.PriceLeverage = []uint32{1, 5, 10}
 	args.PriceRisk = []float64{5}
 	out, err := runPriceStrategyPerTrade(args, minutes, models, "15m", barMs,
-		start+20*barMs, start+100*barMs, 0.0005, 0.0002, 30)
+		start+20*barMs, start+140*barMs, 0.0005, 0.0002, 30)
 	if err != nil {
 		t.Fatal(err)
 	}

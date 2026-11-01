@@ -427,9 +427,9 @@ func runOnePriceBar(
 	if horizons.PathExample != nil {
 		if steps, ok := horizons.PathExample["steps"].([]map[string]any); ok && len(steps) > 0 {
 			fwdN := len(steps)
-			logx.Infof("  %s FORWARD path from last candle %v (close %v) → %d steps (under-1%% path %d) · mode2 trades START here (option B), not from TRADE %s",
+			logx.Infof("  %s FORWARD DEMO (post TRADE) from last candle %v (close %v) → %d steps (under-1%%=%d) · mode2 trades the TRADE year %s→%s, not this demo",
 				label, horizons.PathExample["origin"], horizons.PathExample["origin_close"],
-				fwdN, horizons.PathUnder1Pct, utc(tradeStart))
+				fwdN, horizons.PathUnder1Pct, utc(tradeStart), utc(tradeEnd))
 			show := func(s map[string]any) {
 				spot := "n/a (future)"
 				if s["spot"] != nil {
@@ -506,8 +506,8 @@ func runOnePriceBar(
 		)
 	case 2:
 		signalRule = fmt.Sprintf(
-			"live FORWARD: start after last candle before trade_end; raw OLS peak≥min + h1 agrees; re-test TP×SL×lev (SL≥err_band, lev≤%.0f); sit out flat forecasts; look_ahead≈%d",
-			PathLiveMaxLev, horizons.PathUnder1Pct,
+			"live TRADE-year: walk trade_start→trade_end; each free bar raw OLS predict (look_ahead≈%d), peak≥min + h1 agrees, re-test TP×SL×lev (SL≥err_band, lev≤%.0f); sit out flat; FORWARD block is post-period demo only",
+			horizons.PathUnder1Pct, PathLiveMaxLev,
 		)
 	}
 

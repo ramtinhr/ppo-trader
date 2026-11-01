@@ -59,24 +59,33 @@ Pure Go (`internal/pricewalk`). Aggregates 1m candles (M1C1 cache under `scan/.c
 OLS return features per bar size, optionally runs per-trade TP/SL:
 
 - `--price-strategy 1` / `oracle` — peek actual future closes (research ceiling → `nm_price_walk_forward.html`)
-- `--price-strategy 2` / `predicted` — **live FORWARD bot**: start at FORWARD origin
-  (last candle before `trade_end`). Raw OLS only — **sit out if peak &lt; ~0.20%** (no
-  invented/h1-extrapolated paths). Require h=1 sign agrees. Re-test TP×SL×lev each trade
-  (SL≥err_band, TP≤peak, mid hits TP; rank path_r; lev capped at 3). One trade → refresh.
+- `--price-strategy 2` / `predicted` — **live TRADE-year bot**: walk the full TRADE
+  window (e.g. one year). Raw OLS only — sit out if peak &lt; ~0.20%; h=1 must agree;
+  re-test TP×SL×lev (SL≥err_band, lev≤3). FORWARD chart is post-period demo only.
   (`nm_price_walk_forward_predicted.html`)
 
+### Train 2024 → trade 2025 (one year)
 
-Soft-fails OKX official candles when the network is blocked.
+Need a windowscan whose `meta` spans ~2024-01-01 through ~2026-01-01 (train year + trade year).
+Then reserve the last 365 days as TRADE:
+
+```bash
+./dt price-walk \
+  --scan data/windowscan/<2024_to_2026_scan> \
+  --data data/okx/BTC-USDT-SWAP/archives \
+  --price-bars 15m \
+  --price-strategy 2 \
+  --reserve-trade-days 365 \
+  --trade-days 365 \
+  --max-rel-err 0.01 \
+  --verify 0
+```
+
+That yields roughly **TRAIN 2024 → TRADE 2025**. Soft-fails OKX when the network is blocked.
 
 ```bash
 STRATEGY=2 ./scripts/price_iter.sh
 ./dt price-walk --scan DIR --price-bars 15m --price-strategy 2 --max-rel-err 0.01 --verify 0
-```
-
-```bash
-./scripts/price_iter.sh
-# or:
-./dt price-walk --scan data/windowscan/<dir> --price-bars 15m --price-strategy 1 --verify 0
 ```
 
 Writes `nm_price_walk_forward.json` / `.html` (selected bar) plus per-bar grid reports.
