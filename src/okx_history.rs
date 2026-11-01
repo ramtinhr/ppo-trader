@@ -30,23 +30,35 @@ use ureq::Proxy;
 /// Optional override for [`http`], set once from the download CLI (`--proxy`).
 static PROXY_OVERRIDE: OnceLock<String> = OnceLock::new();
 
+/// Normalize common proxy URL mistakes (`socks://` → `socks5://`).
+pub fn normalize_proxy_url(url: &str) -> String {
+    let u = url.trim();
+    if let Some(rest) = u.strip_prefix("socks://") {
+        return format!("socks5://{rest}");
+    }
+    if let Some(rest) = u.strip_prefix("SOCKS://") {
+        return format!("socks5://{rest}");
+    }
+    u.to_string()
+}
+
 /// Force every OKX HTTP call through this proxy URL (e.g. `socks5://127.0.0.1:1080`).
 /// Call before the first request. Ignored if already set.
 pub fn set_proxy(url: impl Into<String>) {
-    let url = url.into();
+    let url = normalize_proxy_url(&url.into());
     let _ = PROXY_OVERRIDE.set(url);
 }
 
 /// Proxy URL from CLI override or env (`OKX_PROXY`, `ALL_PROXY`, `all_proxy`, `SOCKS5_PROXY`).
 pub fn proxy_url() -> Option<String> {
     if let Some(url) = PROXY_OVERRIDE.get() {
-        return Some(url.clone());
+        return Some(normalize_proxy_url(url));
     }
     for key in ["OKX_PROXY", "ALL_PROXY", "all_proxy", "SOCKS5_PROXY"] {
         if let Ok(v) = std::env::var(key) {
             let v = v.trim().to_string();
             if !v.is_empty() {
-                return Some(v);
+                return Some(normalize_proxy_url(&v));
             }
         }
     }
@@ -172,8 +184,12 @@ pub fn fetch_day(dir: &Path, day: NaiveDate, previous: Option<&DaySummary>) -> R
     let path = archive_path(dir, day);
     let summary_file = summary_path(dir, day);
     let summary = match fs::read_to_string(&summary_file) {
-        Ok(text) if path.exists() => serde_json::from_str(&text)?,
+        Ok(text) if path.exists() && !text.trim().is_empty() => serde_json::from_str(&text)
+            .with_context(|| format!("corrupt verified summary {}", summary_file.display()))?,
         _ => {
+            if summary_file.exists() {
+                let _ = fs::remove_file(&summary_file);
+            }
             if !path.exists() {
                 download(day, &path)?;
             }
@@ -319,15 +335,47 @@ fn verify(day: NaiveDate, path: &Path) -> Result<DaySummary> {
 /// Volume of OKX's official 1D candle for archive `day`, in hundredths of a contract.
 fn official_volume_hundredths(day: NaiveDate) -> Result<u64> {
     let (start, _) = archive_window_ms(day);
-    let reply: serde_json::Value = http()
-        .get(CANDLE_URL)
-        .query("instId", INSTRUMENT)
-        .query("bar", "1D")
-        .query("after", (start + 1).to_string())
-        .query("limit", "1")
-        .call()?
-        .body_mut()
-        .read_json()?;
+    let fetch = || -> Result<serde_json::Value> {
+        let mut resp = http()
+            .get(CANDLE_URL)
+            .query("instId", INSTRUMENT)
+            .query("bar", "1D")
+            .query("after", (start + 1).to_string())
+            .query("limit", "1")
+            .call()
+            .with_context(|| {
+                format!(
+                    "OKX 1D candle for {day} (empty/EOF usually means proxy blocked OKX — use socks5://host:port, not socks://)"
+                )
+            })?;
+        let text = resp.body_mut().read_to_string().with_context(|| {
+            format!("reading OKX 1D candle body for {day}")
+        })?;
+        ensure!(
+            !text.trim().is_empty(),
+            "OKX 1D candle for {day}: empty body via proxy {:?} — try --proxy socks5://127.0.0.1:PORT or fix OKX_PROXY",
+            proxy_url()
+        );
+        serde_json::from_str(&text).with_context(|| {
+            format!(
+                "OKX 1D candle JSON for {day} (first 120 chars): {}",
+                text.chars().take(120).collect::<String>()
+            )
+        })
+    };
+    let mut attempt = 0;
+    let reply = loop {
+        attempt += 1;
+        match fetch() {
+            Ok(reply) if reply["code"] == "0" => break reply,
+            Ok(reply) if attempt >= 5 => bail!("OKX 1D candle request failed for {day}: {reply}"),
+            Err(e) if attempt >= 5 => return Err(e),
+            Ok(_) | Err(_) => {
+                println!("  OKX 1D candle for {day}: attempt {attempt} failed, retrying");
+                std::thread::sleep(std::time::Duration::from_secs(attempt));
+            }
+        }
+    };
     let candle = &reply["data"][0];
     ensure!(
         candle[0].as_str() == Some(start.to_string().as_str()),
@@ -571,6 +619,18 @@ mod tests {
         assert_eq!(end - start, 24 * HOUR_MS);
         assert_eq!(utc8_day(start), day);
         assert_eq!(utc8_day(end - 1), day);
+    }
+
+    #[test]
+    fn normalizes_socks_scheme() {
+        assert_eq!(
+            normalize_proxy_url("socks://127.0.0.1:12334"),
+            "socks5://127.0.0.1:12334"
+        );
+        assert_eq!(
+            normalize_proxy_url("socks5://127.0.0.1:1080"),
+            "socks5://127.0.0.1:1080"
+        );
     }
 
     #[test]
