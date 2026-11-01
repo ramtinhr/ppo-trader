@@ -22,10 +22,11 @@ const (
 	ReplayBalance            = 1e9
 
 	// Rolling predicted-path bot (mode 2): take this fraction of the predicted
-	// peak as TP; keep a micro floor so every refresh still places a trade.
-	PathTakeFrac   = 0.70
-	PathMinTPPct   = 0.08
-	PathMinStopPct = 0.25
+	// peak as TP. Only trade when peak clears PathMinPeakPct (flat OLS noise
+	// must not force 800+ micro-scalps).
+	PathTakeFrac    = 0.70
+	PathMinPeakPct  = 0.20 // skip if predicted favorable span < this (%)
+	PathMinStopPct  = 0.25
 	// Design target used when sizing SL vs TP (high win-rate scalp).
 	PathWinRateTarget = 0.80
 )

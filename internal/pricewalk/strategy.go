@@ -435,6 +435,30 @@ func pathDirection(path []float64, entry float64) (long bool, peakPct float64) {
 	return false, dn
 }
 
+// pathInternalSpanPct is (max-min)/entry on the predicted window.
+// Flat OLS clouds sit near ref; open/close gaps must not look like a real peak.
+func pathInternalSpanPct(path []float64, entry float64) float64 {
+	if len(path) == 0 || !(entry > 0) {
+		return 0
+	}
+	lo, hi := math.Inf(1), math.Inf(-1)
+	for _, px := range path {
+		if math.IsNaN(px) || math.IsInf(px, 0) || px <= 0 {
+			continue
+		}
+		if px < lo {
+			lo = px
+		}
+		if px > hi {
+			hi = px
+		}
+	}
+	if !(hi > lo) {
+		return 0
+	}
+	return (hi - lo) / entry * 100
+}
+
 // pathAdversePct is the worst predicted move against the position in the window.
 func pathAdversePct(path []float64, entry float64, long bool) float64 {
 	if len(path) == 0 || !(entry > 0) {
@@ -458,21 +482,36 @@ func pathAdversePct(path []float64, entry float64, long bool) float64 {
 	return worst
 }
 
+// minTradablePeakPct is the smallest predicted favorable move we will trade.
+// Below this the multi-h OLS path is noise (typical flat ~0.05–0.15%).
+func minTradablePeakPct(taker, maker float64) float64 {
+	feePct := (taker + maker) * 100
+	// Need peak so that take_frac*peak clears round-trip fees with cushion.
+	need := (feePct + 0.05) / PathTakeFrac
+	if need < PathMinPeakPct {
+		need = PathMinPeakPct
+	}
+	return need
+}
+
 // exitsFromPredictedPath builds one TP/SL from the rolling predicted window.
-// High-win-rate scalp: TP = fraction of predicted peak (easy hit when path is right);
+// High-win-rate scalp: TP = fraction of predicted peak (never above peak);
 // SL sits beyond path adverse but capped near the model err band (noise shield).
 func exitsFromPredictedPath(peakPct, adversePct, errBand, taker, maker float64) exits.Exits {
 	feePct := (taker + maker) * 100
 	tp := peakPct * PathTakeFrac
-	if tp < PathMinTPPct {
-		tp = PathMinTPPct
-	}
-	// Never aim past the predicted peak when the peak is real — unreachable on mid path.
-	if peakPct >= PathMinTPPct && tp > peakPct {
+	if tp > peakPct {
 		tp = peakPct * 0.95
 	}
-	if tp < feePct+0.02 {
+	// Soft floor only when peak already clears fees — never invent TP > peak.
+	if tp < feePct+0.02 && peakPct >= feePct+0.02 {
 		tp = feePct + 0.02
+	}
+	if tp > peakPct {
+		tp = peakPct * 0.95
+	}
+	if tp < 0.01 {
+		tp = 0.01
 	}
 
 	slCap := errBand * 100 * 1.05
@@ -844,14 +883,17 @@ func runRollingPredicted(
 	}
 	sort.Slice(levs, func(i, j int) bool { return levs[i] < levs[j] })
 
-	logx.Infof("  %s rolling-predicted: look_ahead=%d (H=%d) · lev=%v · max_risk=%g%% · err_band=%.2f%% · take_frac=%.0f%% · win_rate_target=%.0f%% · OOS %d..%d",
-		label, pathWindow, hMax, levs, maxRiskPct, errBand*100, PathTakeFrac*100, PathWinRateTarget*100, oosLo, oosHi)
+	minPeak := minTradablePeakPct(taker, maker)
+	logx.Infof("  %s rolling-predicted: look_ahead=%d (H=%d) · lev=%v · max_risk=%g%% · err_band=%.2f%% · min_peak=%.2f%% · take_frac=%.0f%% · win_rate_target=%.0f%% · OOS %d..%d",
+		label, pathWindow, hMax, levs, maxRiskPct, errBand*100, minPeak, PathTakeFrac*100, PathWinRateTarget*100, oosLo, oosHi)
 
 	balance := args.BalanceUSDT
 	running := 0.0
 	var tradesJSON []map[string]any
 	var wins uint32
 	skippedLiquid := 0
+	skippedFlat := 0
+	skippedMid := 0
 	origins := 0
 	inBandN, inBandLoss := 0, 0
 
@@ -880,9 +922,18 @@ func runRollingPredicted(
 		}
 		pickPath := truncatePath(rawFull, pathWindow)
 		long, peak := pathDirection(pickPath, entry)
+		origins++
+
+		// Multi-h OLS is often a flat level cloud. Trade only when that level is
+		// far enough from entry to clear fees (peak ≥ min). Never invent micro TP.
+		if peak+1e-12 < minPeak {
+			skippedFlat++
+			i++
+			continue
+		}
+
 		adverse := pathAdversePct(pickPath, entry, long)
 		ex := exitsFromPredictedPath(peak, adverse, errBand, taker, maker)
-		origins++
 
 		actPath := actualCloses(bars, i, len(pickPath))
 		if len(actPath) == 0 {
@@ -907,6 +958,11 @@ func runRollingPredicted(
 				continue
 			}
 			mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
+			// Path itself must clear fees at TP — otherwise skip (no forced trade).
+			if mid.PnL <= 0 || mid.Reason != "tp" {
+				skippedMid++
+				continue
+			}
 			pathR := mid.PnL / math.Max(balance*riskPct/100, 1e-9)
 			dist := liquidDistancePct(ex.StopPct, lev)
 			cp := pathPick{
@@ -999,12 +1055,16 @@ func runRollingPredicted(
 	if n > 0 {
 		winRate = round2(100 * float64(wins) / float64(n))
 	}
-	logx.Infof("  %s rolling-predicted done: %d trades · PnL %+.2f · origins=%d · win_rate=%.1f%% · liquid_skips≈%d · in_band=%d in_band_loss=%d",
-		label, n, running, origins, winRate, skippedLiquid, inBandN, inBandLoss)
+	logx.Infof("  %s rolling-predicted done: %d trades · PnL %+.2f · origins=%d · win_rate=%.1f%% · flat_skips≈%d · mid_skips≈%d · liquid_skips≈%d · in_band=%d in_band_loss=%d",
+		label, n, running, origins, winRate, skippedFlat, skippedMid, skippedLiquid, inBandN, inBandLoss)
+	if n == 0 {
+		logx.Warnf("  %s rolling-predicted took 0 trades (flat_peak<%.2f%% → %d · mid_fail=%d). OLS path rarely moves enough — that is the model, not a skip bug.",
+			label, minPeak, skippedFlat, skippedMid)
+	}
 
 	rule := fmt.Sprintf(
-		"rolling predicted path: at each free origin predict next %d closes; side+TP/SL from raw OLS path (TP≈%.0f%% of peak, SL beyond path adverse capped at err-band); one trade then refresh; lev≤2; realized on actuals; design win-rate target %.0f%%",
-		pathWindow, PathTakeFrac*100, PathWinRateTarget*100,
+		"rolling predicted path: predict next %d closes; trade only if peak≥%.2f%% and mid path hits TP after fees; TP≈%.0f%% of peak (never above peak); SL beyond adverse capped at err-band; one trade then refresh; lev≤2; design WR target %.0f%%",
+		pathWindow, minPeak, PathTakeFrac*100, PathWinRateTarget*100,
 	)
 	return map[string]any{
 		"selection_rule": rule,
@@ -1012,7 +1072,7 @@ func runRollingPredicted(
 			"exits_mode": "rolling_path", "pick_mode": modeName, "horizon": hMax,
 			"path_window": pathWindow, "confirm_bars": 0, "max_leverage": math.Min(maxLev, 2),
 			"err_band": errBand, "grid_stops": 0, "grid_tps": 0, "grid_combos": 0,
-			"take_frac": PathTakeFrac, "win_rate_target": PathWinRateTarget,
+			"take_frac": PathTakeFrac, "min_peak_pct": minPeak, "win_rate_target": PathWinRateTarget,
 			"in_band_trades": inBandN, "in_band_losses": inBandLoss,
 			"taker_fee_bps": taker * 10_000, "maker_fee_bps": maker * 10_000,
 			"balance_start": args.BalanceUSDT, "balance_end": round2(balance),
@@ -1026,7 +1086,7 @@ func runRollingPredicted(
 			"usable_stops":         []float64{},
 		},
 		"skips": map[string]any{
-			"liquid": skippedLiquid, "tp_floor": 0, "robust": 0, "flat": 0,
+			"liquid": skippedLiquid, "tp_floor": 0, "robust": skippedMid, "flat": skippedFlat,
 		},
 		"trades": tradesJSON,
 	}, nil
