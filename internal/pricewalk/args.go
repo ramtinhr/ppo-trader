@@ -47,7 +47,8 @@ type Args struct {
 	PriceBars         []BarSize
 	PriceHorizon      int
 	PriceHorizonAuto  bool
-	PriceStrategy     bool
+	// PriceStrategyMode: 0=off, 1=oracle (peek actuals), 2=predicted robust (±max_rel_err).
+	PriceStrategyMode int
 	PriceStops        []float64
 	PriceRisk         []float64
 	PriceLeverage     []uint32
@@ -283,11 +284,16 @@ func ParseArgs(argv []string) (Args, error) {
 			if err != nil {
 				return args, err
 			}
-			n, err := strconv.Atoi(v)
-			if err != nil || n > 1 || n < 0 {
-				return args, fmt.Errorf("--price-strategy must be 0 or 1")
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "0", "off", "none":
+				args.PriceStrategyMode = 0
+			case "1", "oracle":
+				args.PriceStrategyMode = 1
+			case "2", "predicted", "robust":
+				args.PriceStrategyMode = 2
+			default:
+				return args, fmt.Errorf("--price-strategy must be 0|1|2 (off|oracle|predicted)")
 			}
-			args.PriceStrategy = n == 1
 		case "--price-stops":
 			v, err := need()
 			if err != nil {

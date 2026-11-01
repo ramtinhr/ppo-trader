@@ -274,9 +274,13 @@ func runPricePath(
 		runs[i].Report["meta"].(map[string]any)["bar_grid"] = gridSummary
 		runs[i].Report["meta"].(map[string]any)["selected_bar"] = selected
 		runs[i].Report["meta"].(map[string]any)["is_selected"] = i == bestIdx
-		stem := "nm_price_walk_forward"
+		stemBase := "nm_price_walk_forward"
+		if args.PriceStrategyMode == 2 {
+			stemBase = "nm_price_walk_forward_predicted"
+		}
+		stem := stemBase
 		if i != bestIdx {
-			stem = "nm_price_walk_forward_" + runs[i].Label
+			stem = stemBase + "_" + runs[i].Label
 		}
 		payload, err := json.MarshalIndent(runs[i].Report, "", "  ")
 		if err != nil {
@@ -460,7 +464,7 @@ func runOnePriceBar(
 
 	var strategy map[string]any
 	balancePnL := 0.0
-	if args.PriceStrategy {
+	if args.PriceStrategyMode == 1 || args.PriceStrategyMode == 2 {
 		strategy, err = runPriceStrategyPerTrade(args, minutes, horizons.Models, label, barMs, tradeStart, tradeEnd, taker, maker)
 		if err != nil {
 			return priceBarRun{}, err
@@ -486,6 +490,22 @@ func runOnePriceBar(
 	if strategy == nil {
 		stratBody = nil
 	}
+	signalRule := fmt.Sprintf(
+		"debounced dir from h=1 return (%d bars); no per-trade exits",
+		PriceSignalConfirmBars,
+	)
+	switch args.PriceStrategyMode {
+	case 1:
+		signalRule = fmt.Sprintf(
+			"debounced dir from h=1 return (%d bars); per-trade TP/SL/lev = max PnL on actual closes t+1..t+%d (oracle / peek)",
+			PriceSignalConfirmBars, horizonN,
+		)
+	case 2:
+		signalRule = fmt.Sprintf(
+			"debounced dir from h=1 return (%d bars); per-trade TP/SL/lev = max worst-case on predicted closes ±%.2f%% with TP≥%.2f%% (no peek); realized on actuals",
+			PriceSignalConfirmBars, args.MaxRelErr*100, args.MaxRelErr*100,
+		)
+	}
 
 	rep := map[string]any{
 		"meta": map[string]any{
@@ -496,10 +516,8 @@ func runOnePriceBar(
 			"price_horizon_auto": args.PriceHorizonAuto,
 			"path_under_1pct":    horizons.PathUnder1Pct,
 			"horizon_rule":       horizonRule,
-			"signal_rule": fmt.Sprintf(
-				"debounced dir from h=1 return (%d bars); per-trade TP/SL/lev = max PnL on actual closes t+1..t+%d (report/oracle pick)",
-				PriceSignalConfirmBars, horizonN,
-			),
+			"price_strategy_mode": args.PriceStrategyMode,
+			"signal_rule":        signalRule,
 			"lookback_days": lookbackDays, "max_rel_err": args.MaxRelErr,
 			"min_fit_pairs": args.MinFitPairs, "require_fit": args.RequireFit,
 			"fit_pairs": len(fitPairs), "locked": locked, "locked_at": utc(lockMs),

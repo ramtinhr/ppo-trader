@@ -37,6 +37,7 @@ var wfReportStems = []string{
 	"nm_walk_forward",
 	"nm_walk_forward_allow_short",
 	"nm_price_walk_forward",
+	"nm_price_walk_forward_predicted",
 }
 
 // Layout is the on-disk scan record layout.

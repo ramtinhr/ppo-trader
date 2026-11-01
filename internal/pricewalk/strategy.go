@@ -32,9 +32,25 @@ type pathPick struct {
 	RiskPct    float64
 	Steps      int64
 	Lev        float64
-	PathPnL    float64
+	PathPnL    float64 // mid-path (predicted) or oracle actual PnL used for ranking
+	WorstPnL   float64 // robust: min PnL on pred / pred±err
 	PathR      float64
 	LiquidDist float64
+}
+
+func scalePath(path []float64, mult float64) []float64 {
+	out := make([]float64, len(path))
+	for i, p := range path {
+		out[i] = p * mult
+	}
+	return out
+}
+
+func firstTargetPct(e exits.Exits) float64 {
+	if len(e.Targets) == 0 {
+		return 0
+	}
+	return e.Targets[0][0]
 }
 
 func liquidPctAtLev(lev float64) float64 {
@@ -337,7 +353,8 @@ func exitsToJSON(e exits.Exits) map[string]any {
 	}
 }
 
-// runPriceStrategyPerTrade: oracle pick of max PnL on actual future closes.
+// runPriceStrategyPerTrade picks per-trade exits.
+// mode 1 = oracle (peek actual closes); mode 2 = predicted robust (±max_rel_err, no peek).
 func runPriceStrategyPerTrade(
 	args Args,
 	minutes []candles.Candle,
@@ -347,6 +364,17 @@ func runPriceStrategyPerTrade(
 	tradeStartMs, tradeEndMs int64,
 	taker, maker float64,
 ) (map[string]any, error) {
+	mode := args.PriceStrategyMode
+	if mode != 1 && mode != 2 {
+		return nil, fmt.Errorf("%s: invalid price-strategy mode %d", label, mode)
+	}
+	oracle := mode == 1
+	errBand := args.MaxRelErr
+	if errBand <= 0 {
+		errBand = 0.01
+	}
+	minTPPct := errBand * 100 // TP must clear prediction-error floor
+
 	if len(models) <= 1 {
 		return nil, fmt.Errorf("%s: need horizon models for strategy", label)
 	}
@@ -389,8 +417,13 @@ func runPriceStrategyPerTrade(
 		return nil, fmt.Errorf("%s: all stops failed fee floor", label)
 	}
 
-	logx.Infof("  %s per-trade exits (oracle): H=%d · stops=%d · lev=%v · max_risk=%g%% · debounce=%d · signals=%d · OOS %d..%d",
-		label, hMax, len(usable), args.PriceLeverage, maxRiskPct, PriceSignalConfirmBars, len(signals), oosLo, oosHi)
+	modeName := "oracle"
+	if !oracle {
+		modeName = "predicted-robust"
+	}
+	logx.Infof("  %s per-trade exits (%s): H=%d · stops=%d · lev=%v · max_risk=%g%% · err_band=%.2f%% · min_tp=%.2f%% · debounce=%d · signals=%d · OOS %d..%d",
+		label, modeName, hMax, len(usable), args.PriceLeverage, maxRiskPct, errBand*100, minTPPct,
+		PriceSignalConfirmBars, len(signals), oosLo, oosHi)
 
 	balance := args.BalanceUSDT
 	running := 0.0
@@ -398,6 +431,8 @@ func runPriceStrategyPerTrade(
 	var tradesJSON []map[string]any
 	var wins uint32
 	skippedLiquid := 0
+	skippedTPFloor := 0
+	skippedRobust := 0
 	signalSeen := 0
 
 	for _, sig := range signals {
@@ -429,6 +464,11 @@ func runPriceStrategyPerTrade(
 		var best *pathPick
 		for _, stop := range usable {
 			for _, ex := range exitCandidatesForStop(stop) {
+				// Error-aware: first TP must sit beyond the prediction-error floor.
+				if !oracle && firstTargetPct(ex) < minTPPct-1e-12 {
+					skippedTPFloor++
+					continue
+				}
 				for _, levU := range args.PriceLeverage {
 					lev := float64(levU)
 					if lev > maxLev+1e-12 {
@@ -446,20 +486,48 @@ func runPriceStrategyPerTrade(
 						skippedLiquid++
 						continue
 					}
-					sim := simulateExitsOnPath(long, entry, ex, steps, actPath, taker, maker)
-					if sim.PnL <= 0 {
-						continue
+
+					var rankPnL, worstPnL, pathR, dist float64
+					if oracle {
+						sim := simulateExitsOnPath(long, entry, ex, steps, actPath, taker, maker)
+						if sim.PnL <= 0 {
+							continue
+						}
+						rankPnL, worstPnL = sim.PnL, sim.PnL
+						pathR = sim.PnL / math.Max(balance*riskPct/100, 1e-9)
+						dist = liquidDistancePct(ex.StopPct, lev)
+					} else {
+						// Predicted robust: raw OLS path ± errBand; no peek at actuals.
+						mid := simulateExitsOnPath(long, entry, ex, steps, rawPath, taker, maker)
+						hi := simulateExitsOnPath(long, entry, ex, steps, scalePath(rawPath, 1+errBand), taker, maker)
+						lo := simulateExitsOnPath(long, entry, ex, steps, scalePath(rawPath, 1-errBand), taker, maker)
+						worst := math.Min(mid.PnL, math.Min(hi.PnL, lo.PnL))
+						if mid.PnL <= 0 || worst <= 0 {
+							skippedRobust++
+							continue
+						}
+						rankPnL, worstPnL = mid.PnL, worst
+						pathR = worst / math.Max(balance*riskPct/100, 1e-9)
+						dist = liquidDistancePct(ex.StopPct, lev)
 					}
-					pathR := sim.PnL / math.Max(balance*riskPct/100, 1e-9)
-					dist := liquidDistancePct(ex.StopPct, lev)
-					better := best == nil ||
-						sim.PnL > best.PathPnL+1e-9 ||
-						(math.Abs(sim.PnL-best.PathPnL) <= 1e-9 && pathR > best.PathR+1e-9) ||
-						(math.Abs(sim.PnL-best.PathPnL) <= 1e-9 && math.Abs(pathR-best.PathR) <= 1e-9 && dist > best.LiquidDist)
+
+					better := best == nil
+					if !better && !oracle {
+						better = worstPnL > best.WorstPnL+1e-9 ||
+							(math.Abs(worstPnL-best.WorstPnL) <= 1e-9 && rankPnL > best.PathPnL+1e-9) ||
+							(math.Abs(worstPnL-best.WorstPnL) <= 1e-9 && math.Abs(rankPnL-best.PathPnL) <= 1e-9 && pathR > best.PathR+1e-9) ||
+							(math.Abs(worstPnL-best.WorstPnL) <= 1e-9 && math.Abs(rankPnL-best.PathPnL) <= 1e-9 &&
+								math.Abs(pathR-best.PathR) <= 1e-9 && dist > best.LiquidDist)
+					}
+					if !better && oracle {
+						better = rankPnL > best.PathPnL+1e-9 ||
+							(math.Abs(rankPnL-best.PathPnL) <= 1e-9 && pathR > best.PathR+1e-9) ||
+							(math.Abs(rankPnL-best.PathPnL) <= 1e-9 && math.Abs(pathR-best.PathR) <= 1e-9 && dist > best.LiquidDist)
+					}
 					if better {
 						cp := pathPick{
 							Exits: ex, RiskPct: riskPct, Steps: steps, Lev: lev,
-							PathPnL: sim.PnL, PathR: pathR, LiquidDist: dist,
+							PathPnL: rankPnL, WorstPnL: worstPnL, PathR: pathR, LiquidDist: dist,
 						}
 						best = &cp
 					}
@@ -469,15 +537,9 @@ func runPriceStrategyPerTrade(
 		if best == nil || best.Steps <= 0 {
 			continue
 		}
+		// Realized PnL always on actuals (honest backtest accounting); pick never used actuals in mode 2.
 		realSim := simulateExitsOnPath(long, entry, best.Exits, best.Steps, actPath, taker, maker)
-		stopLo, stopHi := math.Inf(1), 0.0
-		for _, s := range usable {
-			stopLo = math.Min(stopLo, s)
-			stopHi = math.Max(stopHi, s)
-		}
-		spanPct := pathSpanPctForSignal(bars, i, entry, stopLo, stopHi)
-		predPath := shapedPredictedPath(rawPath, entry, long, spanPct)
-		pathSimR := simulateExitsOnPath(long, entry, best.Exits, best.Steps, predPath, taker, maker)
+		pathSimR := simulateExitsOnPath(long, entry, best.Exits, best.Steps, rawPath, taker, maker)
 
 		pnl := realSim.PnL
 		balance += pnl
@@ -503,6 +565,13 @@ func runPriceStrategyPerTrade(
 				"fee": round2(f.Fee), "h": f.H,
 			})
 		}
+		note := "traded combo = best TP/SL/lev on actual future closes (oracle / peek)"
+		if !oracle {
+			note = fmt.Sprintf(
+				"traded combo = best worst-case TP/SL/lev on predicted path ±%.2f%% (no peek); TP≥%.2f%%",
+				errBand*100, minTPPct,
+			)
+		}
 		tradesJSON = append(tradesJSON, map[string]any{
 			"side": side, "entry_at": utc(bars[i].TimeMs), "entry_bar": i,
 			"entry_price": round2(entry), "exits": exitsToJSON(best.Exits),
@@ -511,32 +580,43 @@ func runPriceStrategyPerTrade(
 			"size_btc": round4(float64(best.Steps) * StepBTC),
 			"liquid_distance_pct": round2(best.LiquidDist),
 			"path_pnl": round2(pathSimR.PnL), "path_r": round2(best.PathR*100) / 100,
+			"path_worst_pnl": round2(best.WorstPnL),
 			"path_reason": pathSimR.Reason, "path_exit_h": pathSimR.ExitH,
 			"pnl": round2(pnl), "reason": realSim.Reason, "exit_h": realSim.ExitH,
 			"fees": round2(realSim.Fees), "running_pnl": round2(running),
-			"balance": round2(balance), "oracle_pnl": round2(pnl),
+			"balance": round2(balance),
+			"pick_mode": modeName,
+			"oracle_pnl": round2(pnl),
 			"oracle_exits": best.Exits.Label(),
-			"oracle_note":  "traded combo = best TP/SL/lev on actual future closes (report mode)",
+			"oracle_note":  note,
 			"fills":        fills,
 		})
 	}
 
 	n := uint32(len(tradesJSON))
-	logx.Infof("  %s per-trade done: %d trades · PnL %+.2f · signals_in_oos=%d · liquid_skips≈%d",
-		label, n, running, signalSeen, skippedLiquid)
+	logx.Infof("  %s per-trade done (%s): %d trades · PnL %+.2f · signals_in_oos=%d · liquid_skips≈%d · tp_floor_skips≈%d · robust_skips≈%d",
+		label, modeName, n, running, signalSeen, skippedLiquid, skippedTPFloor, skippedRobust)
 
 	winRate := 0.0
 	if n > 0 {
 		winRate = round2(100 * float64(wins) / float64(n))
 	}
+	rule := fmt.Sprintf(
+		"per signal: grid stop×ladder×lev (liquid-safe, stop×lev≤%g%%); pick max PnL on actual future closes; skip if no profitable combo",
+		maxRiskPct,
+	)
+	if !oracle {
+		rule = fmt.Sprintf(
+			"per signal: grid stop×ladder×lev (liquid-safe, stop×lev≤%g%%); require first TP≥%.2f%%; pick max worst-case PnL on raw predicted closes ±%.2f%%; skip if mid or worst ≤0; realized PnL on actuals (no peek for pick)",
+			maxRiskPct, minTPPct, errBand*100,
+		)
+	}
 	return map[string]any{
-		"selection_rule": fmt.Sprintf(
-			"per signal: grid stop×ladder×lev (liquid-safe, stop×lev≤%g%%); pick max PnL on actual future closes; skip if no profitable combo",
-			maxRiskPct,
-		),
+		"selection_rule": rule,
 		"summary": map[string]any{
-			"exits_mode": "per_trade", "horizon": hMax,
+			"exits_mode": "per_trade", "pick_mode": modeName, "horizon": hMax,
 			"confirm_bars": PriceSignalConfirmBars, "max_leverage": maxLev,
+			"err_band": errBand, "min_tp_pct": minTPPct,
 			"taker_fee_bps": taker * 10_000, "maker_fee_bps": maker * 10_000,
 			"balance_start": args.BalanceUSDT, "balance_end": round2(balance),
 		},
@@ -547,6 +627,9 @@ func runPriceStrategyPerTrade(
 			"max_breakeven_win_pct": 100 * PriceMaxBreakevenWin,
 			"skipped_stops":        skippedFee,
 			"usable_stops":         usable,
+		},
+		"skips": map[string]any{
+			"liquid": skippedLiquid, "tp_floor": skippedTPFloor, "robust": skippedRobust,
 		},
 		"trades": tradesJSON,
 	}, nil

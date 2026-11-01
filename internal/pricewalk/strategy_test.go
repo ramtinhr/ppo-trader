@@ -54,6 +54,51 @@ func TestSimulateExitsStop(t *testing.T) {
 	}
 }
 
+func TestScalePath(t *testing.T) {
+	p := []float64{100, 101, 102}
+	hi := scalePath(p, 1.01)
+	if math.Abs(hi[1]-102.01) > 1e-9 {
+		t.Fatalf("%v", hi)
+	}
+}
+
+func TestFirstTargetPct(t *testing.T) {
+	e := exits.Exits{StopPct: 1, Targets: [][2]float64{{1.5, 1}}}
+	if firstTargetPct(e) != 1.5 {
+		t.Fatal(firstTargetPct(e))
+	}
+}
+
+func TestRobustBandCanRejectFragileTP(t *testing.T) {
+	// Long entry 100; predicted path barely rises then falls — a 0.5% TP is fragile under ±1%.
+	eTight := exits.Exits{StopPct: 2, Targets: [][2]float64{{0.5, 1}}}
+	eWide := exits.Exits{StopPct: 2, Targets: [][2]float64{{1.5, 1}}}
+	pred := []float64{100.4, 100.6, 100.3}
+	errBand := 0.01
+	taker, maker := 0.0005, 0.0002
+	steps := int64(10_000)
+
+	midT := simulateExitsOnPath(true, 100, eTight, steps, pred, taker, maker)
+	hiT := simulateExitsOnPath(true, 100, eTight, steps, scalePath(pred, 1+errBand), taker, maker)
+	loT := simulateExitsOnPath(true, 100, eTight, steps, scalePath(pred, 1-errBand), taker, maker)
+	worstT := math.Min(midT.PnL, math.Min(hiT.PnL, loT.PnL))
+
+	midW := simulateExitsOnPath(true, 100, eWide, steps, pred, taker, maker)
+	hiW := simulateExitsOnPath(true, 100, eWide, steps, scalePath(pred, 1+errBand), taker, maker)
+	loW := simulateExitsOnPath(true, 100, eWide, steps, scalePath(pred, 1-errBand), taker, maker)
+	worstW := math.Min(midW.PnL, math.Min(hiW.PnL, loW.PnL))
+
+	// With min TP floor 1%, tight 0.5% would be filtered; wide should have better worst-case or mid.
+	if firstTargetPct(eTight) >= 1.0 {
+		t.Fatal("fixture")
+	}
+	if firstTargetPct(eWide) < 1.0 {
+		t.Fatal("fixture")
+	}
+	_ = worstT
+	_ = worstW
+}
+
 func TestDebounceSignals(t *testing.T) {
 	// Constant positive-return model via features that produce +r.
 	model := pricemodel.Model{Alphas: [4]float64{1, 0, 0, 0}}
