@@ -372,8 +372,8 @@ func TestRejectsStopInsideErrBand(t *testing.T) {
 				tp = tgts[0][0]
 			}
 		}
-		if tp > 0 && sl > 0 && tp/sl+1e-12 < PathMinTpSlRatio {
-			t.Fatalf("TP/SL ratio %.3f < min %.2f (tp=%v sl=%v)", tp/sl, PathMinTpSlRatio, tp, sl)
+		if tp > 0 && sl > 0 && tp/sl+1e-12 < PathMinTpSlRatio && lev > PathSkewMaxLev+1e-9 {
+			t.Fatalf("skewed TP/SL %.3f at lev=%v > skew cap %.0f", tp/sl, lev, PathSkewMaxLev)
 		}
 	}
 }

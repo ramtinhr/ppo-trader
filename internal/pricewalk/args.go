@@ -31,7 +31,9 @@ const (
 	PathTakeFrac      = 0.70
 	PathMinPeakPct    = 0.08 // fee-area floor; sit out only true dust
 	PathMinStopPct    = 0.25
-	PathMinTpSlRatio  = 0.25 // reject extreme TP≪SL (0.22% TP / 1% SL @5x → timeout bleed)
+	// When TP≪SL, cap leverage (don't reject the trade — that starved the month to 1 fill).
+	PathSkewMaxLev    = 2.0
+	PathMinTpSlRatio  = 0.25
 	PathLiveMaxLev    = 10.0 // best lev from grid; still blocked by risk% + no-liquid
 	PathWinRateTarget = 0.80
 	DefaultTradeDays  = 30 // OOS TRADE month

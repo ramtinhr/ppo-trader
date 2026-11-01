@@ -1061,11 +1061,13 @@ func runRollingPredicted(
 			if tp > peak+1e-9 {
 				continue
 			}
-			if ex.StopPct > 0 && tp/ex.StopPct+1e-12 < PathMinTpSlRatio {
-				continue // tiny TP vs fat SL → actuals often timeout into a large loss
-			}
+			skewed := ex.StopPct > 0 && tp/ex.StopPct+1e-12 < PathMinTpSlRatio
 			for _, levU := range levs {
 				lev := float64(levU)
+				// Micro-TP vs fat SL: keep the trade, but don't size it at 5–10x.
+				if skewed && lev > PathSkewMaxLev+1e-12 {
+					continue
+				}
 				riskPct := impliedRiskPct(ex.StopPct, lev)
 				if riskPct > maxRiskPct+1e-12 {
 					continue
@@ -1079,13 +1081,9 @@ func runRollingPredicted(
 					continue
 				}
 				mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
-				// Must win on the predicted path (hit TP early enough, PnL>0).
+				// Must win on the predicted path (hit TP, PnL>0). Losing timeouts are capped at SL.
 				if mid.PnL <= 0 || mid.Reason != "tp" {
 					continue
-				}
-				late := max(5, (len(pickPath)*3+3)/4)
-				if mid.ExitH > late {
-					continue // TP only at path tail is fragile → timeout risk on actuals
 				}
 				// −err shock on the path must stay clear of liquidation (stop already liquid-safe).
 				if pathAdversePct(adversePath(pickPath, long, errBand), entry, long) >= liquidPctAtLev(lev)*0.85 {
