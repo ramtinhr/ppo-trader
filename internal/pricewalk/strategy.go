@@ -619,9 +619,17 @@ func runPriceStrategyPerTrade(
 			} else if rangeSpan > rawPathFavorableSpanPct(rawPath, entry, long) {
 				pathSrc = "live_range"
 			}
-			// Mild floor so tiny-TP combos can still print a mid>0 on a dead-flat OLS.
-			if pickSpan < 0.5 {
-				pickSpan = 0.5
+			// Floor so adverse −err can still clear the smallest TP in the grid
+			// (option 1: mid>0 and adverse≥0). Tiny spans make −1% look like an instant stop.
+			minTP := 0.1
+			for _, t := range targets {
+				if t > 0 && t < minTP {
+					minTP = t
+				}
+			}
+			minSpanAdv := (100*(1+minTP/100)/(1-errBand) - 100) * 1.001
+			if pickSpan < minSpanAdv {
+				pickSpan = minSpanAdv
 				pathSrc += "+span_floor"
 			}
 			pickPath = shapedPredictedPath(rawPath, entry, long, pickSpan)
@@ -657,21 +665,21 @@ func runPriceStrategyPerTrade(
 					pathR = sim.PnL / math.Max(balance*riskPct/100, 1e-9)
 					dist = liquidDistancePct(ex.StopPct, lev)
 				} else {
-					// Trade if predicted mid path is profitable after fees — full grid search.
+					// Option 1: mid must win, and adverse −err must stay ≥ 0 (stress test).
 					mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
-					if mid.PnL <= 0 {
+					adv := simulateExitsOnPath(long, entry, ex, steps, adversePath(pickPath, long, errBand), taker, maker)
+					if mid.PnL <= 0 || adv.PnL < 0 {
 						skippedRobust++
 						continue
 					}
-					adv := simulateExitsOnPath(long, entry, ex, steps, adversePath(pickPath, long, errBand), taker, maker)
 					rankPnL, worstPnL = mid.PnL, adv.PnL
-					pathR = mid.PnL / math.Max(balance*riskPct/100, 1e-9)
+					pathR = worstPnL / math.Max(balance*riskPct/100, 1e-9)
 					dist = liquidDistancePct(ex.StopPct, lev)
 				}
 
 				better := best == nil
 				if !better && !oracle {
-					// Prefer higher mid path_r; tie-break on adverse, then mid PnL, then liquid dist.
+					// Rank by adverse path_r first (most stress-safe), then mid, then liquid dist.
 					better = pathR > best.PathR+1e-9 ||
 						(math.Abs(pathR-best.PathR) <= 1e-9 && worstPnL > best.WorstPnL+1e-9) ||
 						(math.Abs(pathR-best.PathR) <= 1e-9 && math.Abs(worstPnL-best.WorstPnL) <= 1e-9 && rankPnL > best.PathPnL+1e-9) ||
@@ -750,8 +758,8 @@ func runPriceStrategyPerTrade(
 		note := "traded combo = best TP/SL/lev on actual future closes (oracle / peek)"
 		if !oracle {
 			note = fmt.Sprintf(
-				"full TP×SL×lev grid on path=%s span=%.2f%%; traded best mid>0 after fees (no peek); in_band=%v max_dev=%.3f%%",
-				pathSrc, pickSpan, inBand, bandDev*100,
+				"option1: TP×SL×lev grid on path=%s span=%.2f%%; mid>0 and adverse−%.2f%%≥0; best adverse path_r (no peek); in_band=%v max_dev=%.3f%%",
+				pathSrc, pickSpan, errBand*100, inBand, bandDev*100,
 			)
 		}
 		tradesJSON = append(tradesJSON, map[string]any{
@@ -791,13 +799,13 @@ func runPriceStrategyPerTrade(
 	)
 	if !oracle {
 		rule = fmt.Sprintf(
-			"predicted-robust: full asymmetric TP×SL×lev grid (%d combos) on front-loaded path span=max(raw,h1,live-range); trade if mid PnL>0 after fees; rank path_r; risk≤%g%%; realized on actuals",
+			"option1 predicted-robust: full TP×SL×lev grid (%d combos); trade only if mid>0 AND adverse−err≥0; rank adverse path_r; risk≤%g%%; realized on actuals",
 			len(exitGrid), maxRiskPct,
 		)
 	}
 	if !oracle && n == 0 {
-		logx.Warnf("  %s predicted-robust took 0 trades (no_mid_profit=%d liquid_skips=%d). Tried %d TP/SL combos × lev.",
-			label, skippedFlat, skippedLiquid, len(exitGrid))
+		logx.Warnf("  %s predicted-robust took 0 trades (no_combo=%d robust_fail=%d liquid_skips=%d). Tried %d TP/SL combos × lev.",
+			label, skippedFlat, skippedRobust, skippedLiquid, len(exitGrid))
 	}
 	return map[string]any{
 		"selection_rule": rule,

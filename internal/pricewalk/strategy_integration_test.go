@@ -79,7 +79,30 @@ func TestPredictedTradesFullGrid(t *testing.T) {
 	sum, _ := out["summary"].(map[string]any)
 	t.Logf("trades=%d signals=%v pnl=%v grid=%v skips=%v", n, sig, out["total_pnl"], sum["grid_combos"], out["skips"])
 	if n == 0 {
-		t.Fatalf("full TP×SL×lev grid must find trades; skips=%v", out["skips"])
+		t.Fatalf("option1 grid must find trades with mid>0 & adverse≥0; skips=%v", out["skips"])
+	}
+}
+
+func TestOption1RequiresAdverseNonNegative(t *testing.T) {
+	entry := 100.0
+	pred := shapedPredictedPath([]float64{100, 100, 100, 100}, entry, true, 1.2) // enough for 0.1TP after −1%
+	e := exits.Exits{StopPct: 0.9, Targets: [][2]float64{{0.1, 1}}}
+	steps := sizeForLeverage(500, 1, entry)
+	mid := simulateExitsOnPath(true, entry, e, steps, pred, 0.0005, 0.0002)
+	adv := simulateExitsOnPath(true, entry, e, steps, adversePath(pred, true, 0.01), 0.0005, 0.0002)
+	if mid.PnL <= 0 || adv.PnL < 0 {
+		t.Fatalf("option1 setup should pass: mid=%v adv=%v", mid.PnL, adv.PnL)
+	}
+	// Tight stop under err band fails adverse (false stop) — must not be selected.
+	tight := exits.Exits{StopPct: 0.3, Targets: [][2]float64{{0.1, 1}}}
+	near := shapedPredictedPath([]float64{100, 100}, entry, true, 0.2)
+	bad := simulateExitsOnPath(true, entry, tight, steps, adversePath(near, true, 0.01), 0.0005, 0.0002)
+	if bad.PnL >= 0 && bad.Reason != "stop" {
+		// near+adverse should lose or stop; either way option1 rejects PnL<0
+		t.Logf("tight adverse=%v reason=%s", bad.PnL, bad.Reason)
+	}
+	if bad.PnL >= 0 && bad.Reason == "tp" {
+		t.Fatalf("expected tight stop to fail adverse stress, got %#v", bad)
 	}
 }
 

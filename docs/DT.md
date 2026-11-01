@@ -61,8 +61,8 @@ OLS return features per bar size, optionally runs per-trade TP/SL:
 - `--price-strategy 1` / `oracle` — peek actual future closes (research ceiling → `nm_price_walk_forward.html`)
 - `--price-strategy 2` / `predicted` — full asymmetric **TP×SL×lev** grid (default
   `--price-targets 0.1-3/0.1` × `--price-stops 0.1-5/0.1`, e.g. 0.1TP/0.9SL×lev).
-  Front-loaded pick path from max(raw, h1, live-range). **Trade if mid PnL > 0** after fees.
-  (`nm_price_walk_forward_predicted.html`)
+  Front-loaded pick path from max(raw, h1, live-range). **Trade only if mid > 0 and
+  adverse −max_rel_err ≥ 0** (option 1 stress). (`nm_price_walk_forward_predicted.html`)
 
 
 Soft-fails OKX official candles when the network is blocked.
