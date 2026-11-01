@@ -427,9 +427,9 @@ func runOnePriceBar(
 	if horizons.PathExample != nil {
 		if steps, ok := horizons.PathExample["steps"].([]map[string]any); ok && len(steps) > 0 {
 			fwdN := len(steps)
-			logx.Infof("  %s FORWARD from last candle %v (close %v) → %d steps (under-1%% path %d)",
+			logx.Infof("  %s FORWARD DEMO (not the trade list) from last candle %v (close %v) → %d steps (under-1%% path %d) · real trades are inside TRADE %s → %s, each bar predicts forward then one combo",
 				label, horizons.PathExample["origin"], horizons.PathExample["origin_close"],
-				fwdN, horizons.PathUnder1Pct)
+				fwdN, horizons.PathUnder1Pct, utc(tradeStart), utc(tradeEnd))
 			show := func(s map[string]any) {
 				spot := "n/a (future)"
 				if s["spot"] != nil {
@@ -506,7 +506,7 @@ func runOnePriceBar(
 		)
 	case 2:
 		signalRule = fmt.Sprintf(
-			"rolling: each free bar predict next %d closes; re-test full TP×SL×lev on raw path (best mid>0); one trade then refresh+re-test; no peek",
+			"mode=1 live loop inside TRADE window: each free bar predicts next %d closes (after entry), re-tests TP×SL×lev (SL≥err_band, mid hits TP), one trade, then refresh — FORWARD block in log/HTML is demo only, not where trades start",
 			horizons.PathUnder1Pct,
 		)
 	}

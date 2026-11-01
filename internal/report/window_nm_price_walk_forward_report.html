@@ -256,8 +256,8 @@ const PE = M.path_example;
 if (PE && PE.steps && PE.steps.length) {
   $('#path-card').style.display = '';
   const under = PE.path_under_1pct ?? M.path_under_1pct;
-  $('#path-title').textContent = `From last candle ${PE.origin || '?'} (close ${fmt(PE.origin_close, 2)}) · under-1% path = ${under ?? '—'} candles`;
-  $('#path-note').textContent = 'Actuals prefer tape, then OKX. Trading horizon is separate (OOS auto). Forecast step count ≠ trade count.';
+  $('#path-title').textContent = `DEMO only — from last candle ${PE.origin || '?'} (close ${fmt(PE.origin_close, 2)}) · under-1% path = ${under ?? '—'} candles`;
+  $('#path-note').textContent = `This table is NOT the trade list. Real trades are inside TRADE ${M.trade_start || '?'} → ${M.trade_end || '?'}: each entry bar predicts forward, re-tests TP/SL/lev, one trade, then refresh. Actuals prefer tape, then OKX.`;
   $('#path-ex thead').innerHTML = `<tr><th>h</th><th>Time</th><th>Predicted</th><th>Actual</th><th>Source</th><th>Err%</th><th>In under-1% path</th></tr>`;
   $('#path-ex tbody').innerHTML = PE.steps.map((s) => {
     const spot = s.spot == null ? 'n/a' : fmt(s.spot, 2);
