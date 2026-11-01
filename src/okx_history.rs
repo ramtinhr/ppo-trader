@@ -190,10 +190,7 @@ pub fn fetch_day(dir: &Path, day: NaiveDate, previous: Option<&DaySummary>) -> R
             if summary_file.exists() {
                 let _ = fs::remove_file(&summary_file);
             }
-            if !path.exists() {
-                download(day, &path)?;
-            }
-            let summary = verify(day, &path)?;
+            let summary = ensure_verified_archive(dir, day)?;
             fs::write(&summary_file, serde_json::to_string(&summary)?)?;
             summary
         }
@@ -224,6 +221,66 @@ fn http() -> ureq::Agent {
     builder.build().new_agent()
 }
 
+/// Download + verify, deleting truncated/corrupt zips (common via flaky proxies).
+fn ensure_verified_archive(dir: &Path, day: NaiveDate) -> Result<DaySummary> {
+    let path = archive_path(dir, day);
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 1..=5 {
+        if !path.exists() || !zip_looks_valid(&path) {
+            if path.exists() {
+                println!(
+                    "{day}: removing corrupt/truncated zip ({} bytes)",
+                    fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+                );
+                let _ = fs::remove_file(&path);
+            }
+            if let Err(e) = download(day, &path) {
+                last_err = Some(e);
+                println!("  download attempt {attempt} failed, retrying");
+                std::thread::sleep(std::time::Duration::from_secs(5 * attempt as u64));
+                continue;
+            }
+        }
+        match verify(day, &path) {
+            Ok(summary) => return Ok(summary),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                let corrupt = msg.contains("EOCD")
+                    || msg.contains("invalid Zip")
+                    || msg.contains("zip")
+                    || msg.contains("Unexpected length");
+                last_err = Some(e);
+                if corrupt {
+                    println!("{day}: corrupt zip after verify ({msg}); re-download attempt {attempt}");
+                    let _ = fs::remove_file(&path);
+                    std::thread::sleep(std::time::Duration::from_secs(3 * attempt as u64));
+                    continue;
+                }
+                return Err(last_err.unwrap());
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("{day}: failed to download a valid zip")))
+}
+
+fn zip_looks_valid(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    // Real OKX day zips are many MB; tiny files are HTML/error/truncation.
+    if meta.len() < 10_000 {
+        return false;
+    }
+    let Ok(mut f) = File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    if f.read_exact(&mut magic).is_err() || &magic != b"PK\x03\x04" {
+        return false;
+    }
+    zip::ZipArchive::new(f).is_ok()
+}
+
 fn download(day: NaiveDate, path: &Path) -> Result<()> {
     let url = format!(
         "{ARCHIVE_URL}/{:04}{:02}{:02}/{}",
@@ -235,18 +292,39 @@ fn download(day: NaiveDate, path: &Path) -> Result<()> {
     println!("Downloading {url}");
     let fetch = || -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
-        http()
+        let mut resp = http()
             .get(&url)
             .call()
             .with_context(|| {
                 format!("download {url} (OKX publishes a day's archive the next day)")
-            })?
-            .into_body()
-            .into_reader()
-            .read_to_end(&mut bytes)?;
+            })?;
+        let status = resp.status();
+        ensure!(
+            status.is_success(),
+            "download {url}: HTTP {status}"
+        );
+        resp.body_mut().as_reader().read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() >= 10_000,
+            "download {url}: got only {} bytes (proxy truncated or HTML error page)",
+            bytes.len()
+        );
+        ensure!(
+            bytes.starts_with(b"PK\x03\x04"),
+            "download {url}: not a zip (starts with {:?})",
+            bytes.iter().take(16).map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+        );
+        // EOCD must be present or ZipArchive will fail later with "Could not find EOCD".
+        let cursor = std::io::Cursor::new(&bytes);
+        zip::ZipArchive::new(cursor).with_context(|| {
+            format!(
+                "download {url}: invalid/truncated zip ({} bytes) — retry or check proxy",
+                bytes.len()
+            )
+        })?;
         Ok(bytes)
     };
-    // OKX's CDN drops long downloads now and then.
+    // OKX's CDN / proxies drop long downloads now and then.
     let mut attempt = 0;
     let bytes = loop {
         attempt += 1;
@@ -260,8 +338,9 @@ fn download(day: NaiveDate, path: &Path) -> Result<()> {
         }
     };
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, bytes)?;
+    fs::write(&tmp, &bytes)?;
     fs::rename(&tmp, path)?;
+    println!("{day}: saved {} bytes", bytes.len());
     Ok(())
 }
 
