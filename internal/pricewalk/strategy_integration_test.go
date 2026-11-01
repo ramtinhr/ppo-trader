@@ -129,8 +129,8 @@ func TestRollingMonthPredictTradeRefresh(t *testing.T) {
 		}
 		prevEnd = eb + eh
 		src, _ := tr["path_source"].(string)
-		if src != "raw_ols_until_1pct" {
-			t.Fatalf("path_source=%q want raw_ols_until_1pct", src)
+		if src != "raw_ols_under1pct_H" {
+			t.Fatalf("path_source=%q want raw_ols_under1pct_H", src)
 		}
 	}
 }

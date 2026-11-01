@@ -494,13 +494,14 @@ func runOnePriceBar(
 	var strategy map[string]any
 	balancePnL := 0.0
 	if args.PriceStrategyMode == 1 || args.PriceStrategyMode == 2 {
-		// Max model horizon available; mode2 truncates each origin until |pred−actual|≥err_band.
-		pathWin := len(horizons.Models) - 1
-		if pathWin < 1 {
-			pathWin = horizons.Horizon
-		}
+		// Under-1% look-ahead from IS/OOS horizon eval (mean err < max_rel_err).
+		// Do NOT re-cut each bar vs future actuals — that sat out most of the month.
+		pathWin := horizons.Horizon
 		if pathWin < 1 {
 			pathWin = horizons.PathUnder1Pct
+		}
+		if pathWin < 1 {
+			pathWin = len(horizons.Models) - 1
 		}
 		strategy, err = runPriceStrategyPerTrade(args, minutes, horizons.Models, label, barMs, tradeStart, tradeEnd, taker, maker, pathWin)
 		if err != nil {
@@ -539,8 +540,8 @@ func runOnePriceBar(
 		)
 	case 2:
 		signalRule = fmt.Sprintf(
-			"OOS month %s→%s: predict from older bar → path until |pred−actual|≥%.2f%% (dynamic; models≤%d) → trade AFTER origin with best TP×SL×lev → after exit re-predict until month ends; path_example is illustrative from trade_start only",
-			utc(tradeStart), utc(tradeEnd), args.MaxRelErr*100, len(horizons.Models)-1,
+			"IS fit before %s; OOS %s→%s: each free bar predict H=%d (under-%.2f%% horizon) → best TP×SL×lev → trade AFTER origin → after tp/stop re-predict until month ends (no stop-after-loss)",
+			utc(tradeStart), utc(tradeStart), utc(tradeEnd), horizons.Horizon, args.MaxRelErr*100,
 		)
 	}
 

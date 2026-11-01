@@ -59,20 +59,20 @@ Pure Go (`internal/pricewalk`). Aggregates 1m candles (M1C1 cache under `scan/.c
 OLS return features per bar size, optionally runs per-trade TP/SL:
 
 - `--price-strategy 1` / `oracle` — peek actual future closes (research ceiling → `nm_price_walk_forward.html`)
-- `--price-strategy 2` / `predicted` — **master loop** for one OOS month:
-  **predict from an older tape bar** → path continues until **\|pred−actual\|≥1%**
-  (dynamic length) → **trade AFTER that origin** with best TP×SL×lev → after exit
-  **re-predict** until `trade_end`. Report example path is from `trade_start`, not
-  post-tape. (`nm_price_walk_forward_predicted.html`)
+- `--price-strategy 2` / `predicted` — **IS/OOS month loop**:
+  fit on **IS** (before `trade_start`); look-ahead **H** = under-1% horizon from
+  horizon eval; each OOS bar **predict H → best TP×SL×lev → trade after origin**;
+  after **tp or stop** re-predict until `trade_end` (a loss does not halt trading).
+  (`nm_price_walk_forward_predicted.html`)
 
-### Master loop: TRAIN → predict until 1% → trade after → refresh (1 OOS month)
+### Master loop: IS fit → under-1% H → OOS month trade → refresh
 
 | Phase | Rule |
 |-------|------|
-| **TRAIN** | All dates **before** `trade_start` (fit only) |
-| **Predict** | From an **older** bar we have; length = until \|pred−actual\|≥1% (not fixed 160) |
-| **Trade** | Enter **after** that origin; TP/SL/lev from that under-1% path |
-| **After exit** | New origin → predict again until 1% → trade again … until `trade_end` |
+| **IS (TRAIN)** | All dates **before** `trade_start` (fit OLS only) |
+| **H** | Under-1% trading horizon from horizon eval (`--max-rel-err 0.01`) |
+| **OOS trade** | Predict **H** from older bar → enter **after** → TP/SL/lev from that path |
+| **After exit** | Re-predict after **tp or stop** until `trade_end` (full month; no stop-after-loss) |
 
 Defaults: `--reserve-trade-days 30 --trade-days 30`. Short scan → shrink TRAIN, keep TRADE.
 

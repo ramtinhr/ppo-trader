@@ -200,7 +200,7 @@ $('#eq').textContent = [
 ].filter(Boolean).join(' · ');
 
 if (predictedMode) {
-  $('#trade-note').innerHTML = `Rolling OOS month: <b>predict from older bar</b> → path grows until <b>|pred−actual|≥1%</b> (dynamic length) → <b>trade AFTER that origin</b> with best TP×SL×lev → after exit <b>re-predict</b> until <code>${M.trade_end || 'trade_end'}</code>. Example table below is from trade_start only — each trade recomputes its own under-1% length.`;
+  $('#trade-note').innerHTML = `IS/OOS month: fit before TRADE → each free bar <b>predict H</b> (under-1% horizon) → best TP×SL×lev → <b>trade AFTER origin</b> → after <b>tp or stop</b> re-predict until <code>${M.trade_end || 'trade_end'}</code>. Gaps = flat/no_combo that day, not “halted after a loss”.`;
 } else {
   $('#trade-note').innerHTML = `Oracle mode: each direction signal picks the <b>best TP/SL/lev</b> on that bar’s <b>actual</b> future path (peek-ahead). Skip if no profitable combo. Forecast candles (${S.length}) are not trades.`;
 }

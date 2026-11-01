@@ -21,20 +21,21 @@ const (
 	StepBTC                  = 0.0001
 	ReplayBalance            = 1e9
 
-	// Live predicted bot (mode 2) — master loop for ONE OOS month:
-	//  predict from an older tape bar → path continues until |pred−actual|≥err_band
-	//  (dynamic length, not a fixed 160) → trade AFTER that origin with best
-	//  TP×SL×lev (wins on path, SL≥err_band, no liquid) → after exit re-predict
-	//  until trade_end. path_example is illustrative from trade_start only.
+	// Live predicted bot (mode 2) — IS / OOS month loop:
+	//  IS: fit OLS only before trade_start.
+	//  Look-ahead H = under-1% trading horizon from horizon eval (not re-truncated
+	//  each bar vs future actuals — that emptied paths and skipped half the month).
+	//  At each free OOS bar: predict H → best TP×SL×lev → trade AFTER origin →
+	//  after ANY exit (tp/stop) re-predict until trade_end (full month).
 	//  - sit out only when peak cannot clear fees
 	//  - no invented / h1-extrapolated / span-floor paths
+	//  - losing timeout capped at SL; skewed TP≪SL → lev ≤ PathSkewMaxLev
 	PathTakeFrac      = 0.70
 	PathMinPeakPct    = 0.08 // fee-area floor; sit out only true dust
 	PathMinStopPct    = 0.25
-	// When TP≪SL, cap leverage (don't reject the trade — that starved the month to 1 fill).
-	PathSkewMaxLev    = 2.0
+	PathSkewMaxLev    = 1.0 // micro-TP vs 1% SL: size small so one stop ≠ wipe month
 	PathMinTpSlRatio  = 0.25
-	PathLiveMaxLev    = 10.0 // best lev from grid; still blocked by risk% + no-liquid
+	PathLiveMaxLev    = 10.0
 	PathWinRateTarget = 0.80
 	DefaultTradeDays  = 30 // OOS TRADE month
 )

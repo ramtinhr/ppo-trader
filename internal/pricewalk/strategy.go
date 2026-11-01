@@ -1010,25 +1010,22 @@ func runRollingPredicted(
 			i++
 			continue
 		}
-		// Cap by available models; real look-ahead is dynamic until |pred−spot|≥err_band.
-		rawFull = truncatePath(rawFull, pathWindow)
-		actFull := actualCloses(bars, i, len(rawFull))
-		if len(actFull) == 0 {
-			i++
-			continue
-		}
-		pickPath := truncatePathUntilRelErr(rawFull, actFull, errBand)
+		// Look-ahead = IS/OOS under-1% horizon H (pathWindow), not per-bar cut vs future actuals.
+		pickPath := truncatePath(rawFull, pathWindow)
 		origins++
 		if len(pickPath) == 0 {
-			skippedFlat++
 			i++
 			continue
 		}
-		actPath := actFull[:len(pickPath)]
+		actPath := actualCloses(bars, i, len(pickPath))
+		if len(actPath) == 0 {
+			i++
+			continue
+		}
 
-		// Side + peak from under-1% path predicted FROM this bar; entry is the next bar.
+		// Side + peak from predicted path FROM this bar; entry is the next bar.
 		long, peak := pathDirection(pickPath, entry)
-		pathSrc := "raw_ols_until_1pct"
+		pathSrc := "raw_ols_under1pct_H"
 		if peak+1e-12 < minPeak {
 			skippedFlat++
 			i++
@@ -1195,8 +1192,8 @@ func runRollingPredicted(
 			"fills":        fills,
 		})
 
-		// After exit: next free bar is the new origin → predict again → new combo → trade again
-		// until the OOS TRADE month ends.
+		// After ANY exit (tp or stop): next free bar → predict again → trade again until month ends.
+		// A loss does not halt the bot; sparse later dates mean flat/no_combo, not "stopped".
 		i = i + exitH
 	}
 
@@ -1213,8 +1210,8 @@ func runRollingPredicted(
 	}
 
 	rule := fmt.Sprintf(
-		"OOS month: predict from older bar → path continues until |pred−actual|≥%.2f%% (dynamic length, models≤%d) → trade AFTER origin with best TP×SL×lev ≤%.0fx (peak≥%.2f%%, mid hits TP, no liquid) → after exit re-predict until trade_end",
-		errBand*100, pathWindow, liveMaxLev, minPeak,
+		"IS/OOS month: predict H=%d (under-%.2f%% horizon) from older bar → trade AFTER with best TP×SL×lev ≤%.0fx (peak≥%.2f%%, mid hits TP, no liquid; skewed TP≪SL lev≤%.0f) → after tp/stop re-predict until trade_end (full month)",
+		pathWindow, errBand*100, liveMaxLev, minPeak, PathSkewMaxLev,
 	)
 	return map[string]any{
 		"selection_rule": rule,
