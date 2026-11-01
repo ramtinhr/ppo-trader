@@ -74,26 +74,51 @@ OLS return features per bar size, optionally runs per-trade TP/SL:
 | **OOS trade** | Predict **H** from older bar → enter **after** → TP/SL/lev from that path |
 | **After exit** | Re-predict after **tp or stop** until `trade_end` (full month; no stop-after-loss) |
 
-Defaults: `--reserve-trade-days 30 --trade-days 30`. Short scan → shrink TRAIN, keep TRADE.
+Defaults for a **1-month** smoke test: `--reserve-trade-days 30 --trade-days 30`.
+Short scan → shrink TRAIN, keep TRADE.
+
+### TRAIN 2024→2025, TRADE 2025→2026 (one OOS year)
+
+| Phase | From | Until |
+|-------|------|-------|
+| **IS / TRAIN** | 2024-01-01 | 2025-01-01 |
+| **OOS / TRADE** | 2025-01-01 | 2026-01-01 |
+
+Need archives + a windowscan spanning both years, then reserve the last 365 days:
 
 ```bash
-# Use a scan you already have (example)
+# 0) build
+./scripts/build_dt.sh
+cargo build --profile relfast --no-default-features --bin download --bin scan
+
+# 1) archives (END exclusive). Skips days already verified.
+#    use --proxy socks5://127.0.0.1:PORT if OKX is blocked
+./dt download 2024-01-01 2026-01-01 --proxy socks5://127.0.0.1:12334
+
+# 2) windowscan → data/windowscan/2024-01-01_2026-01-01_24h_staged/
+./dt scan --bucket window --start 2024-01-01 --end 2026-01-01 --hours 24
+
+# 3) IS = 2024→2025, OOS trade year = 2025→2026, under-1% H
 ./dt price-walk \
-  --scan data/windowscan/2025-10-01_2026-10-10_24h_staged \
+  --scan data/windowscan/2024-01-01_2026-01-01_24h_staged \
   --data data/okx/BTC-USDT-SWAP/archives \
   --price-bars 15m \
   --price-strategy 2 \
-  --reserve-trade-days 30 \
-  --trade-days 30 \
+  --reserve-trade-days 365 \
+  --trade-days 365 \
   --max-rel-err 0.01 \
   --verify 0
+
+# 4) browse
+./dt browse --scan data/windowscan/2024-01-01_2026-01-01_24h_staged --port 8091
+# → http://127.0.0.1:8091/report/nm_price_walk_forward_predicted.html
 ```
 
-Or:
+Or helper:
 
 ```bash
-STRATEGY=2 SCAN=data/windowscan/2025-10-01_2026-10-10_24h_staged \
-  RESERVE=30 TRADE_DAYS=30 ./scripts/price_iter.sh
+STRATEGY=2 SCAN=data/windowscan/2024-01-01_2026-01-01_24h_staged \
+  RESERVE=365 TRADE_DAYS=365 ./scripts/price_iter.sh
 ```
 
 Writes `nm_price_walk_forward_predicted.json` / `.html`. Soft-fails OKX when blocked.
