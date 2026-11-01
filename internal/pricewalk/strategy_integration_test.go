@@ -87,7 +87,7 @@ func TestRollingRetestsGridEachTrade(t *testing.T) {
 		t.Fatalf("exits_mode=%v", sum["exits_mode"])
 	}
 	if n == 0 {
-		t.Fatalf("expected TRADE-year trades; skips=%v", out["skips"])
+		t.Fatalf("expected OOS TRADE-month trades; skips=%v", out["skips"])
 	}
 	trades, _ := out["trades"].([]map[string]any)
 	prevEnd := 0

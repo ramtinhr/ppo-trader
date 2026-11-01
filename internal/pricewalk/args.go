@@ -21,15 +21,18 @@ const (
 	StepBTC                  = 0.0001
 	ReplayBalance            = 1e9
 
-	// Live predicted bot (mode 2):
-	//  - only trade when raw OLS peak clears PathMinPeakPct (fee-aware floor too)
-	//  - TP ≈ PathTakeFrac of that peak; SL ≥ err_band; lev capped for live
+	// Live predicted bot (mode 2) — master loop:
+	//  TRAIN before TRADE (strict OOS) → predict under-1% path (~160×15m) →
+	//  re-test TP×SL×lev on that path → one trade → refresh for TRADE month.
+	//  - sit out if peak cannot clear fees (PathMinPeakPct floor)
+	//  - SL ≥ err_band; mid path must hit TP with PnL>0; never liquidatable
 	//  - no invented / h1-extrapolated / span-floor paths
 	PathTakeFrac      = 0.70
-	PathMinPeakPct    = 0.20 // skip flat forecasts
+	PathMinPeakPct    = 0.20 // skip flat forecasts (fee cushion too)
 	PathMinStopPct    = 0.25
-	PathLiveMaxLev    = 3.0  // modest size until model clearly beats baseline
+	PathLiveMaxLev    = 10.0 // best lev from grid; still blocked by risk% + no-liquid
 	PathWinRateTarget = 0.80
+	DefaultTradeDays  = 30 // OOS TRADE month
 )
 
 var errHelp = errors.New("help")
@@ -84,7 +87,8 @@ func DefaultArgs() Args {
 		LookbackDays:     30,
 		TrainTrades:      tt,
 		MinFitPairs:      2000,
-		ReserveTradeDays: 30,
+		ReserveTradeDays: DefaultTradeDays,
+		TradeDays:        DefaultTradeDays,
 		RequireFit:       true,
 		MaxRelErr:        score.MaxScoreRelErr,
 		BalanceUSDT:      500,

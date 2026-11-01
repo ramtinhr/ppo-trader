@@ -640,8 +640,9 @@ func extendBarsWithOfficial(bars []candles.Candle, barMs int64, nMore int) []can
 
 // runPriceStrategyPerTrade picks per-trade exits.
 // mode 1 = oracle (peek actual closes) over the OOS TRADE window;
-// mode 2 = option B: trade only FROM the FORWARD origin onward (after TRADE end),
-//   predict → re-test TP×SL×lev → one trade → refresh (no September OOS scalps).
+// mode 2 = live predicted: TRAIN is before tradeStart (strict OOS); walk TRADE
+//   month only; look_ahead ≈ under-1% path (~160); best TP×SL×lev on raw OLS
+//   (mid hits TP with PnL>0, SL≥err_band, never liquidatable) → one trade → refresh.
 func runPriceStrategyPerTrade(
 	args Args,
 	minutes []candles.Candle,
@@ -720,9 +721,8 @@ func runPriceStrategyPerTrade(
 			maxLev, maxRiskPct, errBand, taker, maker, skippedFee)
 	}
 
-	// Live year trade: walk the full TRADE window (e.g. 2025) with live-safe rules.
-	// FORWARD path in the report remains a post-period demo only.
-	logx.Infof("  %s TRADE-year predicted: %s → %s · bars %d..%d · look_ahead=%d (live rules: min_peak, h1 agree, lev≤%.0f)",
+	// OOS TRADE month only (trainCutoff == tradeStart). FORWARD chart = demo.
+	logx.Infof("  %s OOS TRADE predicted: %s → %s · bars %d..%d · look_ahead=%d (min_peak, h1 agree, best TP/SL/lev, no liquid, lev≤%.0f)",
 		label, utc(tradeStartMs), utc(tradeEndMs), oosLo, oosHi, pathWindow, math.Min(maxLev, PathLiveMaxLev))
 
 	return runRollingPredicted(args, bars, models, label, oosLo, oosHi, pathWindow,
@@ -898,10 +898,10 @@ func runOracleGrid(
 	}, nil
 }
 
-// runRollingPredicted — live-honest FORWARD loop:
-//   raw OLS predict → skip if peak too small → re-test TP×SL×lev (SL≥err_band,
-//   mid hits TP, path_r then low lev) → one trade → refresh.
-// No h1-extrap / span-floor inventing. Flat forecast = sit out.
+// runRollingPredicted — live OOS TRADE month:
+//   raw OLS predict (~under-1% look_ahead) → skip if peak too small →
+//   best TP×SL×lev (SL≥err_band, mid hits TP with PnL>0, never liquid) →
+//   one trade → refresh. No invented paths. Flat forecast = sit out.
 func runRollingPredicted(
 	args Args,
 	bars []candles.Candle,
@@ -1028,7 +1028,13 @@ func runRollingPredicted(
 					continue
 				}
 				mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
+				// Must win on the predicted path (hit TP, PnL>0) — never pick a loser combo.
 				if mid.PnL <= 0 || mid.Reason != "tp" {
+					continue
+				}
+				// −err shock on the path must stay clear of liquidation (stop already liquid-safe).
+				if pathAdversePct(adversePath(pickPath, long, errBand), entry, long) >= liquidPctAtLev(lev)*0.85 {
+					skippedLiquid++
 					continue
 				}
 				pathR := mid.PnL / math.Max(balance*riskPct/100, 1e-9)
@@ -1147,7 +1153,7 @@ func runRollingPredicted(
 	}
 
 	rule := fmt.Sprintf(
-		"live FORWARD: raw OLS only; trade iff peak≥%.2f%% and h1 agrees; re-test TP×SL×lev (SL≥err_band, TP≤peak, mid hits TP); rank path_r then lev≤%.0f; one trade then refresh; no invented path",
+		"OOS TRADE month: raw OLS look_ahead; trade iff peak≥%.2f%% and h1 agrees; best TP×SL×lev (SL≥err_band, TP≤peak, mid hits TP PnL>0, no liquid even under −err); rank path_r then lev≤%.0f; one trade then refresh",
 		minPeak, liveMaxLev,
 	)
 	return map[string]any{

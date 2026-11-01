@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Fast price-strategy iteration loop (Go price-walk; 1m candle cache under scan/.cache/).
-# STRATEGY=1 oracle | STRATEGY=2 live TRADE-year predicted bot
-# TRAIN 2024→2025 / TRADE 2025→2026 (after download + scan):
-#   SCAN=data/windowscan/2024-01-01_2026-01-01_24h_staged RESERVE=365 TRADE_DAYS=365 STRATEGY=2
+# STRATEGY=1 oracle | STRATEGY=2 live OOS-month predicted bot
+# Master loop: TRAIN before last month → predict ~160 → TRADE 30d OOS
+#   STRATEGY=2 RESERVE=30 TRADE_DAYS=30 SCAN=data/windowscan/<your_scan>
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-SCAN="${SCAN:-data/windowscan/2024-01-01_2026-01-01_24h_staged}"
+SCAN="${SCAN:-data/windowscan/2025-10-01_2026-10-10_24h_staged}"
 STRATEGY="${STRATEGY:-1}"
-RESERVE="${RESERVE:-}"
-TRADE_DAYS="${TRADE_DAYS:-}"
+RESERVE="${RESERVE:-30}"
+TRADE_DAYS="${TRADE_DAYS:-30}"
 
 if [[ -x "$ROOT/dt" ]]; then
   DT=( "$ROOT/dt" )

@@ -257,7 +257,7 @@ if (PE && PE.steps && PE.steps.length) {
   $('#path-card').style.display = '';
   const under = PE.path_under_1pct ?? M.path_under_1pct;
   $('#path-title').textContent = `FORWARD DEMO (post TRADE) ${PE.origin || '?'} (close ${fmt(PE.origin_close, 2)}) · under-1% = ${under ?? '—'} candles`;
-  $('#path-note').textContent = `Demo only. Predicted mode trades the TRADE year ${M.trade_start || '?'} → ${M.trade_end || '?'}: raw OLS, sit out if flat, re-test TP/SL/lev each trade.`;
+  $('#path-note').textContent = `Demo only. Predicted mode trades the OOS TRADE month ${M.trade_start || '?'} → ${M.trade_end || '?'} (no overlap with TRAIN): raw OLS ~under-1% look-ahead, sit out if flat, best TP/SL/lev (win on path, no liquid).`;
   $('#path-ex thead').innerHTML = `<tr><th>h</th><th>Time</th><th>Predicted</th><th>Actual</th><th>Source</th><th>Err%</th><th>In under-1% path</th></tr>`;
   $('#path-ex tbody').innerHTML = PE.steps.map((s) => {
     const spot = s.spot == null ? 'n/a' : fmt(s.spot, 2);

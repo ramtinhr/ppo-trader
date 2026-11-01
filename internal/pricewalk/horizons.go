@@ -114,9 +114,15 @@ func evalPriceHorizons(
 
 	pathExample, pathUnder := buildForwardPath(bars, models, barMs, tradeEndMs, fitN, oosHorizon, maxRelErr)
 
+	// Live / predicted trades need the under-1% look-ahead (~160×15m), not only the
+	// shorter OOS mean-err horizon. Keep TRAIN-fitted models through pathUnder.
 	tradeModels := models
-	if auto && oosHorizon > 0 && len(tradeModels) > oosHorizon+1 {
-		tradeModels = tradeModels[:oosHorizon+1]
+	keepTo := oosHorizon
+	if pathUnder > keepTo {
+		keepTo = pathUnder
+	}
+	if auto && keepTo > 0 && len(tradeModels) > keepTo+1 {
+		tradeModels = tradeModels[:keepTo+1]
 	}
 
 	return horizonEval{

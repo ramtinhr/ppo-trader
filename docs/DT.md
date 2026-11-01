@@ -59,60 +59,43 @@ Pure Go (`internal/pricewalk`). Aggregates 1m candles (M1C1 cache under `scan/.c
 OLS return features per bar size, optionally runs per-trade TP/SL:
 
 - `--price-strategy 1` / `oracle` — peek actual future closes (research ceiling → `nm_price_walk_forward.html`)
-- `--price-strategy 2` / `predicted` — **live TRADE-year bot**: walk the full TRADE
-  window (e.g. one year). Raw OLS only — sit out if peak &lt; ~0.20%; h=1 must agree;
-  re-test TP×SL×lev (SL≥err_band, lev≤3). FORWARD chart is post-period demo only.
+- `--price-strategy 2` / `predicted` — **master loop**: TRAIN before TRADE (strict OOS) →
+  predict under-1% path (~160×15m) → best TP×SL×lev (mid hits TP, PnL&gt;0, SL≥err_band,
+  never liquid) → one trade → refresh for **one OOS month**. FORWARD chart is demo only.
   (`nm_price_walk_forward_predicted.html`)
 
-### TRAIN 2024→2025, TRADE 2025→2026
+### Master loop: TRAIN year → predict ~160 → TRADE 1 month (OOS)
 
-Exact split:
+| Phase | Rule |
+|-------|------|
+| **TRAIN** | All dates **before** `trade_start` (fit OLS only; never trade here) |
+| **Predict** | Multi-h OLS look_ahead ≈ `path_under_1pct` (~160×15m under 1% err) |
+| **TRADE** | Exactly **one OOS month** after TRAIN — no overlap with train dates |
 
-| Phase | From | Until |
-|-------|------|-------|
-| **TRAIN** | 2024-01-01 | 2025-01-01 |
-| **TRADE** | 2025-01-01 | 2026-01-01 |
-
-Scan covers both years (`--start 2024-01-01 --end 2026-01-01`). Then
-`--reserve-trade-days 365` holds back 2025→2026 as TRADE; TRAIN is 2024→2025.
-Use archives you already have for 2024–2025 (no 2023).
+Defaults: `--reserve-trade-days 30 --trade-days 30`. If the scan is shorter than
+train+trade, TRAIN shrinks so TRADE month still fits.
 
 ```bash
-# 0) build dt + Rust engine once
-./scripts/build_dt.sh
-cargo build --profile relfast --no-default-features --bin download --bin scan
-
-# 1) archives for TRAIN+TRADE (END exclusive). Skips days already verified.
-#    If scan dies on a missing zip (e.g. 2025-01-02), download that year:
-#      ./dt download 2025-01-01 2026-01-01
-#    use --proxy socks5://127.0.0.1:1080 if OKX is blocked
-./dt download 2024-01-01 2026-01-01
-
-# 2) windowscan — creates data/windowscan/2024-01-01_2026-01-01_24h_staged/
-./dt scan --bucket window --start 2024-01-01 --end 2026-01-01 --hours 24
-
-# 3) TRAIN 2024→2025, TRADE 2025→2026
+# Use a scan you already have (example)
 ./dt price-walk \
-  --scan data/windowscan/2024-01-01_2026-01-01_24h_staged \
+  --scan data/windowscan/2025-10-01_2026-10-10_24h_staged \
   --data data/okx/BTC-USDT-SWAP/archives \
   --price-bars 15m \
   --price-strategy 2 \
-  --reserve-trade-days 365 \
-  --trade-days 365 \
+  --reserve-trade-days 30 \
+  --trade-days 30 \
   --max-rel-err 0.01 \
   --verify 0
 ```
 
-Or with the helper (same scan path):
+Or:
 
 ```bash
-SCAN=data/windowscan/2024-01-01_2026-01-01_24h_staged \
-  RESERVE=365 TRADE_DAYS=365 STRATEGY=2 ./scripts/price_iter.sh
+STRATEGY=2 SCAN=data/windowscan/2025-10-01_2026-10-10_24h_staged \
+  RESERVE=30 TRADE_DAYS=30 ./scripts/price_iter.sh
 ```
 
-`ls data/windowscan` / `ls data/okx/BTC-USDT-SWAP/archives | head` to confirm
-what you already have. Soft-fails OKX when the network is blocked. Writes
-`nm_price_walk_forward.json` / `.html` (selected bar) plus per-bar grid reports.
+Writes `nm_price_walk_forward_predicted.json` / `.html`. Soft-fails OKX when blocked.
 
 ## Tests
 

@@ -138,7 +138,30 @@ func runPriceOnly(args Args, cfg *config.App, meta Meta) error {
 		tapeFrom = startMs
 	}
 	scanEndMs := endDayMs
-	trainCutoff := scanEndMs - int64(args.ReserveTradeDays)*86_400_000
+	reserveDays := args.ReserveTradeDays
+	if reserveDays == 0 {
+		reserveDays = DefaultTradeDays
+	}
+	tradeDays := args.TradeDays
+	if tradeDays == 0 {
+		tradeDays = DefaultTradeDays
+	}
+	// Strict OOS: last tradeDays are TRADE; everything before is TRAIN only.
+	// If the scan is shorter than train+trade, shrink TRAIN (keep TRADE month).
+	spanDays := (scanEndMs - startMs) / 86_400_000
+	if spanDays > 0 && int64(reserveDays) > spanDays-1 {
+		old := reserveDays
+		reserveDays = uint64(spanDays - 1)
+		if reserveDays < tradeDays {
+			reserveDays = tradeDays
+		}
+		if reserveDays >= uint64(spanDays) {
+			return fmt.Errorf("scan span %dd too short for OOS TRADE (%d d); need more archives/scan", spanDays, tradeDays)
+		}
+		logx.Warnf("scan span %dd < requested reserve %dd — shrink TRAIN, keep TRADE reserve=%dd",
+			spanDays, old, reserveDays)
+	}
+	trainCutoff := scanEndMs - int64(reserveDays)*86_400_000
 	if len(meta.Windows) < 2 {
 		return fmt.Errorf("need at least 2 windows in meta.json")
 	}
@@ -173,15 +196,21 @@ func runPriceOnly(args Args, cfg *config.App, meta Meta) error {
 			priceTradeStart = floor
 		}
 	}
-	priceTradeEnd := scanEndMs
-	if args.TradeDays > 0 {
-		priceTradeEnd = priceTradeStart + int64(args.TradeDays)*86_400_000
-		if priceTradeEnd > scanEndMs {
-			priceTradeEnd = scanEndMs
-		}
+	// TRADE never overlaps TRAIN dates (OOS only).
+	if priceTradeStart < trainCutoff {
+		priceTradeStart = trainCutoff
+	}
+	priceTradeEnd := priceTradeStart + int64(tradeDays)*86_400_000
+	if priceTradeEnd > scanEndMs {
+		priceTradeEnd = scanEndMs
+	}
+	if priceTradeEnd <= priceTradeStart {
+		return fmt.Errorf("empty OOS TRADE window after TRAIN cutoff %s", utc(trainCutoff))
 	}
 
 	logx.Infof("PRICE-ONLY fast path (no tick tape / no finalists). Cache under %s/.cache/", args.Scan)
+	logx.Infof("Strict OOS: TRAIN … → %s  |  TRADE %s → %s (%d d reserved, %d d traded)",
+		utc(trainCutoff), utc(priceTradeStart), utc(priceTradeEnd), reserveDays, tradeDays)
 	// Rust: load_minutes_cached(data, scan, tape_from_ms, ms(meta.end)).
 	minutes, err := candles.LoadMinutes(args.Data, args.Scan, tapeFrom, endDayMs)
 	if err != nil {
@@ -506,7 +535,7 @@ func runOnePriceBar(
 		)
 	case 2:
 		signalRule = fmt.Sprintf(
-			"live TRADE-year: walk trade_start→trade_end; each free bar raw OLS predict (look_ahead≈%d), peak≥min + h1 agrees, re-test TP×SL×lev (SL≥err_band, lev≤%.0f); sit out flat; FORWARD block is post-period demo only",
+			"live OOS month: TRAIN ends at trade_start; TRADE is OOS only; each free bar raw OLS predict look_ahead≈%d (under-1%%), peak≥min + h1 agrees, best TP×SL×lev (mid hits TP, SL≥err_band, no liquid, lev≤%.0f); sit out flat; FORWARD chart is demo only",
 			horizons.PathUnder1Pct, PathLiveMaxLev,
 		)
 	}
