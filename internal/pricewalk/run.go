@@ -506,8 +506,8 @@ func runOnePriceBar(
 		)
 	case 2:
 		signalRule = fmt.Sprintf(
-			"option B FORWARD-only: trades start after last candle before trade_end (not from TRADE start); each free bar predicts next %d closes, re-tests TP×SL×lev (SL≥err_band, mid hits TP), one trade, then refresh on tape/OKX actuals",
-			horizons.PathUnder1Pct,
+			"live FORWARD: start after last candle before trade_end; raw OLS peak≥min + h1 agrees; re-test TP×SL×lev (SL≥err_band, lev≤%.0f); sit out flat forecasts; look_ahead≈%d",
+			PathLiveMaxLev, horizons.PathUnder1Pct,
 		)
 	}
 

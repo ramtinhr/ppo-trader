@@ -83,7 +83,7 @@ func TestRollingRetestsGridEachTrade(t *testing.T) {
 	if sum["pick_mode"] != "rolling-predicted" {
 		t.Fatalf("mode=%v", sum["pick_mode"])
 	}
-	if sum["exits_mode"] != "rolling_retest_grid" {
+	if sum["exits_mode"] != "live_retest_grid" {
 		t.Fatalf("exits_mode=%v", sum["exits_mode"])
 	}
 	if n == 0 {
@@ -115,6 +115,47 @@ func TestRollingRetestsGridEachTrade(t *testing.T) {
 		}
 	}
 	t.Logf("exit labels used: %v", labels)
+}
+
+func TestLiveSitsOutFlatRawPath(t *testing.T) {
+	const barMs = int64(15 * 60_000)
+	start := int64(1_700_000_000_000)
+	start = start - (start % barMs)
+	var minutes []candles.Candle
+	px := 100_000.0
+	for i := 0; i < 120; i++ {
+		for m := 0; m < 15; m++ {
+			minutes = append(minutes, candles.Candle{
+				TimeMs: start + int64(i)*barMs + int64(m)*60_000,
+				Open: px, High: px * 1.0001, Low: px * 0.9999, Close: px,
+			})
+		}
+	}
+	// Zero alphas → flat raw path. Live bot must sit out (no h1 invent).
+	models := []pricemodel.Model{pricemodel.ColdStart()}
+	for h := 1; h <= 30; h++ {
+		models = append(models, pricemodel.Model{Alphas: [4]float64{0, 0, 0, 0}})
+	}
+	args := DefaultArgs()
+	args.PriceStrategyMode = 2
+	args.PriceStops = []float64{1.0, 1.5}
+	args.PriceTargets = []float64{0.1, 0.5}
+	args.PriceLeverage = []uint32{1, 2, 10}
+	out, err := runPriceStrategyPerTrade(args, minutes, models, "15m", barMs,
+		start+10*barMs, start+40*barMs, 0.0005, 0.0002, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, _ := out["closed_trades"].(uint32)
+	skips, _ := out["skips"].(map[string]any)
+	t.Logf("flat live: trades=%d skips=%v", n, skips)
+	if n != 0 {
+		t.Fatalf("live bot must sit out flat raw OLS, got %d trades", n)
+	}
+	flat, _ := skips["flat"].(int)
+	if flat == 0 {
+		t.Fatalf("expected flat skips, got %v", skips)
+	}
 }
 
 func TestRollingSkipsWhenNoProfitableCombo(t *testing.T) {

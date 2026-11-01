@@ -21,13 +21,14 @@ const (
 	StepBTC                  = 0.0001
 	ReplayBalance            = 1e9
 
-	// Rolling predicted-path bot (mode 2): take this fraction of the predicted
-	// peak as TP. Only trade when peak clears PathMinPeakPct (flat OLS noise
-	// must not force 800+ micro-scalps).
-	PathTakeFrac    = 0.70
-	PathMinPeakPct  = 0.20 // skip if predicted favorable span < this (%)
-	PathMinStopPct  = 0.25
-	// Design target used when sizing SL vs TP (high win-rate scalp).
+	// Live predicted bot (mode 2):
+	//  - only trade when raw OLS peak clears PathMinPeakPct (fee-aware floor too)
+	//  - TP ≈ PathTakeFrac of that peak; SL ≥ err_band; lev capped for live
+	//  - no invented / h1-extrapolated / span-floor paths
+	PathTakeFrac      = 0.70
+	PathMinPeakPct    = 0.20 // skip flat forecasts
+	PathMinStopPct    = 0.25
+	PathLiveMaxLev    = 3.0  // modest size until model clearly beats baseline
 	PathWinRateTarget = 0.80
 )
 

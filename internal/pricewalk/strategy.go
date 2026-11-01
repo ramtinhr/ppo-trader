@@ -925,11 +925,10 @@ func runOracleGrid(
 	}, nil
 }
 
-// runRollingPredicted — live loop the user wants:
-//   predict next pathWindow closes (raw OLS) → re-test full TP×SL×lev grid on that
-//   path (must mid PnL > 0) → one trade on actuals → after exit, re-predict and
-//   re-test the grid again. Combos are NEVER fixed forever.
-// No invented/shaped span. Grid search is milliseconds (fine for <1 min live).
+// runRollingPredicted — live-honest FORWARD loop:
+//   raw OLS predict → skip if peak too small → re-test TP×SL×lev (SL≥err_band,
+//   mid hits TP, path_r then low lev) → one trade → refresh.
+// No h1-extrap / span-floor inventing. Flat forecast = sit out.
 func runRollingPredicted(
 	args Args,
 	bars []candles.Candle,
@@ -942,11 +941,21 @@ func runRollingPredicted(
 ) (map[string]any, error) {
 	hMax := len(models) - 1
 	modeName := "rolling-predicted"
-	levs := append([]uint32(nil), args.PriceLeverage...)
+	liveMaxLev := math.Min(maxLev, PathLiveMaxLev)
+	levs := make([]uint32, 0, len(args.PriceLeverage))
+	for _, l := range args.PriceLeverage {
+		if l >= 1 && float64(l) <= liveMaxLev+1e-12 {
+			levs = append(levs, l)
+		}
+	}
+	if len(levs) == 0 {
+		levs = []uint32{1}
+	}
 	sort.Slice(levs, func(i, j int) bool { return levs[i] < levs[j] })
 
-	logx.Infof("  %s rolling-predicted: look_ahead=%d (H=%d) · stops=%d · tps=%d · combos=%d · lev=%v · max_risk=%g%% · err_band=%.2f%% · min_stop=%.2f%% · OOS %d..%d",
-		label, pathWindow, hMax, len(usable), len(targets), len(exitGrid), levs, maxRiskPct, errBand*100, errBand*100, oosLo, oosHi)
+	minPeak := minTradablePeakPct(taker, maker)
+	logx.Infof("  %s rolling-predicted (live): look_ahead=%d (H=%d) · stops=%d · tps=%d · combos=%d · lev=%v (cap %.0f) · max_risk=%g%% · err_band=%.2f%% · min_peak=%.2f%% · min_stop=%.2f%% · OOS %d..%d",
+		label, pathWindow, hMax, len(usable), len(targets), len(exitGrid), levs, liveMaxLev, maxRiskPct, errBand*100, minPeak, errBand*100, oosLo, oosHi)
 
 	balance := args.BalanceUSDT
 	running := 0.0
@@ -954,6 +963,8 @@ func runRollingPredicted(
 	var wins uint32
 	skippedLiquid := 0
 	skippedNoCombo := 0
+	skippedFlat := 0
+	skippedDisagree := 0
 	origins := 0
 	inBandN, inBandLoss := 0, 0
 
@@ -980,111 +991,94 @@ func runRollingPredicted(
 			i++
 			continue
 		}
-		rawPath := truncatePath(rawFull, pathWindow)
+		pickPath := truncatePath(rawFull, pathWindow)
 		origins++
 
-		actPath := actualCloses(bars, i, len(rawPath))
+		actPath := actualCloses(bars, i, len(pickPath))
 		if len(actPath) == 0 {
 			i++
 			continue
 		}
 
-		// Pick path: raw OLS first; if too flat to hit any grid TP, use h1 extrap
-		// (no span floor — only h=1 return projected forward).
-		h1m := models[1]
-		r1 := h1m.PredictReturn(feat)
-		minTP := 0.1
-		for _, t := range targets {
-			if t > 0 && t < minTP {
-				minTP = t
-			}
-		}
+		// Side + peak from raw multi-h path only (honest forecast).
+		long, peak := pathDirection(pickPath, entry)
 		pathSrc := "raw_ols"
-		long, peak := pathDirection(rawPath, entry)
-		pickPath := rawPath
-		if peak+1e-12 < minTP {
-			useLong := r1 >= 0
-			h1Path := h1ExtrapolatedPath(len(rawPath), entry, useLong, r1)
-			h1Peak := rawPathFavorableSpanPct(h1Path, entry, useLong)
-			if len(h1Path) > 0 && h1Peak+1e-12 >= minTP {
-				pickPath = h1Path
-				long = useLong
-				peak = h1Peak
-				pathSrc = "h1_extrap"
-			}
+		if peak+1e-12 < minPeak {
+			skippedFlat++
+			i++
+			continue
+		}
+		// Require h=1 sign to agree with path side (weak models otherwise flip-flop).
+		r1 := models[1].PredictReturn(feat)
+		if (long && r1 < 0) || (!long && r1 > 0) {
+			skippedDisagree++
+			i++
+			continue
 		}
 
-		// Re-test grid; SL ≥ err_band; mid must hit TP with PnL>0; rank path_r then lower lev.
+		// Re-test grid on raw path. Prefer TP near PathTakeFrac of peak.
 		minStop := errBand * 100
 		searchGrid := exitGrid
-		if peak >= minTP {
-			for _, tp := range []float64{round2(peak * PathTakeFrac), round2(peak * 0.95)} {
-				if tp < minTP {
+		for _, tp := range []float64{round2(peak * PathTakeFrac), round2(peak * 0.95)} {
+			if tp+1e-12 < minPeak*PathTakeFrac {
+				continue
+			}
+			for _, stop := range usable {
+				if stop+1e-12 < minStop {
 					continue
 				}
-				for _, stop := range usable {
-					if stop+1e-12 < minStop {
-						continue
-					}
-					searchGrid = append(searchGrid, exits.Exits{StopPct: stop, Targets: [][2]float64{{tp, 1}}})
-				}
+				searchGrid = append(searchGrid, exits.Exits{StopPct: stop, Targets: [][2]float64{{tp, 1}}})
 			}
 		}
-		sides := []bool{long}
-		if pathSrc == "raw_ols" {
-			sides = []bool{long, !long}
-		}
 		var best *pathPick
-		bestLong := long
-		for _, sideLong := range sides {
-			for _, ex := range searchGrid {
-				if ex.StopPct+1e-12 < minStop {
+		for _, ex := range searchGrid {
+			if ex.StopPct+1e-12 < minStop {
+				continue
+			}
+			// TP must not exceed predicted peak (unreachable on mid path).
+			tp := firstTargetPct(ex)
+			if tp > peak+1e-9 {
+				continue
+			}
+			for _, levU := range levs {
+				lev := float64(levU)
+				riskPct := impliedRiskPct(ex.StopPct, lev)
+				if riskPct > maxRiskPct+1e-12 {
 					continue
 				}
-				for _, levU := range levs {
-					lev := float64(levU)
-					if lev < 1 || lev > maxLev+1e-12 {
-						continue
+				steps := sizeForLeverage(balance, lev, entry)
+				if steps <= 0 || ex.Validate(steps) != nil {
+					continue
+				}
+				if comboCanLiquid(ex.StopPct, lev) {
+					skippedLiquid++
+					continue
+				}
+				mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
+				if mid.PnL <= 0 || mid.Reason != "tp" {
+					continue
+				}
+				pathR := mid.PnL / math.Max(balance*riskPct/100, 1e-9)
+				dist := liquidDistancePct(ex.StopPct, lev)
+				better := best == nil
+				if !better {
+					if pathR > best.PathR+1e-9 {
+						better = true
+					} else if math.Abs(pathR-best.PathR) <= 1e-9 && lev < best.Lev-1e-12 {
+						better = true
+					} else if math.Abs(pathR-best.PathR) <= 1e-9 && math.Abs(lev-best.Lev) <= 1e-12 && mid.PnL > best.PathPnL+1e-9 {
+						better = true
+					} else if math.Abs(pathR-best.PathR) <= 1e-9 && math.Abs(lev-best.Lev) <= 1e-12 &&
+						math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && dist > best.LiquidDist {
+						better = true
 					}
-					riskPct := impliedRiskPct(ex.StopPct, lev)
-					if riskPct > maxRiskPct+1e-12 {
-						continue
+				}
+				if better {
+					cp := pathPick{
+						Exits: ex, RiskPct: riskPct, Steps: steps, Lev: lev,
+						PathPnL: mid.PnL, WorstPnL: mid.PnL, PathR: pathR, LiquidDist: dist,
 					}
-					steps := sizeForLeverage(balance, lev, entry)
-					if steps <= 0 || ex.Validate(steps) != nil {
-						continue
-					}
-					if comboCanLiquid(ex.StopPct, lev) {
-						skippedLiquid++
-						continue
-					}
-					mid := simulateExitsOnPath(sideLong, entry, ex, steps, pickPath, taker, maker)
-					if mid.PnL <= 0 || mid.Reason != "tp" {
-						continue
-					}
-					pathR := mid.PnL / math.Max(balance*riskPct/100, 1e-9)
-					dist := liquidDistancePct(ex.StopPct, lev)
-					better := best == nil
-					if !better {
-						if pathR > best.PathR+1e-9 {
-							better = true
-						} else if math.Abs(pathR-best.PathR) <= 1e-9 && lev < best.Lev-1e-12 {
-							better = true
-						} else if math.Abs(pathR-best.PathR) <= 1e-9 && math.Abs(lev-best.Lev) <= 1e-12 && mid.PnL > best.PathPnL+1e-9 {
-							better = true
-						} else if math.Abs(pathR-best.PathR) <= 1e-9 && math.Abs(lev-best.Lev) <= 1e-12 &&
-							math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && dist > best.LiquidDist {
-							better = true
-						}
-					}
-					if better {
-						cp := pathPick{
-							Exits: ex, RiskPct: riskPct, Steps: steps, Lev: lev,
-							PathPnL: mid.PnL, WorstPnL: mid.PnL, PathR: pathR, LiquidDist: dist,
-						}
-						best = &cp
-						bestLong = sideLong
-					}
+					best = &cp
 				}
 			}
 		}
@@ -1093,7 +1087,6 @@ func runRollingPredicted(
 			i++
 			continue
 		}
-		long = bestLong
 
 		realSim := simulateExitsOnPath(long, entry, best.Exits, best.Steps, actPath, taker, maker)
 		pathSimR := simulateExitsOnPath(long, entry, best.Exits, best.Steps, pickPath, taker, maker)
@@ -1173,23 +1166,23 @@ func runRollingPredicted(
 	if n > 0 {
 		winRate = round2(100 * float64(wins) / float64(n))
 	}
-	logx.Infof("  %s rolling-predicted done: %d trades · PnL %+.2f · origins=%d · win_rate=%.1f%% · no_combo_skips≈%d · liquid_skips≈%d · in_band=%d in_band_loss=%d",
-		label, n, running, origins, winRate, skippedNoCombo, skippedLiquid, inBandN, inBandLoss)
+	logx.Infof("  %s rolling-predicted done: %d trades · PnL %+.2f · origins=%d · win_rate=%.1f%% · flat_skips≈%d · h1_disagree≈%d · no_combo≈%d · liquid≈%d · in_band=%d in_band_loss=%d",
+		label, n, running, origins, winRate, skippedFlat, skippedDisagree, skippedNoCombo, skippedLiquid, inBandN, inBandLoss)
 	if n == 0 {
-		logx.Warnf("  %s rolling-predicted: 0 trades — no_combo=%d liquid=%d origins=%d. Usually FORWARD OLS path is flatter than min TP (try log peak/path_source), or OKX actuals missing.",
-			label, skippedNoCombo, skippedLiquid, origins)
+		logx.Warnf("  %s live predicted: 0 trades (flat_peak<%.2f%% → %d · h1_disagree=%d · no_combo=%d). Sitting out flat forecasts is correct for live.",
+			label, minPeak, skippedFlat, skippedDisagree, skippedNoCombo)
 	}
 
 	rule := fmt.Sprintf(
-		"rolling: each free bar predict next %d closes; RE-TEST full TP×SL×lev grid (%d combos) on raw path; trade only best mid>0; one trade then refresh+re-test; risk≤%g%%; realized on actuals",
-		pathWindow, len(exitGrid)*len(levs), maxRiskPct,
+		"live FORWARD: raw OLS only; trade iff peak≥%.2f%% and h1 agrees; re-test TP×SL×lev (SL≥err_band, TP≤peak, mid hits TP); rank path_r then lev≤%.0f; one trade then refresh; no invented path",
+		minPeak, liveMaxLev,
 	)
 	return map[string]any{
 		"selection_rule": rule,
 		"summary": map[string]any{
-			"exits_mode": "rolling_retest_grid", "pick_mode": modeName, "horizon": hMax,
-			"path_window": pathWindow, "confirm_bars": 0, "max_leverage": maxLev,
-			"err_band": errBand, "grid_stops": len(usable), "grid_tps": len(targets),
+			"exits_mode": "live_retest_grid", "pick_mode": modeName, "horizon": hMax,
+			"path_window": pathWindow, "confirm_bars": 0, "max_leverage": liveMaxLev,
+			"err_band": errBand, "min_peak_pct": minPeak, "grid_stops": len(usable), "grid_tps": len(targets),
 			"grid_combos": len(exitGrid),
 			"in_band_trades": inBandN, "in_band_losses": inBandLoss,
 			"taker_fee_bps": taker * 10_000, "maker_fee_bps": maker * 10_000,
@@ -1204,7 +1197,8 @@ func runRollingPredicted(
 			"usable_stops":         usable,
 		},
 		"skips": map[string]any{
-			"liquid": skippedLiquid, "tp_floor": 0, "robust": skippedNoCombo, "flat": 0,
+			"liquid": skippedLiquid, "tp_floor": 0, "robust": skippedNoCombo, "flat": skippedFlat,
+			"h1_disagree": skippedDisagree,
 		},
 		"trades": tradesJSON,
 	}, nil
