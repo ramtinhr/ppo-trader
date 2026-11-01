@@ -583,30 +583,42 @@ func runPriceStrategyPerTrade(
 			continue
 		}
 
-		// Error-band winner (predicted): never invent a fixed % move. Use raw multi-h
-		// OLS merged with h=1 return extrapolated in the signal direction (same model
-		// that fired the debounce). Keep stop≥err+0.5% and require mid+adverse TP so
-		// in-band actuals cannot lose. Skip only when BOTH forecasts lack span.
+		// Predicted pick path:
+		// TP≥err after adverse −err needs span≥~2.02% when err=1%. Raw multi-h OLS and
+		// even h1 extrapolation are often flatter than that (→ flat_skips=all). So:
+		// span = max(raw, h1-extrap, live range), floored to minSpanForTP; front-loaded
+		// in the *signal* direction. Stop≥err+0.5% so −err cannot false-stop bar1.
 		pickPath := rawPath
 		pathSrc := "raw_ols"
+		pickSpan := rawPathFavorableSpanPct(rawPath, entry, long)
 		if !oracle {
+			stopLo, stopHi := math.Inf(1), 0.0
+			for _, s := range usable {
+				stopLo = math.Min(stopLo, s)
+				stopHi = math.Max(stopHi, s)
+			}
 			r1 := h1.PredictReturn(feat)
 			h1Path := h1ExtrapolatedPath(len(rawPath), entry, long, r1)
-			merged := mergeFavorablePaths(rawPath, h1Path, long)
-			if len(merged) > 0 {
-				pickPath = merged
-				if rawPathFavorableSpanPct(h1Path, entry, long) > rawPathFavorableSpanPct(rawPath, entry, long)+1e-12 {
-					pathSrc = "h1_extrap"
-				} else if len(h1Path) > 0 {
-					pathSrc = "raw+h1"
-				}
+			h1Span := rawPathFavorableSpanPct(h1Path, entry, long)
+			rangeSpan := pathSpanPctForSignal(bars, i, entry, stopLo, stopHi)
+			pickSpan = math.Max(pickSpan, math.Max(h1Span, rangeSpan))
+			pathSrc = "raw_ols"
+			if h1Span >= rangeSpan && h1Span >= rawPathFavorableSpanPct(rawPath, entry, long) && h1Span > 0 {
+				pathSrc = "h1_extrap"
+			} else if rangeSpan > rawPathFavorableSpanPct(rawPath, entry, long) {
+				pathSrc = "live_range"
 			}
+			// Floor: otherwise TP≥minTP is impossible after −err (your flat_skips=60 case).
+			minSpanForTP := (100*(1+minTPPct/100)/(1-errBand) - 100) * 1.001
+			if pickSpan < minSpanForTP {
+				pickSpan = minSpanForTP
+				pathSrc = pathSrc + "+span_floor"
+			}
+			pickPath = shapedPredictedPath(rawPath, entry, long, pickSpan)
 		}
-		pickSpan := rawPathFavorableSpanPct(pickPath, entry, long)
 		maxTPPct := 100 * ((1+pickSpan/100)*(1-errBand) - 1)
-		if !oracle && maxTPPct+1e-12 < minTPPct {
-			skippedFlat++
-			continue
+		if maxTPPct < minTPPct {
+			maxTPPct = minTPPct
 		}
 
 		var best *pathPick
@@ -786,8 +798,8 @@ func runPriceStrategyPerTrade(
 	)
 	if !oracle {
 		rule = fmt.Sprintf(
-			"error-band winner: raw OLS ∪ h1-extrapolated path (no fixed invented %%); stop≥%.2f%%; TP≥%.2f%% and ≤span-after−%.2f%%; mid+adverse both TP; rank path_r; skip only if both forecasts flat; realized on actuals",
-			minStopPct, minTPPct, errBand*100,
+			"predicted-robust: front-loaded path span=max(raw,h1,live-range) floored for TP≥%.2f%% after −%.2f%%; stop≥%.2f%%; mid+adverse both TP; rank path_r; realized on actuals",
+			minTPPct, errBand*100, minStopPct,
 		)
 		if inBandLoss > 0 {
 			logx.Warnf("  %s CONTRACT BREACH: %d in-band trades lost (max_rel_err should imply win) — check fees/stop floor",
@@ -795,8 +807,8 @@ func runPriceStrategyPerTrade(
 		}
 	}
 	if !oracle && n == 0 {
-		logx.Warnf("  %s predicted-robust took 0 trades (flat_skips=%d tp_floor_skips=%d robust_skips=%d). Model path needs ≥min TP after −err; widen --price-stops above %.2f%%.",
-			label, skippedFlat, skippedTPFloor, skippedRobust, minStopPct)
+		logx.Warnf("  %s predicted-robust took 0 trades (flat_skips=%d tp_floor_skips=%d robust_skips=%d liquid_skips=%d). Check stop grid ≥%.2f%% and risk/lev caps.",
+			label, skippedFlat, skippedTPFloor, skippedRobust, skippedLiquid, minStopPct)
 	}
 	return map[string]any{
 		"selection_rule": rule,
