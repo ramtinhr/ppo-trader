@@ -66,12 +66,25 @@ OLS return features per bar size, optionally runs per-trade TP/SL:
 
 ### Train 2024 → trade 2025 (one year)
 
-Need a windowscan whose `meta` spans ~2024-01-01 through ~2026-01-01 (train year + trade year).
-Then reserve the last 365 days as TRADE:
+`your_2024_to_2026_scan` is not a path — build a real windowscan first. Staged
+output lands at `data/windowscan/2024-01-01_2026-01-01_24h_staged` (meta must
+span train year + trade year). Then reserve the last 365 days as TRADE:
 
 ```bash
+# 0) build dt + Rust engine once
+./scripts/build_dt.sh
+cargo build --profile relfast --no-default-features --bin download --bin scan
+
+# 1) OKX archives covering lookback + scan window (END exclusive)
+#    use --proxy socks5://127.0.0.1:1080 if OKX is blocked
+./dt download 2023-12-01 2026-01-01
+
+# 2) windowscan — creates data/windowscan/2024-01-01_2026-01-01_24h_staged/
+./dt scan --bucket window --start 2024-01-01 --end 2026-01-01 --hours 24
+
+# 3) live predicted bot: TRAIN≈2024, TRADE≈2025
 ./dt price-walk \
-  --scan data/windowscan/<2024_to_2026_scan> \
+  --scan data/windowscan/2024-01-01_2026-01-01_24h_staged \
   --data data/okx/BTC-USDT-SWAP/archives \
   --price-bars 15m \
   --price-strategy 2 \
@@ -81,14 +94,16 @@ Then reserve the last 365 days as TRADE:
   --verify 0
 ```
 
-That yields roughly **TRAIN 2024 → TRADE 2025**. Soft-fails OKX when the network is blocked.
+Or with the helper (same scan path):
 
 ```bash
-STRATEGY=2 ./scripts/price_iter.sh
-./dt price-walk --scan DIR --price-bars 15m --price-strategy 2 --max-rel-err 0.01 --verify 0
+SCAN=data/windowscan/2024-01-01_2026-01-01_24h_staged \
+  RESERVE=365 TRADE_DAYS=365 STRATEGY=2 ./scripts/price_iter.sh
 ```
 
-Writes `nm_price_walk_forward.json` / `.html` (selected bar) plus per-bar grid reports.
+`ls data/windowscan` shows finished scans if one already exists. Soft-fails OKX
+when the network is blocked. Writes `nm_price_walk_forward.json` / `.html`
+(selected bar) plus per-bar grid reports.
 
 ## Tests
 
