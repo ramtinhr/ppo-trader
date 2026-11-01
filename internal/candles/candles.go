@@ -198,11 +198,13 @@ func DayMs(day string) (int64, error) {
 }
 
 func ParseWindowMs(s string) (int64, error) {
-	// "YYYY-MM-DD HH:MM" or ISO-ish
+	// window_scan / hand-written meta use several shapes
 	layouts := []string{
+		"2006-01-02 15:04:05",
 		"2006-01-02 15:04",
 		"2006-01-02T15:04:05Z",
 		"2006-01-02T15:04:05",
+		"2006-01-02T15:04:05.000Z",
 		"2006-01-02",
 	}
 	for _, l := range layouts {
