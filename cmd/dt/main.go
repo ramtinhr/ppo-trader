@@ -165,13 +165,15 @@ func runPriceWalk(argv []string) error {
 	if pricewalk.IsHelp(err) {
 		fmt.Println(`Usage: dt price-walk --scan DIR [flags]
 
-Candle OLS price path (Go). Fits return features on OHLC bars, optional oracle
-per-trade TP/SL on actual future closes (--price-strategy 1).
+Candle OLS price path (Go). Fits return features on OHLC bars; optional per-trade exits:
+  --price-strategy 0          off
+  --price-strategy 1|oracle   peek actual future closes (research ceiling)
+  --price-strategy 2|predicted  TP×SL×lev grid; trade if mid>0 and adverse−err≥0
 
 Common flags (see scripts/price_iter.sh):
   --scan DIR  --data DIR  --config PATH  --balance-usdt N
-  --price-bars 15m,1h  --price-strategy 0|1  --price-horizon auto|N
-  --price-stops 0.5-5/0.5  --price-leverage 1,2,3,5,8,10
+  --price-bars 15m,1h  --price-strategy 0|1|2  --price-horizon auto|N
+  --price-stops 0.1-5/0.1  --price-targets 0.1-3/0.1  --price-leverage 1,2,3,5,8,10
   --reserve-trade-days N  --min-fit-pairs N  --max-rel-err 0.01
   --require-fit 0|1  --html-only  --verify 0`)
 		return nil
@@ -179,7 +181,7 @@ Common flags (see scripts/price_iter.sh):
 	if err != nil {
 		return err
 	}
-	logx.Infof("price-walk scan=%s bars=%d strategy=%v", args.Scan, len(args.PriceBars), args.PriceStrategy)
+	logx.Infof("price-walk scan=%s bars=%d strategy_mode=%d", args.Scan, len(args.PriceBars), args.PriceStrategyMode)
 	return pricewalk.Run(args)
 }
 

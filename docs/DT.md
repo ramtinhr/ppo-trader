@@ -56,8 +56,21 @@ runs the N/M pick loop with a learned `ScoreModel` (near→far TRAIN → LOCK �
 ## Price walk-forward
 
 Pure Go (`internal/pricewalk`). Aggregates 1m candles (M1C1 cache under `scan/.cache/`), fits
-OLS return features per bar size, optionally runs the oracle per-trade TP/SL grid
-(`--price-strategy 1`). Soft-fails OKX official candles when the network is blocked.
+OLS return features per bar size, optionally runs per-trade TP/SL:
+
+- `--price-strategy 1` / `oracle` — peek actual future closes (research ceiling → `nm_price_walk_forward.html`)
+- `--price-strategy 2` / `predicted` — full asymmetric **TP×SL×lev** grid (default
+  `--price-targets 0.1-3/0.1` × `--price-stops 0.1-5/0.1`, e.g. 0.1TP/0.9SL×lev).
+  Front-loaded pick path from max(raw, h1, live-range). **Trade only if mid > 0 and
+  adverse −max_rel_err ≥ 0** (option 1 stress). (`nm_price_walk_forward_predicted.html`)
+
+
+Soft-fails OKX official candles when the network is blocked.
+
+```bash
+STRATEGY=2 ./scripts/price_iter.sh
+./dt price-walk --scan DIR --price-bars 15m --price-strategy 2 --max-rel-err 0.01 --verify 0
+```
 
 ```bash
 ./scripts/price_iter.sh

@@ -163,15 +163,24 @@ $('#sub').textContent = `${M.trade_start || ''} → ${M.trade_end || ''} · ${ba
 const ST = REPORT.strategy || {};
 const trades = ST.trades || [];
 const sum = ST.summary || M.strategy || {};
+const skips = ST.skips || {};
+const pickMode = sum.pick_mode || (M.price_strategy_mode === 2 ? 'predicted-robust' : (M.price_strategy_mode === 1 ? 'oracle' : 'off'));
+const predictedMode = pickMode === 'predicted-robust' || M.price_strategy_mode === 2;
 const feeNote = (sum.taker_fee_bps != null)
   ? `taker ${fmt(sum.taker_fee_bps,1)} / maker ${fmt(sum.maker_fee_bps,1)} bps`
   : '';
+const eyebrow = $('#eyebrow');
+if (eyebrow) eyebrow.textContent = predictedMode ? 'Predicted-robust (no peek)' : 'Oracle price path (peek)';
 
 $('#kpis').innerHTML = [
   ['Bar', barLabel || '—', ''],
+  ['Pick mode', pickMode, ''],
   ['Total PnL', signed(ST.total_pnl ?? total), cls(ST.total_pnl ?? total)],
   ['Trades', String(ST.closed_trades ?? trades.length ?? 0), ''],
   ['Win rate', ST.closed_trades ? `${fmt(ST.win_rate ?? 0,1)}%` : '—', ''],
+  ['Signals in OOS', String(ST.signals_in_oos ?? '—'), ''],
+  ['Robust skips', String(skips.robust ?? '—'), ''],
+  ['TP-floor skips', String(skips.tp_floor ?? '—'), ''],
   ['Trading horizon', String(M.price_horizon ?? sum.horizon ?? '—'), ''],
   ['Path under 1%', String(M.path_under_1pct ?? (M.path_example && M.path_example.path_under_1pct) ?? '—'), ''],
   ['Forecast steps', String(S.length), ''],
@@ -190,11 +199,15 @@ $('#eq').textContent = [
   ...eqBits,
 ].filter(Boolean).join(' · ');
 
-$('#trade-note').innerHTML = `Report mode: each direction signal picks the <b>best TP/SL/lev</b> on that bar’s <b>actual</b> future path (oracle / peek-ahead). Skip if no profitable combo. Forecast candles (${S.length}) are not trades.`;
+if (predictedMode) {
+  $('#trade-note').innerHTML = `Predicted-robust (option 1): full <b>TP×SL×lev</b> grid. Trades only when mid&nbsp;&gt;&nbsp;0 <b>and</b> adverse −err&nbsp;≥&nbsp;0. Forecast candles (${S.length}) are not trades.`;
+} else {
+  $('#trade-note').innerHTML = `Oracle mode: each direction signal picks the <b>best TP/SL/lev</b> on that bar’s <b>actual</b> future path (peek-ahead). Skip if no profitable combo. Forecast candles (${S.length}) are not trades.`;
+}
 
 $('#trades-intro').textContent = trades.length
-  ? `${trades.length} trades · PnL ${signed(ST.total_pnl ?? total)} · exits = max PnL on actuals`
-  : 'No strategy trades (no direction signals in OOS, or no profitable exit combo).';
+  ? `${trades.length} trades · PnL ${signed(ST.total_pnl ?? total)} · pick=${pickMode}`
+  : `No strategy trades (pick=${pickMode}; signals_in_oos=${ST.signals_in_oos ?? '—'}; robust_skips=${skips.robust ?? '—'}; tp_floor_skips=${skips.tp_floor ?? '—'}). Forecast steps ≠ trades.`;
 
 const th = $('#trades thead');
 const tb = $('#trades tbody');
@@ -209,7 +222,7 @@ th.innerHTML = `<tr>
   <th>Closed</th>
   <th>Profit</th>
   <th>Running</th>
-  <th class="oracle-col">Best on actuals <span class="pill">used</span></th>
+  <th class="oracle-col">${predictedMode ? 'Realized on actuals' : 'Best on actuals'} <span class="pill">${predictedMode ? 'accounted' : 'used'}</span></th>
 </tr>`;
 tb.innerHTML = trades.map((t, i) => `<tr>
   <td class="num">${i+1}</td>

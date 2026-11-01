@@ -9,6 +9,7 @@
 //! (and TradingView's).
 //!
 //! A few archives are known to be incomplete and are accepted anyway, see [`KNOWN_INCOMPLETE`]:
+//! - 2024-02-20: one ID gap 751214804→751214809 (4 missing); volume short 65 contracts.
 //! - 2024-12-01: two ID gaps around 2024-12-01 02:10 UTC (1,317 + 13,870 missing IDs); volume
 //!   short 122,843.7 contracts vs OKX's 1D candle.
 //! - 2026-01-14: two ID gaps in the minute from 2026-01-13 22:10 UTC; volume short 44,527.47.
@@ -79,6 +80,12 @@ struct KnownIncomplete {
 
 /// Published archives that fail a strict ID/volume check but are accepted with a fixed shortfall.
 const KNOWN_INCOMPLETE: &[KnownIncomplete] = &[
+    // 2024-02-20 15:29 UTC: IDs 751214804→751214809 (4 missing); archive short 65 vs 1D candle.
+    KnownIncomplete {
+        day: (2024, 2, 20),
+        gaps: &[(751_214_804, 751_214_809)],
+        shortfall_hundredths: 6_500, // 65.00 contracts
+    },
     // 2024-12-01 02:10 UTC: two bursts of missing IDs; archive 7,944,393.30 vs candle 8,067,237.
     KnownIncomplete {
         day: (2024, 12, 1),
@@ -593,6 +600,9 @@ mod tests {
         assert!(known_gap(d2024, 1_159_405_059, 1_159_418_930));
         assert_eq!(known_gap_shortfall(d2024), 12_284_370);
         assert!(!known_gap(d2024.succ_opt().unwrap(), 1_159_375_039, 1_159_376_357));
+        let d_feb = NaiveDate::from_ymd_opt(2024, 2, 20).unwrap();
+        assert!(known_gap(d_feb, 751_214_804, 751_214_809));
+        assert_eq!(known_gap_shortfall(d_feb), 6_500);
     }
 
     #[test]
