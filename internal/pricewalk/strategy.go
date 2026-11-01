@@ -605,9 +605,43 @@ func exitsToJSON(e exits.Exits) map[string]any {
 	}
 }
 
+// forwardOriginIndex = last bar strictly before tradeEnd (same origin as FORWARD path).
+func forwardOriginIndex(bars []candles.Candle, tradeEndMs int64) int {
+	origin := -1
+	for t := 1; t < len(bars); t++ {
+		if bars[t].TimeMs < tradeEndMs {
+			origin = t
+		}
+	}
+	return origin
+}
+
+// extendBarsWithOfficial appends OKX candles after the tape so FORWARD trades have actuals.
+func extendBarsWithOfficial(bars []candles.Candle, barMs int64, nMore int) []candles.Candle {
+	if len(bars) == 0 || nMore <= 0 {
+		return bars
+	}
+	last := bars[len(bars)-1].TimeMs
+	from := last + barMs
+	to := last + int64(nMore)*barMs
+	okx := softOfficialCandles(barMs, from, to)
+	if len(okx) == 0 {
+		return bars
+	}
+	out := append([]candles.Candle{}, bars...)
+	for _, c := range okx {
+		if c.TimeMs > last {
+			out = append(out, c)
+			last = c.TimeMs
+		}
+	}
+	return out
+}
+
 // runPriceStrategyPerTrade picks per-trade exits.
-// mode 1 = oracle (peek actual closes);
-// mode 2 = rolling predicted path: trade one → refresh next pathWindow preds → trade again.
+// mode 1 = oracle (peek actual closes) over the OOS TRADE window;
+// mode 2 = option B: trade only FROM the FORWARD origin onward (after TRADE end),
+//   predict → re-test TP×SL×lev → one trade → refresh (no September OOS scalps).
 func runPriceStrategyPerTrade(
 	args Args,
 	minutes []candles.Candle,
@@ -639,11 +673,6 @@ func runPriceStrategyPerTrade(
 	bars := candles.Aggregate(minutes, barMs)
 	if len(bars) < 3 {
 		return nil, fmt.Errorf("%s: not enough frame candles for strategy", label)
-	}
-	signals := priceDirSignalsDebounced(h1, bars, PriceSignalConfirmBars)
-	oosLo, oosHi := frameBarRange(bars, tradeStartMs, tradeEndMs)
-	if oosLo >= oosHi {
-		return nil, fmt.Errorf("%s: empty OOS bar range", label)
 	}
 
 	maxLev := 1.0
@@ -679,10 +708,45 @@ func runPriceStrategyPerTrade(
 	if len(exitGrid) == 0 {
 		return nil, fmt.Errorf("%s: empty TP/SL grid", label)
 	}
+
 	if oracle {
+		signals := priceDirSignalsDebounced(h1, bars, PriceSignalConfirmBars)
+		oosLo, oosHi := frameBarRange(bars, tradeStartMs, tradeEndMs)
+		if oosLo >= oosHi {
+			return nil, fmt.Errorf("%s: empty OOS bar range", label)
+		}
 		return runOracleGrid(args, bars, models, label, oosLo, oosHi, signals, usable, targets, exitGrid,
 			maxLev, maxRiskPct, errBand, taker, maker, skippedFee)
 	}
+
+	// Option B: start at FORWARD origin (last bar before tradeEnd), not at TRADE start.
+	origin := forwardOriginIndex(bars, tradeEndMs)
+	if origin < 2 {
+		return nil, fmt.Errorf("%s: no FORWARD origin before trade_end", label)
+	}
+	oosLo := origin + 1 // first entry = first candle after origin (e.g. 10-10 00:00)
+	// Only fetch OKX when the tape does not already continue past origin (live FORWARD).
+	if len(bars)-oosLo < pathWindow {
+		need := pathWindow * 4
+		if need < 200 {
+			need = 200
+		}
+		bars = extendBarsWithOfficial(bars, barMs, need)
+	}
+	oosHi := len(bars)
+	if oosLo >= oosHi {
+		logx.Warnf("  %s FORWARD TRADE: no bars after origin %s (need OKX/tape actuals)", label, utc(bars[origin].TimeMs))
+		return map[string]any{
+			"selection_rule": "option B FORWARD: no actuals after origin",
+			"summary":        map[string]any{"pick_mode": "rolling-predicted", "exits_mode": "forward_only"},
+			"total_pnl":      0.0, "closed_trades": uint32(0), "wins": uint32(0), "win_rate": 0.0,
+			"signal_count": 0, "signals_in_oos": 0, "oos_bars": []int{oosLo, oosHi},
+			"skips":  map[string]any{"liquid": 0, "tp_floor": 0, "robust": 0, "flat": 0},
+			"trades": []map[string]any{},
+		}, nil
+	}
+	logx.Infof("  %s FORWARD TRADE (option B): origin=%s → first_entry≥%s · look_ahead=%d · tape+okx bars %d..%d (no trades inside TRADE window before origin)",
+		label, utc(bars[origin].TimeMs), utc(bars[oosLo].TimeMs), pathWindow, oosLo, oosHi)
 
 	return runRollingPredicted(args, bars, models, label, oosLo, oosHi, pathWindow,
 		usable, targets, exitGrid, maxLev, maxRiskPct, errBand, taker, maker)

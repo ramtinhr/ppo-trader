@@ -59,11 +59,10 @@ Pure Go (`internal/pricewalk`). Aggregates 1m candles (M1C1 cache under `scan/.c
 OLS return features per bar size, optionally runs per-trade TP/SL:
 
 - `--price-strategy 1` / `oracle` — peek actual future closes (research ceiling → `nm_price_walk_forward.html`)
-- `--price-strategy 2` / `predicted` — **rolling re-test bot**: at each free origin predict
-  the next under-1% closes (raw OLS), **re-search TP×SL×lev** (default TP/SL `0.1-10/0.1`,
-  lev `1..10`) on that path. Keep best mid>0 that **hits TP**, with **SL ≥ err_band**
-  (no 0.1%×10x noise stops), rank by path_r then lower lev. One trade → refresh+re-test.
-  Combos are never fixed. Realized PnL is still on actuals (no peek).
+- `--price-strategy 2` / `predicted` — **option B FORWARD-only**: trades start at the
+  FORWARD origin (last candle before `trade_end`, e.g. ~10-10), **not** from TRADE start
+  (no September OOS scalps). From there: predict next under-1% closes → re-search TP×SL×lev
+  (`0.1-10`, lev `1..10`, SL≥err_band, mid hits TP) → one trade → refresh on tape/OKX.
   (`nm_price_walk_forward_predicted.html`)
 
 
