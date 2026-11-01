@@ -78,15 +78,60 @@ func TestAdversePathLongIsCheaper(t *testing.T) {
 }
 
 func TestAdverseRobustAllowsClearWinner(t *testing.T) {
-	// Strong predicted rally; 1.5% TP should stay profitable on mid and adverse−1%.
+	// Front-loaded +2.5% path; 1.5% TP should win on mid and survive adverse−1%.
 	e := exits.Exits{StopPct: 2, Targets: [][2]float64{{1.5, 1}}}
-	pred := []float64{101, 102, 103, 104}
+	raw := []float64{100.1, 100.1, 100.2, 100.2} // flat OLS-like
+	pred := shapedPredictedPath(raw, 100, true, 2.5)
+	if len(pred) == 0 || math.Abs(pred[0]-102.5) > 1e-9 {
+		t.Fatalf("expected front-loaded 102.5, got %v", pred)
+	}
 	taker, maker := 0.0005, 0.0002
 	steps := int64(10_000)
 	mid := simulateExitsOnPath(true, 100, e, steps, pred, taker, maker)
 	adv := simulateExitsOnPath(true, 100, e, steps, adversePath(pred, true, 0.01), taker, maker)
 	if mid.PnL <= 0 || adv.PnL < 0 {
-		t.Fatalf("mid=%v adv=%v reason mid=%s adv=%s", mid.PnL, adv.PnL, mid.Reason, adv.Reason)
+		t.Fatalf("mid=%v adv=%v reason mid=%s adv=%s path=%v", mid.PnL, adv.PnL, mid.Reason, adv.Reason, pred)
+	}
+}
+
+func TestFlatOLSPathCannotReachOnePctTP(t *testing.T) {
+	// Explains the old 0-trade bug: flat forecast never hits TP≥1%.
+	e := exits.Exits{StopPct: 2, Targets: [][2]float64{{1.0, 1}}}
+	flat := []float64{100.05, 100.08, 100.02, 100.1}
+	sim := simulateExitsOnPath(true, 100, e, 10_000, flat, 0.0005, 0.0002)
+	if sim.Reason == "tp" {
+		t.Fatalf("flat path should not hit 1%% TP, got %#v", sim)
+	}
+}
+
+func TestLinearRampStillFalseStopsOnAdverse(t *testing.T) {
+	// Slow ramp + uniform −1% shock → bar1 ≈ −1% vs entry → stop≤1% fires.
+	// Kept as a regression lock: we must NOT shape with a near-entry ramp.
+	n := 160
+	entry := 100.0
+	span := 2.020202
+	ramp := make([]float64, n)
+	for i := 1; i <= n; i++ {
+		ramp[i-1] = entry * (1 + (span/100)*(float64(i)/float64(n)))
+	}
+	// 0.5% stop + 1% TP is a real grid combo (2R); ramp+adverse dies on stop.
+	e := exits.Exits{StopPct: 0.5, Targets: [][2]float64{{1, 1}}}
+	adv := simulateExitsOnPath(true, entry, e, 10_000, adversePath(ramp, true, 0.01), 0.0005, 0.0002)
+	if adv.Reason != "stop" {
+		t.Fatalf("expected ramp+adverse to hit stop, got %#v", adv)
+	}
+	shaped := shapedPredictedPath(ramp, entry, true, span*1.001)
+	mid := simulateExitsOnPath(true, entry, e, 10_000, shaped, 0.0005, 0.0002)
+	ok := simulateExitsOnPath(true, entry, e, 10_000, adversePath(shaped, true, 0.01), 0.0005, 0.0002)
+	if mid.PnL <= 0 || ok.PnL < 0 {
+		t.Fatalf("front-loaded should clear: mid=%v (%s) adv=%v (%s)", mid.PnL, mid.Reason, ok.PnL, ok.Reason)
+	}
+}
+
+func TestRawPathFavorableSpanFlat(t *testing.T) {
+	flat := []float64{100.05, 100.08, 100.02, 100.1}
+	if s := rawPathFavorableSpanPct(flat, 100, true); s > 0.2 {
+		t.Fatalf("flat OLS span should be tiny, got %g", s)
 	}
 }
 
@@ -106,3 +151,4 @@ func TestDebounceSignals(t *testing.T) {
 		t.Fatal("expected at least one debounced signal")
 	}
 }
+

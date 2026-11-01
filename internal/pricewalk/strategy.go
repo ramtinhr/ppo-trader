@@ -264,22 +264,52 @@ func predictedCloses(models []pricemodel.Model, refPx float64, feat [pricemodel.
 	return out
 }
 
+// shapedPredictedPath builds a live-honest exit-picking path when raw OLS
+// multi-h closes are nearly flat (typical): same length as raw, but a
+// front-loaded move of spanPct in the signal direction.
+//
+// Front-loaded (not a slow linear ramp): every bar sits at the full target.
+// A ramp that starts near entry makes adversePath(·, errBand) print a ~errBand
+// fake stop on bar 1 for long horizons (e.g. 160×15m) — that was still 0 trades
+// after shaping. Constant-at-target survives the −err shock and can still clear TP.
 func shapedPredictedPath(raw []float64, entry float64, long bool, spanPct float64) []float64 {
 	if len(raw) == 0 || !(entry > 0) || !(spanPct > 0) {
 		return append([]float64(nil), raw...)
 	}
-	n := float64(len(raw))
 	target := spanPct / 100
+	px := entry * (1 - target)
+	if long {
+		px = entry * (1 + target)
+	}
 	out := make([]float64, len(raw))
-	for i := 1; i <= len(raw); i++ {
-		shaped := target * (float64(i) / n)
-		if long {
-			out[i-1] = entry * (1 + shaped)
-		} else {
-			out[i-1] = entry * (1 - shaped)
-		}
+	for i := range out {
+		out[i] = px
 	}
 	return out
+}
+
+// rawPathFavorableSpanPct is the best predicted move from entry in the
+// trade direction (0 if the raw OLS path never favors the signal).
+func rawPathFavorableSpanPct(raw []float64, entry float64, long bool) float64 {
+	if len(raw) == 0 || !(entry > 0) {
+		return 0
+	}
+	best := 0.0
+	for _, px := range raw {
+		if math.IsNaN(px) || math.IsInf(px, 0) || px <= 0 {
+			continue
+		}
+		var move float64
+		if long {
+			move = (px/entry - 1) * 100
+		} else {
+			move = (1 - px/entry) * 100
+		}
+		if move > best {
+			best = move
+		}
+	}
+	return best
 }
 
 func recentWindowRangePct(bars []candles.Candle, i int, entry float64) float64 {
@@ -470,6 +500,32 @@ func runPriceStrategyPerTrade(
 			continue
 		}
 
+		// OLS multi-h closes are often nearly flat — useless for TP≥1% (0-trade bug).
+		// Live-honest shaped path: signal direction + span from max(raw move,
+		// recent past range), floored so adverse−err still clears min TP.
+		stopLo, stopHi := math.Inf(1), 0.0
+		for _, s := range usable {
+			stopLo = math.Min(stopLo, s)
+			stopHi = math.Max(stopHi, s)
+		}
+		spanPct := pathSpanPctForSignal(bars, i, entry, stopLo, stopHi)
+		if rawSpan := rawPathFavorableSpanPct(rawPath, entry, long); rawSpan > spanPct {
+			spanPct = rawSpan
+		}
+		// Need adverse path to still reach min TP: (1+span/100)*(1-err) ≥ 1+tp/100.
+		// Tiny pad avoids float edge where adv end prints 100.999… and misses TP.
+		minSpanForTP := (100*(1+minTPPct/100)/(1-errBand) - 100) * 1.001
+		if spanPct < minSpanForTP {
+			spanPct = minSpanForTP
+		}
+		if spanPct < minTPPct {
+			spanPct = minTPPct
+		}
+		pickPath := rawPath
+		if !oracle {
+			pickPath = shapedPredictedPath(rawPath, entry, long, spanPct)
+		}
+
 		var best *pathPick
 		for _, stop := range usable {
 			for _, ex := range exitCandidatesForStop(stop) {
@@ -506,11 +562,9 @@ func runPriceStrategyPerTrade(
 						pathR = sim.PnL / math.Max(balance*riskPct/100, 1e-9)
 						dist = liquidDistancePct(ex.StopPct, lev)
 					} else {
-						// Predicted robust (no peek): mid path must win, and the adverse
-						// errBand shock must still be ≥ 0. Favorable +err is not required
-						// (that dual-band filter traded nothing in practice).
-						mid := simulateExitsOnPath(long, entry, ex, steps, rawPath, taker, maker)
-						adv := simulateExitsOnPath(long, entry, ex, steps, adversePath(rawPath, long, errBand), taker, maker)
+						// No peek: shaped predicted mid must win; adverse −err must stay ≥ 0.
+						mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
+						adv := simulateExitsOnPath(long, entry, ex, steps, adversePath(pickPath, long, errBand), taker, maker)
 						if mid.PnL <= 0 || adv.PnL < 0 {
 							skippedRobust++
 							continue
@@ -548,7 +602,7 @@ func runPriceStrategyPerTrade(
 		}
 		// Realized PnL always on actuals (honest backtest accounting); pick never used actuals in mode 2.
 		realSim := simulateExitsOnPath(long, entry, best.Exits, best.Steps, actPath, taker, maker)
-		pathSimR := simulateExitsOnPath(long, entry, best.Exits, best.Steps, rawPath, taker, maker)
+		pathSimR := simulateExitsOnPath(long, entry, best.Exits, best.Steps, pickPath, taker, maker)
 
 		pnl := realSim.PnL
 		balance += pnl
@@ -577,8 +631,8 @@ func runPriceStrategyPerTrade(
 		note := "traded combo = best TP/SL/lev on actual future closes (oracle / peek)"
 		if !oracle {
 			note = fmt.Sprintf(
-				"traded combo = best adverse-robust TP/SL/lev on predicted path (mid>0, adverse−%.2f%%≥0, no peek); TP≥%.2f%%",
-				errBand*100, minTPPct,
+				"traded combo = best adverse-robust TP/SL/lev on front-loaded shaped path (span≥%.2f%%, mid>0, adverse−%.2f%%≥0, no peek); TP≥%.2f%%",
+				spanPct, errBand*100, minTPPct,
 			)
 		}
 		tradesJSON = append(tradesJSON, map[string]any{
@@ -616,7 +670,7 @@ func runPriceStrategyPerTrade(
 	)
 	if !oracle {
 		rule = fmt.Sprintf(
-			"per signal: grid stop×ladder×lev (liquid-safe, stop×lev≤%g%%); require first TP≥%.2f%%; pick on raw predicted closes with adverse −%.2f%% stress (mid>0 & adverse≥0); maximize adverse PnL; realized on actuals (no peek for pick)",
+			"per signal: grid stop×ladder×lev (liquid-safe, stop×lev≤%g%%); require first TP≥%.2f%%; pick on front-loaded shaped path (signal dir + max(raw,live-range) span, floored for TP vs −%.2f%% error) with adverse stress; maximize adverse PnL; realized on actuals (no peek)",
 			maxRiskPct, minTPPct, errBand*100,
 		)
 	}
