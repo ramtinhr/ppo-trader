@@ -179,11 +179,11 @@ $('#kpis').innerHTML = [
   ['Trades', String(ST.closed_trades ?? trades.length ?? 0), ''],
   ['Win rate', ST.closed_trades ? `${fmt(ST.win_rate ?? 0,1)}%` : '—', ''],
   ['Signals in OOS', String(ST.signals_in_oos ?? '—'), ''],
-  ['Robust skips', String(skips.robust ?? '—'), ''],
-  ['TP-floor skips', String(skips.tp_floor ?? '—'), ''],
-  ['Trading horizon', String(M.price_horizon ?? sum.horizon ?? '—'), ''],
+  ['Flat skips', String(skips.flat ?? '—'), ''],
+  ['No-combo skips', String(skips.robust ?? '—'), ''],
+  ['Look-ahead', String(sum.path_window ?? M.path_under_1pct ?? '—'), ''],
   ['Path under 1%', String(M.path_under_1pct ?? (M.path_example && M.path_example.path_under_1pct) ?? '—'), ''],
-  ['Forecast steps', String(S.length), ''],
+  ['TRADE window', `${M.trade_start || '?'} → ${M.trade_end || '?'}`, ''],
   ['Fit samples', String(M.fit_pairs ?? 0), ''],
 ].map(([l,v,c]) => `<div class="kpi"><div class="l">${l}</div><div class="v ${c}">${v}</div></div>`).join('');
 
@@ -200,7 +200,7 @@ $('#eq').textContent = [
 ].filter(Boolean).join(' · ');
 
 if (predictedMode) {
-  $('#trade-note').innerHTML = `Predicted-robust (option 1): full <b>TP×SL×lev</b> grid. Trades only when mid&nbsp;&gt;&nbsp;0 <b>and</b> adverse −err&nbsp;≥&nbsp;0. Forecast candles (${S.length}) are not trades.`;
+  $('#trade-note').innerHTML = `Rolling OOS month: <b>predict@entry</b> (~under-1% path) → pick best <b>TP×SL×lev</b> (must win on that path, no liquid) → <b>one trade</b> → after exit <b>re-predict + re-pick</b> until <code>${M.trade_end || 'trade_end'}</code>. The FORWARD table below is a <b>demo from the last tape candle</b> — it is <b>not</b> the trade origin. Chart forecast steps ≠ trades.`;
 } else {
   $('#trade-note').innerHTML = `Oracle mode: each direction signal picks the <b>best TP/SL/lev</b> on that bar’s <b>actual</b> future path (peek-ahead). Skip if no profitable combo. Forecast candles (${S.length}) are not trades.`;
 }
@@ -214,6 +214,7 @@ const tb = $('#trades tbody');
 th.innerHTML = `<tr>
   <th>#</th>
   <th>Side</th>
+  <th>Predict from</th>
   <th>Entry time</th>
   <th>Entry</th>
   <th>TP / SL used</th>
@@ -227,6 +228,7 @@ th.innerHTML = `<tr>
 tb.innerHTML = trades.map((t, i) => `<tr>
   <td class="num">${i+1}</td>
   <td>${t.side || ''}</td>
+  <td class="num">${t.predict_at || t.entry_at || ''}</td>
   <td class="num">${t.entry_at || ''}</td>
   <td class="num">${fmt(t.entry_price, 2)}</td>
   <td>${t.exits?.label || ''}</td>
@@ -256,8 +258,8 @@ const PE = M.path_example;
 if (PE && PE.steps && PE.steps.length) {
   $('#path-card').style.display = '';
   const under = PE.path_under_1pct ?? M.path_under_1pct;
-  $('#path-title').textContent = `FORWARD DEMO (post TRADE) ${PE.origin || '?'} (close ${fmt(PE.origin_close, 2)}) · under-1% = ${under ?? '—'} candles`;
-  $('#path-note').textContent = `Demo only. Predicted mode trades the OOS TRADE month ${M.trade_start || '?'} → ${M.trade_end || '?'} (no overlap with TRAIN): raw OLS ~under-1% look-ahead, sit out if flat, best TP/SL/lev (win on path, no liquid).`;
+  $('#path-title').textContent = `⚠ FORWARD DEMO ONLY — not a trade · origin ${PE.origin || '?'} (close ${fmt(PE.origin_close, 2)}) · under-1% = ${under ?? '—'} candles`;
+  $('#path-note').textContent = `Ignore this block for trade dates. Real trades predict from each entry inside TRADE ${M.trade_start || '?'} → ${M.trade_end || '?'}: predict → best TP/SL/lev → one trade → refresh until month ends. This table is a post-tape demo path from the last candle only.`;
   $('#path-ex thead').innerHTML = `<tr><th>h</th><th>Time</th><th>Predicted</th><th>Actual</th><th>Source</th><th>Err%</th><th>In under-1% path</th></tr>`;
   $('#path-ex tbody').innerHTML = PE.steps.map((s) => {
     const spot = s.spot == null ? 'n/a' : fmt(s.spot, 2);

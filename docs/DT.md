@@ -59,21 +59,22 @@ Pure Go (`internal/pricewalk`). Aggregates 1m candles (M1C1 cache under `scan/.c
 OLS return features per bar size, optionally runs per-trade TP/SL:
 
 - `--price-strategy 1` / `oracle` — peek actual future closes (research ceiling → `nm_price_walk_forward.html`)
-- `--price-strategy 2` / `predicted` — **master loop**: TRAIN before TRADE (strict OOS) →
-  predict under-1% path (~160×15m) → best TP×SL×lev (mid hits TP, PnL&gt;0, SL≥err_band,
-  never liquid) → one trade → refresh for **one OOS month**. FORWARD chart is demo only.
-  (`nm_price_walk_forward_predicted.html`)
+- `--price-strategy 2` / `predicted` — **master loop** for one OOS month:
+  at each free bar **predict@entry** (~160 under 1%) → best TP×SL×lev (wins on path,
+  SL≥err_band, no liquid) → **one trade** → after exit **re-predict + re-pick** until
+  `trade_end`. The FORWARD table from the last tape candle is **demo only** — not a trade
+  origin. (`nm_price_walk_forward_predicted.html`)
 
-### Master loop: TRAIN year → predict ~160 → TRADE 1 month (OOS)
+### Master loop: TRAIN → predict@entry → trade → refresh (1 OOS month)
 
 | Phase | Rule |
 |-------|------|
-| **TRAIN** | All dates **before** `trade_start` (fit OLS only; never trade here) |
-| **Predict** | Multi-h OLS look_ahead ≈ `path_under_1pct` (~160×15m under 1% err) |
-| **TRADE** | Exactly **one OOS month** after TRAIN — no overlap with train dates |
+| **TRAIN** | All dates **before** `trade_start` (fit only) |
+| **Each decision** | Predict from **that bar** (~`path_under_1pct` candles) → pick best combo → trade once |
+| **After exit** | New origin → predict again → new combo → trade again … until `trade_end` |
+| **FORWARD demo** | Path from last tape candle (e.g. 2026-10-10) — **ignore for trade dates** |
 
-Defaults: `--reserve-trade-days 30 --trade-days 30`. If the scan is shorter than
-train+trade, TRAIN shrinks so TRADE month still fits.
+Defaults: `--reserve-trade-days 30 --trade-days 30`. Short scan → shrink TRAIN, keep TRADE.
 
 ```bash
 # Use a scan you already have (example)

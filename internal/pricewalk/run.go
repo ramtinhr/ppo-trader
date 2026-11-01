@@ -456,7 +456,7 @@ func runOnePriceBar(
 	if horizons.PathExample != nil {
 		if steps, ok := horizons.PathExample["steps"].([]map[string]any); ok && len(steps) > 0 {
 			fwdN := len(steps)
-			logx.Infof("  %s FORWARD DEMO (post TRADE) from last candle %v (close %v) → %d steps (under-1%%=%d) · mode2 trades the TRADE year %s→%s, not this demo",
+			logx.Infof("  %s FORWARD DEMO only from last candle %v (close %v) → %d steps (under-1%%=%d) — NOT a trade origin. Mode2 trades OOS month %s→%s: predict@each entry → combo → trade → refresh",
 				label, horizons.PathExample["origin"], horizons.PathExample["origin_close"],
 				fwdN, horizons.PathUnder1Pct, utc(tradeStart), utc(tradeEnd))
 			show := func(s map[string]any) {
@@ -535,8 +535,8 @@ func runOnePriceBar(
 		)
 	case 2:
 		signalRule = fmt.Sprintf(
-			"live OOS month: TRAIN ends at trade_start; TRADE is OOS only; each free bar raw OLS predict look_ahead≈%d (under-1%%), peak≥min + h1 agrees, best TP×SL×lev (mid hits TP, SL≥err_band, no liquid, lev≤%.0f); sit out flat; FORWARD chart is demo only",
-			horizons.PathUnder1Pct, PathLiveMaxLev,
+			"OOS month %s→%s: each free bar predict@entry look_ahead≈%d → best TP×SL×lev (mid hits TP, SL≥err_band, no liquid) → one trade → refresh until month ends; FORWARD path_example is DEMO only (not trade origin)",
+			utc(tradeStart), utc(tradeEnd), horizons.PathUnder1Pct,
 		)
 	}
 

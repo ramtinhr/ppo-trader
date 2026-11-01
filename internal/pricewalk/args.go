@@ -21,14 +21,15 @@ const (
 	StepBTC                  = 0.0001
 	ReplayBalance            = 1e9
 
-	// Live predicted bot (mode 2) — master loop:
-	//  TRAIN before TRADE (strict OOS) → predict under-1% path (~160×15m) →
-	//  re-test TP×SL×lev on that path → one trade → refresh for TRADE month.
-	//  - sit out if peak cannot clear fees (PathMinPeakPct floor)
-	//  - SL ≥ err_band; mid path must hit TP with PnL>0; never liquidatable
+	// Live predicted bot (mode 2) — master loop for ONE OOS month:
+	//  at each free bar: predict under-1% path (~160×15m) from THAT bar →
+	//  pick best TP×SL×lev (wins on path, SL≥err_band, no liquid) →
+	//  take ONE trade → after exit, new origin, repeat until trade_end.
+	//  FORWARD chart from last tape candle is DEMO ONLY — not a trade origin.
+	//  - sit out only when peak cannot clear fees
 	//  - no invented / h1-extrapolated / span-floor paths
 	PathTakeFrac      = 0.70
-	PathMinPeakPct    = 0.20 // skip flat forecasts (fee cushion too)
+	PathMinPeakPct    = 0.10 // fee-area floor; don't starve the month loop
 	PathMinStopPct    = 0.25
 	PathLiveMaxLev    = 10.0 // best lev from grid; still blocked by risk% + no-liquid
 	PathWinRateTarget = 0.80

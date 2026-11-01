@@ -973,7 +973,7 @@ func runRollingPredicted(
 			continue
 		}
 
-		// Side + peak from raw multi-h path only (honest forecast).
+		// Side + peak from raw multi-h path predicted FROM this bar (entry origin).
 		long, peak := pathDirection(pickPath, entry)
 		pathSrc := "raw_ols"
 		if peak+1e-12 < minPeak {
@@ -981,13 +981,8 @@ func runRollingPredicted(
 			i++
 			continue
 		}
-		// Require h=1 sign to agree with path side (weak models otherwise flip-flop).
-		r1 := models[1].PredictReturn(feat)
-		if (long && r1 < 0) || (!long && r1 > 0) {
-			skippedDisagree++
-			i++
-			continue
-		}
+		predOriginMs := bars[i-1].TimeMs
+		predOriginPx := refPx
 
 		// Re-test grid on raw path. Prefer TP near PathTakeFrac of peak.
 		minStop := errBand * 100
@@ -1110,11 +1105,13 @@ func runRollingPredicted(
 			})
 		}
 		note := fmt.Sprintf(
-			"rolling: path=%s peak=%.3f%% · re-tested grid on %d preds; best mid=+%.2f; refresh+re-test; in_band=%v max_dev=%.3f%%",
-			pathSrc, peak, len(pickPath), best.PathPnL, inBand, bandDev*100,
+			"predict@%s → peak=%.3f%% over %d bars → best %s mid=+%.2f → trade → refresh; in_band=%v max_dev=%.3f%%",
+			utc(predOriginMs), peak, len(pickPath), best.Exits.Label(), best.PathPnL, inBand, bandDev*100,
 		)
 		tradesJSON = append(tradesJSON, map[string]any{
-			"side": side, "entry_at": utc(bars[i].TimeMs), "entry_bar": i,
+			"side": side,
+			"predict_at": utc(predOriginMs), "predict_close": round2(predOriginPx),
+			"entry_at": utc(bars[i].TimeMs), "entry_bar": i,
 			"entry_price": round2(entry), "exits": exitsToJSON(best.Exits),
 			"stop_pct": best.Exits.StopPct, "risk_pct": best.RiskPct,
 			"leverage": round2(best.Lev*100) / 100,
@@ -1136,7 +1133,8 @@ func runRollingPredicted(
 			"fills":        fills,
 		})
 
-		// After exit: new origin → new predictions → re-test grid again.
+		// After exit: next free bar is the new origin → predict again → new combo → trade again
+		// until the OOS TRADE month ends.
 		i = i + exitH
 	}
 
@@ -1153,8 +1151,8 @@ func runRollingPredicted(
 	}
 
 	rule := fmt.Sprintf(
-		"OOS TRADE month: raw OLS look_ahead; trade iff peak≥%.2f%% and h1 agrees; best TP×SL×lev (SL≥err_band, TP≤peak, mid hits TP PnL>0, no liquid even under −err); rank path_r then lev≤%.0f; one trade then refresh",
-		minPeak, liveMaxLev,
+		"OOS month loop: at each free bar predict@entry (~%d under-1%%) → best TP×SL×lev ≤%.0fx (peak≥%.2f%%, SL≥err_band, mid hits TP PnL>0, no liquid) → ONE trade → after exit re-predict/re-pick until trade_end; FORWARD table is demo only",
+		pathWindow, liveMaxLev, minPeak,
 	)
 	return map[string]any{
 		"selection_rule": rule,

@@ -53,6 +53,71 @@ func TestExitGridIncludesAsymmetric(t *testing.T) {
 	}
 }
 
+func TestRollingMonthPredictTradeRefresh(t *testing.T) {
+	// Strong trend through OOS: must take several trades, each with predict_at ≤ entry_at,
+	// and continue after exit (not stop at one trade).
+	const barMs = int64(15 * 60_000)
+	start := int64(1_700_000_000_000)
+	start = start - (start % barMs)
+	var minutes []candles.Candle
+	px := 100_000.0
+	for i := 0; i < 320; i++ {
+		c := px * 1.004 // +0.4%/bar — clear peak every origin
+		o := px
+		h, l := c, o
+		if c < o {
+			h, l = o, c
+		}
+		for m := 0; m < 15; m++ {
+			minutes = append(minutes, candles.Candle{
+				TimeMs: start + int64(i)*barMs + int64(m)*60_000,
+				Open: o, High: h * 1.0001, Low: l * 0.9999, Close: c,
+			})
+		}
+		px = c
+	}
+	models := []pricemodel.Model{pricemodel.ColdStart()}
+	for h := 1; h <= 80; h++ {
+		models = append(models, pricemodel.Model{Alphas: [4]float64{4.0, 0, 0, 0}})
+	}
+	args := DefaultArgs()
+	args.PriceStrategyMode = 2
+	args.MaxRelErr = 0.01
+	args.PriceStops = []float64{1.0, 1.5}
+	args.PriceTargets = []float64{0.2, 0.5, 1.0}
+	args.PriceLeverage = []uint32{1, 2}
+	args.PriceRisk = []float64{5}
+	tradeStart := start + 40*barMs
+	tradeEnd := start + 280*barMs
+	out, err := runPriceStrategyPerTrade(args, minutes, models, "15m", barMs,
+		tradeStart, tradeEnd, 0.0005, 0.0002, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, _ := out["closed_trades"].(uint32)
+	if n < 3 {
+		t.Fatalf("month loop must refresh after each exit, got %d trades skips=%v", n, out["skips"])
+	}
+	trades, _ := out["trades"].([]map[string]any)
+	prevEnd := 0
+	for _, tr := range trades {
+		predAt, _ := tr["predict_at"].(string)
+		entryAt, _ := tr["entry_at"].(string)
+		if predAt == "" {
+			t.Fatalf("missing predict_at on trade %+v", tr)
+		}
+		if entryAt == "" {
+			t.Fatalf("missing entry_at")
+		}
+		eb, _ := tr["entry_bar"].(int)
+		eh, _ := tr["exit_h"].(int)
+		if eb < prevEnd {
+			t.Fatalf("overlap entry %d < prevEnd %d", eb, prevEnd)
+		}
+		prevEnd = eb + eh
+	}
+}
+
 func TestRollingRetestsGridEachTrade(t *testing.T) {
 	const barMs = int64(15 * 60_000)
 	start := int64(1_700_000_000_000)
