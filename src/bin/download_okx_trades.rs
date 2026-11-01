@@ -4,13 +4,18 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use chrono::{Datelike, NaiveDate, Utc};
-use dynamic_trader::okx_history::{archive_days, fetch_day};
+use dynamic_trader::okx_history::{archive_days, fetch_day, proxy_url, set_proxy};
 
 const USAGE: &str = "\
-Usage: cargo run --release --bin download_okx_trades -- [START END] [--dir <dir>]
+Usage: cargo run --release --bin download_okx_trades -- [START END] [--dir <dir>] [--proxy <url>]
 
 START and END are UTC days (YYYY-MM-DD), END exclusive. Default: the previous calendar month.
-Archives go to data/okx/BTC-USDT-SWAP/archives by default.";
+Archives go to data/okx/BTC-USDT-SWAP/archives by default.
+
+When OKX is blocked on your network, route traffic through a local SOCKS5 (or HTTP) proxy:
+  --proxy socks5://127.0.0.1:1080
+  # or: export OKX_PROXY=socks5://127.0.0.1:1080
+  # or: export ALL_PROXY=socks5://127.0.0.1:1080";
 
 fn main() -> Result<()> {
     let mut days = Vec::new();
@@ -23,6 +28,10 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             "--dir" => dir = args.next().context("--dir needs a value")?.into(),
+            "--proxy" => {
+                let url = args.next().context("--proxy needs a URL (e.g. socks5://127.0.0.1:1080)")?;
+                set_proxy(url);
+            }
             _ => days.push(
                 arg.parse::<NaiveDate>()
                     .with_context(|| format!("{arg} is not YYYY-MM-DD\n\n{USAGE}"))?,
@@ -38,6 +47,14 @@ fn main() -> Result<()> {
         [start, end] if start < end => (start, end),
         _ => bail!("{USAGE}"),
     };
+
+    match proxy_url() {
+        Some(url) => println!("OKX traffic via proxy {url}"),
+        None => println!(
+            "No proxy set. If downloads fail (timeout/403), re-run with \
+             --proxy socks5://127.0.0.1:1080 (or export OKX_PROXY)"
+        ),
+    }
 
     let mut previous = None;
     for day in archive_days(start, end) {

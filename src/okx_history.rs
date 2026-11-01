@@ -8,19 +8,49 @@
 //! the fact. They are listed in [`VOIDED`] and skipped everywhere, so the candles match OKX's
 //! (and TradingView's).
 //!
-//! One archive is known to be incomplete and is accepted anyway, see [`KNOWN_GAPS`]: 2026-01-14
-//! lacks the trades behind two ID gaps in the minute from 2026-01-13 22:10 UTC. Its prices are
-//! complete (that minute's high and low equal OKX's 1m candle); only its volume is short.
+//! A few archives are known to be incomplete and are accepted anyway, see [`KNOWN_INCOMPLETE`]:
+//! - 2024-12-01: two ID gaps around 2024-12-01 02:10 UTC (1,317 + 13,870 missing IDs); volume
+//!   short 122,843.7 contracts vs OKX's 1D candle.
+//! - 2026-01-14: two ID gaps in the minute from 2026-01-13 22:10 UTC; volume short 44,527.47.
+//!   That minute's high/low still match OKX's 1m candle, so prices are complete.
 
 use std::{
     fs::{self, File},
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
+use ureq::Proxy;
+
+/// Optional override for [`http`], set once from the download CLI (`--proxy`).
+static PROXY_OVERRIDE: OnceLock<String> = OnceLock::new();
+
+/// Force every OKX HTTP call through this proxy URL (e.g. `socks5://127.0.0.1:1080`).
+/// Call before the first request. Ignored if already set.
+pub fn set_proxy(url: impl Into<String>) {
+    let url = url.into();
+    let _ = PROXY_OVERRIDE.set(url);
+}
+
+/// Proxy URL from CLI override or env (`OKX_PROXY`, `ALL_PROXY`, `all_proxy`, `SOCKS5_PROXY`).
+pub fn proxy_url() -> Option<String> {
+    if let Some(url) = PROXY_OVERRIDE.get() {
+        return Some(url.clone());
+    }
+    for key in ["OKX_PROXY", "ALL_PROXY", "all_proxy", "SOCKS5_PROXY"] {
+        if let Ok(v) = std::env::var(key) {
+            let v = v.trim().to_string();
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
 
 pub const INSTRUMENT: &str = "BTC-USDT-SWAP";
 /// BTC per contract.
@@ -37,29 +67,46 @@ fn voided(trade_id: u64) -> bool {
     VOIDED.binary_search(&trade_id).is_ok()
 }
 
-/// Trade ID jumps (last ID before, first ID after) that OKX's archive for 2026-01-14 has and
-/// that can no longer be filled: 2105958516 -> 2105979022 (2026-01-13 22:10:40 -> 22:10:42 UTC)
-/// and 2106031988 -> 2106045535 (22:10:48 -> 22:10:53 UTC). The missing trades are exactly the
-/// [`KNOWN_GAP_SHORTFALL`] contracts by which the archive falls short of OKX's 1D candle
-/// (10,395,636.17 against 10,440,163.64), all in the 1m candle opening at 1768342200000
-/// (589,963.66 against 634,491.13). That minute's high (96777) and low (94655.1) match OKX's,
-/// so prices are complete. OKX's `history-trades` no longer returns trades that old.
-const KNOWN_GAPS: &[(u64, u64)] = &[
-    (2_105_958_516, 2_105_979_022),
-    (2_106_031_988, 2_106_045_535),
-];
-/// Archive day of [`KNOWN_GAPS`].
-const KNOWN_GAP_DAY: (i32, u32, u32) = (2026, 1, 14);
-/// Contracts, in hundredths, missing from archive [`KNOWN_GAP_DAY`]: 44,527.47.
-const KNOWN_GAP_SHORTFALL: u64 = 4_452_747;
-
-fn known_gap(day: NaiveDate, last_id: u64, next_id: u64) -> bool {
-    known_gap_day(day) && KNOWN_GAPS.contains(&(last_id, next_id))
+/// One OKX archive day that is incomplete in the published zip but still usable for prices.
+struct KnownIncomplete {
+    /// Archive day `(year, month, day)`.
+    day: (i32, u32, u32),
+    /// Allowed trade-ID jumps `(last_id_before, first_id_after)`.
+    gaps: &'static [(u64, u64)],
+    /// Contracts missing vs OKX's official 1D candle, in hundredths.
+    shortfall_hundredths: u64,
 }
 
-fn known_gap_day(day: NaiveDate) -> bool {
-    let (y, m, d) = KNOWN_GAP_DAY;
-    NaiveDate::from_ymd_opt(y, m, d) == Some(day)
+/// Published archives that fail a strict ID/volume check but are accepted with a fixed shortfall.
+const KNOWN_INCOMPLETE: &[KnownIncomplete] = &[
+    // 2024-12-01 02:10 UTC: two bursts of missing IDs; archive 7,944,393.30 vs candle 8,067,237.
+    KnownIncomplete {
+        day: (2024, 12, 1),
+        gaps: &[(1_159_375_039, 1_159_376_357), (1_159_405_059, 1_159_418_930)],
+        shortfall_hundredths: 12_284_370, // 122,843.70 contracts
+    },
+    // 2026-01-14: gaps 2105958516→2105979022 and 2106031988→2106045535 (2026-01-13 22:10 UTC).
+    // Missing volume 44,527.47; that minute's high/low still match OKX's 1m candle.
+    KnownIncomplete {
+        day: (2026, 1, 14),
+        gaps: &[(2_105_958_516, 2_105_979_022), (2_106_031_988, 2_106_045_535)],
+        shortfall_hundredths: 4_452_747,
+    },
+];
+
+fn known_incomplete(day: NaiveDate) -> Option<&'static KnownIncomplete> {
+    KNOWN_INCOMPLETE.iter().find(|k| {
+        let (y, m, d) = k.day;
+        NaiveDate::from_ymd_opt(y, m, d) == Some(day)
+    })
+}
+
+fn known_gap(day: NaiveDate, last_id: u64, next_id: u64) -> bool {
+    known_incomplete(day).is_some_and(|k| k.gaps.contains(&(last_id, next_id)))
+}
+
+fn known_gap_shortfall(day: NaiveDate) -> u64 {
+    known_incomplete(day).map(|k| k.shortfall_hundredths).unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -140,12 +187,18 @@ pub fn fetch_day(dir: &Path, day: NaiveDate, previous: Option<&DaySummary>) -> R
 }
 
 /// HTTP client whose requests fail instead of hanging forever when OKX stalls.
+/// Routes through [`proxy_url`] when set (SOCKS5 / HTTP CONNECT).
 fn http() -> ureq::Agent {
-    ureq::Agent::config_builder()
+    let mut builder = ureq::Agent::config_builder()
         .timeout_connect(Some(std::time::Duration::from_secs(30)))
-        .timeout_global(Some(std::time::Duration::from_secs(600)))
-        .build()
-        .new_agent()
+        .timeout_global(Some(std::time::Duration::from_secs(600)));
+    if let Some(url) = proxy_url() {
+        let proxy = Proxy::new(&url).unwrap_or_else(|e| {
+            panic!("invalid OKX proxy URL {url:?}: {e:#} (example: socks5://127.0.0.1:1080)")
+        });
+        builder = builder.proxy(Some(proxy));
+    }
+    builder.build().new_agent()
 }
 
 fn download(day: NaiveDate, path: &Path) -> Result<()> {
@@ -227,11 +280,7 @@ fn verify(day: NaiveDate, path: &Path) -> Result<DaySummary> {
     })?;
     let summary = summary.with_context(|| format!("{day}: archive has no trades"))?;
     let official = official_volume_hundredths(day)?;
-    let shortfall = if known_gap_day(day) {
-        KNOWN_GAP_SHORTFALL
-    } else {
-        0
-    };
+    let shortfall = known_gap_shortfall(day);
     ensure!(
         summary.volume_hundredths + shortfall == official,
         "{day}: archive has {} contracts (+ {} known missing) but OKX's daily candle says {}",
@@ -539,6 +588,11 @@ mod tests {
             2_105_958_516,
             2_105_979_022
         ));
+        let d2024 = NaiveDate::from_ymd_opt(2024, 12, 1).unwrap();
+        assert!(known_gap(d2024, 1_159_375_039, 1_159_376_357));
+        assert!(known_gap(d2024, 1_159_405_059, 1_159_418_930));
+        assert_eq!(known_gap_shortfall(d2024), 12_284_370);
+        assert!(!known_gap(d2024.succ_opt().unwrap(), 1_159_375_039, 1_159_376_357));
     }
 
     #[test]

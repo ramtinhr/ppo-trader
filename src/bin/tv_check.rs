@@ -25,7 +25,7 @@ use dynamic_trader::{
     okx_history::{self, Candle},
     pine_rsi::{PineRsiParams, PineRsiSignals},
     rsi::Rsi,
-    strategy::Signal,
+    signals::Signal,
     tradingview::{ChartSession, PineScript, TvBar, auth_token},
 };
 use serde_json::{Value, json};

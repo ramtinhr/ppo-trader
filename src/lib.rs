@@ -1,6 +1,8 @@
+#[cfg(feature = "verify")]
 pub mod backtest;
 pub mod config;
 pub mod exits;
+pub mod fills;
 pub mod filters;
 pub mod grid;
 pub mod okx_history;
@@ -8,9 +10,11 @@ pub mod pine_rsi;
 pub mod rsi;
 pub mod rsi_cross;
 pub mod scan;
+pub mod signals;
+#[cfg(feature = "verify")]
 pub mod strategy;
 pub mod tape;
 pub mod tpsl_grid;
 pub mod tradingview;
-pub mod price_model;
+pub mod verify_cmp;
 pub mod window_score;

@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Fast price-strategy iteration loop (avoid --release LTO + avoid re-reading archives).
+# Fast price-strategy iteration loop (Go price-walk; 1m candle cache under scan/.cache/).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 SCAN="${SCAN:-data/windowscan/2025-10-01_2026-10-10_24h_staged}"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 
-echo "==> relfast build (no LTO)"
-cargo build --profile relfast --bin window_nm_walk_forward
+if [[ -x "$ROOT/dt" ]]; then
+  DT=( "$ROOT/dt" )
+else
+  DT=( go run ./cmd/dt )
+fi
 
-echo "==> run --path price (1m candle cache under $SCAN/.cache/)"
-exec "$CARGO_TARGET_DIR/relfast/window_nm_walk_forward" \
-  --path price \
+echo "==> price-walk (Go) via ${DT[*]}"
+exec "${DT[@]}" price-walk \
   --price-bars 15m \
   --price-strategy 1 \
   --scan "$SCAN" \

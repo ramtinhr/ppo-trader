@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Dynamic Trader Architecture Guide</title>
+<style>
+@font-face {
+  font-family: "DocSerif";
+  src: url("file:///usr/share/fonts/truetype/croscore/Tinos-Regular.ttf");
+  font-weight: 400;
+}
+@font-face {
+  font-family: "DocSerif";
+  src: url("file:///usr/share/fonts/truetype/croscore/Tinos-Bold.ttf");
+  font-weight: 700;
+}
+@font-face {
+  font-family: "DocSans";
+  src: url("file:///usr/share/fonts/truetype/croscore/Arimo-Regular.ttf");
+  font-weight: 400;
+}
+@font-face {
+  font-family: "DocSans";
+  src: url("file:///usr/share/fonts/truetype/croscore/Arimo-Bold.ttf");
+  font-weight: 700;
+}
+@font-face {
+  font-family: "DocMono";
+  src: url("file:///usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf");
+  font-weight: 400;
+}
+@font-face {
+  font-family: "DocMono";
+  src: url("file:///usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Bold.ttf");
+  font-weight: 700;
+}
+
+:root {
+  --ink: #111827;
+  --muted: #4b5563;
+  --line: #e5e7eb;
+  --soft: #f3f4f6;
+  --teal: #0f766e;
+  --teal-bg: #ecfdf5;
+  --amber: #92400e;
+  --amber-bg: #fffbeb;
+}
+
+@page {
+  size: A4;
+  margin: 16mm 14mm 18mm 14mm;
+  @bottom-center {
+    content: "Dynamic Trader Architecture  ·  " counter(page) " / " counter(pages);
+    font-family: DocSans, sans-serif;
+    font-size: 8pt;
+    color: #6b7280;
+  }
+}
+
+* { box-sizing: border-box; }
+html { font-size: 9.4pt; }
+body {
+  margin: 0;
+  color: var(--ink);
+  font-family: DocSans, Helvetica, Arial, sans-serif;
+  line-height: 1.42;
+  background: white;
+}
+
+/* Cover */
+.cover {
+  page-break-after: always;
+  min-height: 240mm;
+  padding: 0;
+  margin: -16mm -14mm 0;
+  width: calc(100% + 28mm);
+}
+.cover-inner {
+  background: #0b3d3d;
+  color: #ecfdf5;
+  padding: 22mm 16mm 16mm;
+}
+.cover-inner .kicker { color: #5eead4; }
+.cover-inner h1 { color: white; }
+.cover-inner .lede { color: #99f6e4; }
+.cover-body { padding: 10mm 16mm 0; }
+.cover .cover-meta th { background: #134e4a; color: #99f6e4; border-color: #115e59; }
+.cover .cover-meta td { background: white; color: #111827; border-color: #d1d5db; }
+.cover .cover-meta th, .cover .cover-meta td { padding: 6px 8px; }
+.cover h2 { color: #0f766e; }
+
+.cover .kicker {
+  color: var(--teal);
+  font-weight: 700;
+  font-size: 9pt;
+  text-transform: uppercase;
+  margin: 0 0 14px;
+}
+.cover h1 {
+  font-family: DocSerif, Georgia, serif;
+  font-size: 34pt;
+  line-height: 1.1;
+  margin: 0 0 16px;
+  font-weight: 700;
+}
+.cover .lede {
+  font-size: 12pt;
+  color: var(--muted);
+  max-width: 34em;
+  margin: 0 0 28px;
+  line-height: 1.45;
+}
+.cover-meta {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 24px;
+}
+.cover-meta th, .cover-meta td {
+  text-align: left;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  vertical-align: top;
+}
+.cover-meta th {
+  width: 28%;
+  background: var(--soft);
+  font-size: 8.5pt;
+  color: var(--muted);
+  text-transform: uppercase;
+  font-weight: 700;
+}
+.cover-meta td { font-size: 10pt; }
+
+h1.sec {
+  font-family: DocSerif, Georgia, serif;
+  font-size: 15pt;
+  margin: 16px 0 8px;
+  padding-bottom: 6px;
+  border-bottom: 2px solid var(--ink);
+  page-break-after: avoid;
+}
+h2 {
+  font-family: DocSerif, Georgia, serif;
+  font-size: 13pt;
+  margin: 18px 0 8px;
+  color: var(--ink);
+  page-break-after: avoid;
+}
+h3 {
+  font-family: DocSans, sans-serif;
+  font-size: 10.5pt;
+  margin: 14px 0 6px;
+  color: var(--teal);
+  page-break-after: avoid;
+}
+p { margin: 0 0 8px; }
+ul, ol { margin: 0 0 10px; padding-left: 1.2em; }
+li { margin: 0 0 4px; }
+
+code {
+  font-family: DocMono, monospace;
+  font-size: 8.5pt;
+  background: var(--soft);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+pre {
+  font-family: DocMono, monospace;
+  font-size: 7.6pt;
+  line-height: 1.4;
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--teal);
+  padding: 10px 12px;
+  margin: 0 0 12px;
+  white-space: pre-wrap;
+  page-break-inside: avoid;
+}
+pre code { background: none; padding: 0; font-size: inherit; }
+
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 14px;
+  font-size: 8.7pt;
+  page-break-inside: auto;
+}
+table.data th, table.data td {
+  border: 1px solid var(--line);
+  padding: 5px 7px;
+  vertical-align: top;
+  text-align: left;
+}
+table.data th {
+  background: #111827;
+  color: white;
+  font-size: 7.5pt;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  font-weight: 700;
+}
+table.data tr:nth-child(even) td { background: #f9fafb; }
+table.data td.path {
+  font-family: DocMono, monospace;
+  font-size: 7.8pt;
+  white-space: nowrap;
+  width: 1%;
+}
+table.data td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  width: 48px;
+  white-space: nowrap;
+}
+
+.two {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 8px 0;
+  margin: 0 0 12px;
+}
+.two td {
+  width: 50%;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 10px 12px;
+  vertical-align: top;
+}
+.two h4 {
+  margin: 0 0 4px;
+  font-family: DocSerif, Georgia, serif;
+  font-size: 11pt;
+}
+.two p { margin: 0; color: var(--muted); font-size: 9pt; }
+
+.callout {
+  border: 1px solid #99f6e4;
+  background: var(--teal-bg);
+  border-left: 4px solid var(--teal);
+  padding: 8px 10px;
+  margin: 0 0 12px;
+  page-break-inside: avoid;
+  font-size: 9.2pt;
+}
+.callout.warn {
+  border-color: #fcd34d;
+  background: var(--amber-bg);
+  border-left-color: var(--amber);
+}
+.pipeline {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 12px;
+  page-break-inside: avoid;
+}
+.pipeline td {
+  background: var(--teal-bg);
+  color: var(--teal);
+  border: 1px solid #99f6e4;
+  text-align: center;
+  font-weight: 700;
+  font-size: 8pt;
+  padding: 7px 4px;
+}
+.pipeline td.arr {
+  background: white;
+  border: none;
+  color: var(--muted);
+  width: 18px;
+  font-weight: 400;
+}
+.toc { margin: 0 0 8px; padding-left: 1.3em; }
+.toc li { margin: 0 0 5px; }
+.section { page-break-before: auto; margin-top: 10px; }
+
+.keep { page-break-inside: avoid; }
+</style>
+</head>
+<body>
+
+<!-- COVER -->
+<section class="cover">
+  <div class="cover-inner">
+  <p class="kicker">Project documentation</p>
+  <h1>Dynamic Trader<br/>Architecture Guide</h1>
+  <p class="lede">
+    Complete map of the hybrid stack for perpetual-futures research on OKX BTC-USDT-SWAP.
+    Rust is the Nautilus-matching engine. Go (<code>dt</code>) is the product layer for ranking,
+    score and price walk-forward, browse UI, and reports. Written for fullstack developers who did not
+    author the Rust.
+  </p>
+  </div>
+  <div class="cover-body">
+  <table class="cover-meta">
+    <tr><th>Market</th><td>OKX BTC-USDT-SWAP (linear, USDT-settled)</td></tr>
+    <tr><th>Engine</th><td>Rust 2024 edition · NautilusTrader 0.65.0 behind feature <code>verify</code></td></tr>
+    <tr><th>Product CLI</th><td>Go module <code>github.com/ramtin/dynamic-trader</code> · binary <code>dt</code></td></tr>
+    <tr><th>Branch</th><td><code>cursor/go-pricewalk-cleanup-b567</code></td></tr>
+    <tr><th>How to read</th><td>This PDF, or open <code>docs/architecture.html</code> in a browser</td></tr>
+  </table>
+  <h2 style="margin-top:22px;border:none;padding:0;font-size:12pt;">Contents</h2>
+  <ol class="toc" style="columns:2; column-gap:18px;">
+    <li>Mental model and system pipeline</li>
+    <li>Repository layout</li>
+    <li>End-to-end data flow</li>
+    <li>Rust library modules (every file)</li>
+    <li>Rust binaries</li>
+    <li>On-disk formats</li>
+    <li>simulate JSONL protocol</li>
+    <li>Go product packages</li>
+    <li>Feature verify / Nautilus boundary</li>
+    <li>Config and safety</li>
+    <li>Standard research workflow</li>
+    <li>Cleanup removals</li>
+    <li>Where to edit what</li>
+  </ol>
+  </div>
+</section>
+
+<section class="section">
+  <h1 class="sec">1. Mental model and system pipeline</h1>
+  <table class="pipeline">
+    <tr>
+      <td>OKX zips</td><td class="arr">→</td>
+      <td>Rust tape</td><td class="arr">→</td>
+      <td>scan .bin</td><td class="arr">→</td>
+      <td>Go walk-forward</td><td class="arr">→</td>
+      <td>simulate</td><td class="arr">→</td>
+      <td>JSON / HTML</td>
+    </tr>
+  </table>
+  <table class="two">
+    <tr>
+      <td>
+        <h4>Rust = engine</h4>
+        <p>Download archives, build the tick tape, scan millions of RSI × TP/SL combos, batch-simulate fills, optionally verify with NautilusTrader.</p>
+      </td>
+      <td>
+        <h4>Go = product (<code>dt</code>)</h4>
+        <p>Rank windows, run N/M score walk-forward, candle OLS price-walk + oracle exits, serve browse HTTP, write reports. Changes compile in seconds without linking Nautilus.</p>
+      </td>
+    </tr>
+  </table>
+  <div class="callout">
+    <strong>Rule of thumb.</strong> Change fill rules in Rust (<code>src/scan.rs</code> + <code>src/strategy.rs</code>) and confirm with <code>verify</code>.
+    Change how winners are picked in Go (<code>internal/walkforward</code>, <code>internal/score</code>, <code>internal/pricewalk</code>).
+  </div>
+</section>
+
+<section class="section">
+  <h1 class="sec">2. Repository layout</h1>
+<pre><code>ppo-trader/
+├── Cargo.toml                 Rust crate + optional feature verify
+├── go.mod / cmd/dt/           Go product CLI
+├── config/testnet.toml        Fees, paper_only, max leverage
+├── scripts/
+│   ├── build_dt.sh            macOS-safe Go build (CGO + external linker)
+│   ├── build_architecture_pdf.sh
+│   └── price_iter.sh          Fast price-path iteration
+├── docs/
+│   ├── architecture.html      Source of this guide
+│   ├── ARCHITECTURE.pdf       Generated PDF
+│   └── DT.md                  Short CLI cheat sheet
+├── src/                       Rust library (shared by all engine bins)
+├── src/bin/                   Rust binaries
+└── internal/                  Go packages used by dt
+
+data/   gitignored — OKX archives + scan outputs live only on disk</code></pre>
+</section>
+
+<section class="section">
+  <h1 class="sec">3. End-to-end data flow</h1>
+  <h2>Research path (≈99% of compute)</h2>
+  <ol>
+    <li><code>download</code> fetches OKX daily trade zips into <code>data/okx/BTC-USDT-SWAP/archives/</code> and verifies trade-ID continuity + volume vs OKX’s official 1D candle.</li>
+    <li><code>Tape::load</code> converts every trade into Nautilus L1 matching prices and builds a segment tree for TP/SL <code>first_hit</code>.</li>
+    <li><code>scan --bucket window</code> enumerates RSI pairs × timeframe × TP/SL × leverage into fixed-size <code>window_*.bin</code> files plus <code>meta.json</code>.</li>
+    <li>Go <code>dt walk-forward</code> ranks those bins, picks finalists, batch-calls Rust <code>simulate</code> (JSONL) for closed trades, runs N/M score policy, writes JSON/HTML.</li>
+    <li>Go <code>dt price-walk</code> loads 1m candles (M1C1 disk cache), fits OLS return features per bar size, optionally runs oracle TP/SL on actual future closes, writes <code>nm_price_walk_forward*</code>.</li>
+  </ol>
+  <h2>Truth path (slow)</h2>
+  <p>Only the last / best combos go through Nautilus via <code>verify</code> or <code>backtest</code>. Same fill rules as the scanner; disagreement fails the run. The price path is pure Go and does not use Nautilus.</p>
+</section>
+
+<section class="section">
+  <h1 class="sec">4. Rust library modules (<code>src/</code>)</h1>
+  <p>Every library file, approximate size, and responsibility.</p>
+  <table class="data">
+    <thead><tr><th>File</th><th>Lines</th><th>Responsibility</th></tr></thead>
+    <tbody>
+      <tr><td class="path">okx_history.rs</td><td class="num">551</td><td>OKX download/verify, Trade/Candle, known gaps &amp; voided IDs, archive paths</td></tr>
+      <tr><td class="path">tape.rs</td><td class="num">383</td><td>Tick matching tape + first_hit tree (Nautilus L1 rules, no Nautilus link)</td></tr>
+      <tr><td class="path">scan.rs</td><td class="num">523</td><td>Fast RSI-cross + exits simulator; Outcome / ClosedTrade / Record</td></tr>
+      <tr><td class="path">tpsl_grid.rs</td><td class="num">772</td><td>Vectorized single-TP×SL×lev grid (Entries / Frame / Grid)</td></tr>
+      <tr><td class="path">window_score.rs</td><td class="num">849</td><td>WindowStats (20-byte records), ScoreModel budget-10 fit</td></tr>
+      <tr><td class="path">exits.rs</td><td class="num">249</td><td>Stop / TP ladder math + ExitProfile scale-outs</td></tr>
+      <tr><td class="path">filters.rs</td><td class="num">226</td><td>EMA trend + ATR filters wrapping crosses</td></tr>
+      <tr><td class="path">grid.rs</td><td class="num">185</td><td>CLI parsers for lengths/ladders + RSI series helpers</td></tr>
+      <tr><td class="path">rsi.rs</td><td class="num">90</td><td>Wilder RSI</td></tr>
+      <tr><td class="path">rsi_cross.rs</td><td class="num">114</td><td>Fast/slow RSI cross signals</td></tr>
+      <tr><td class="path">pine_rsi.rs</td><td class="num">146</td><td>TradingView “RSI Strategy” port</td></tr>
+      <tr><td class="path">fills.rs</td><td class="num">26</td><td>Fill / FillKind — no Nautilus dependency</td></tr>
+      <tr><td class="path">signals.rs</td><td class="num">20</td><td>Signal / BarSignals — no Nautilus dependency</td></tr>
+      <tr><td class="path">config.rs</td><td class="num">91</td><td>TOML load; rejects live trading &amp; bad leverage</td></tr>
+      <tr><td class="path">verify_cmp.rs</td><td class="num">60</td><td>Compare scanner vs Nautilus fills</td></tr>
+      <tr><td class="path">tradingview.rs</td><td class="num">371</td><td>TV WebSocket/HTTP client for tv_check</td></tr>
+      <tr><td class="path">strategy.rs</td><td class="num">319</td><td>Nautilus ReversalStrategy (feature verify)</td></tr>
+      <tr><td class="path">backtest.rs</td><td class="num">259</td><td>Nautilus BacktestEngine wrapper (feature verify)</td></tr>
+      <tr><td class="path">lib.rs</td><td class="num">21</td><td>Module exports; gates backtest/strategy on verify</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Types you will see everywhere</h2>
+  <ul>
+    <li><code>okx_history::Trade</code> / <code>Candle</code> — raw market data</li>
+    <li><code>tape::Tape</code> — matching prices + <code>first_hit(from, to, level, up)</code></li>
+    <li><code>exits::Exits</code> — <code>{ stop_pct, targets: [(pct, share)], breakeven }</code></li>
+    <li><code>scan::simulate</code> / <code>simulate_logged</code> — fast replay API</li>
+    <li><code>fills::Fill</code> — one fill (time, kind, side, size, price, fee)</li>
+    <li><code>window_score::WindowStats</code> — per-combo per-window score inputs</li>
+    <li><code>signals::BarSignals</code> — trait implemented by RSI / Pine / FilteredCross</li>
+  </ul>
+</section>
+
+<section class="section">
+  <h1 class="sec">5. Rust binaries (<code>src/bin/</code>)</h1>
+  <table class="data">
+    <thead><tr><th>Binary</th><th>Lines</th><th>Nautilus?</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td class="path">download</td><td class="num">52</td><td>No</td><td>Fetch + verify OKX day archives. Args: <code>START END</code> (end exclusive), <code>--dir</code></td></tr>
+      <tr><td class="path">scan</td><td class="num">~2175</td><td>No</td><td><code>--bucket window|month</code>. Writes meta.json + .bin records. Split: main.rs / window.rs / month.rs</td></tr>
+      <tr><td class="path">simulate</td><td class="num">438</td><td>No</td><td>Load tape once; JSONL stdin → JSONL stdout batch replay</td></tr>
+      <tr><td class="path">verify</td><td class="num">192</td><td>Yes</td><td>One combo through Nautilus; compare fills JSON</td></tr>
+      <tr><td class="path">backtest</td><td class="num">207</td><td>Yes</td><td>Pine RSI strategy table via Nautilus</td></tr>
+      <tr><td class="path">tv_check</td><td class="num">694</td><td>No engine</td><td>Compare candles/RSI/trades vs TradingView (needs .env cookies)</td></tr>
+    </tbody>
+  </table>
+  <p><code>window_nm_walk_forward</code> and <code>price_model.rs</code> were removed after the Go port (<code>dt walk-forward</code> / <code>dt price-walk</code>).</p>
+</section>
+
+<section class="section">
+  <h1 class="sec">6. On-disk formats</h1>
+  <h2>OKX archives</h2>
+<pre><code>data/okx/BTC-USDT-SWAP/archives/
+  BTC-USDT-SWAP-trades-2026-09-01.zip   # or gz
+  (+ verified marker used by is_verified())</code></pre>
+  <p>An archive day runs 16:00 UTC previous day → 16:00 UTC (same window as OKX’s official 1D candle).</p>
+
+  <h2>Window scan (<code>--bucket window</code>)</h2>
+  <ul>
+    <li><code>meta.json</code> — start/end, timeframes, lengths, TP/SL/leverage grids, window list, fees, size_btc, scan_version (1 = dense, 3 = staged)</li>
+    <li><code>window_*.bin</code> — one <strong>20-byte little-endian</strong> record per combo:</li>
+  </ul>
+<pre><code>profit f32 | drop f32 | worst f32 | hold_hours f32 | trades u16 | wins u16
+(window_score::RECORD = 20)</code></pre>
+
+  <h2>Month scan (<code>--bucket month</code>)</h2>
+  <ul>
+    <li><code>month_YYYY-MM.bin</code>, <code>all.bin</code> — <strong>12-byte LE</strong> records: <code>sum f32 | drop f32 | trades u32</code></li>
+  </ul>
+</section>
+
+<section class="section">
+  <h1 class="sec">7. <code>simulate</code> JSONL protocol</h1>
+  <div class="callout warn">
+    <strong>Critical.</strong> Walk-forward must batch. Never spawn one process per combo.
+  </div>
+  <h2>Request line</h2>
+<pre><code>{"id":"42","minutes":60,"fast":14,"slow":50,
+ "exits":{"stop_pct":1.0,"targets":[[1.0,1.0]],"breakeven":false},
+ "leverage":2,"logged":true,"record_fills":false}</code></pre>
+  <h2>Response line</h2>
+  <p>Includes <code>outcome</code> (realized, fees, total, …), optional <code>closed[]</code> trades (<code>exit_ms</code>, <code>entry_ms</code>, <code>net</code>), optional <code>fills[]</code>.</p>
+  <p>CLI flags: <code>--start --end --config --data --size-btc --balance-usdt --jobs</code>. Send <code>{"flush":true}</code> to force a batch flush.</p>
+</section>
+
+<section class="section">
+  <h1 class="sec">8. Go product packages</h1>
+  <table class="data">
+    <thead><tr><th>Package</th><th>Lines</th><th>Job</th></tr></thead>
+    <tbody>
+      <tr><td class="path">cmd/dt</td><td class="num">~210</td><td>CLI router (logrus via logx)</td></tr>
+      <tr><td class="path">internal/engine</td><td class="num">~280</td><td>Find/exec Rust bins; Simulate JSONL client</td></tr>
+      <tr><td class="path">internal/browse</td><td class="num">1166</td><td>HTTP browser over window/month bins</td></tr>
+      <tr><td class="path">internal/walkforward</td><td class="num">~985</td><td>N/M score-path walk-forward</td></tr>
+      <tr><td class="path">internal/pricewalk</td><td class="num">~1200</td><td>Candle OLS + oracle exits (former Rust --path price)</td></tr>
+      <tr><td class="path">internal/pricemodel</td><td class="num">~220</td><td>OLS candle-return features</td></tr>
+      <tr><td class="path">internal/candles</td><td class="num">~330</td><td>OHLC aggregate, M1C1 cache, archive trades</td></tr>
+      <tr><td class="path">internal/score</td><td class="num">459</td><td>Budget-10 ScoreModel (Rust parity tests)</td></tr>
+      <tr><td class="path">internal/report</td><td class="num">~80</td><td>Embed score + price HTML; regenerate from JSON</td></tr>
+      <tr><td class="path">internal/logx</td><td class="num">~30</td><td>Shared logrus logger</td></tr>
+      <tr><td class="path">internal/config</td><td class="num">~50</td><td>TOML paper config (go-toml)</td></tr>
+      <tr><td class="path">internal/exits</td><td class="num">~115</td><td>TP/SL ladder types shared by price path</td></tr>
+    </tbody>
+  </table>
+  <h2>Engine discovery order</h2>
+<pre><code>$DT_ENGINE_DIR
+./target/relfast
+./target/release
+./target/debug
+$PATH</code></pre>
+  <h2>Commands</h2>
+<pre><code>./scripts/build_dt.sh
+./dt download|scan|simulate|verify|backtest|tv-check …
+./dt browse --scan DIR [--port N] [--layout window|month|auto]
+./dt walk-forward --scan DIR [score-path flags…]
+./dt price-walk --scan DIR [price flags…]   # pure Go; see scripts/price_iter.sh
+./dt report --json PATH</code></pre>
+</section>
+
+<section class="section">
+  <h1 class="sec">9. Feature <code>verify</code> and the Nautilus boundary</h1>
+  <div class="callout warn">
+    Without <code>--features verify</code> (or with <code>--no-default-features</code>), <code>backtest</code> and <code>strategy</code> are not compiled and nautilus crates are not linked. Scanner rebuilds drop from painful LTO toward ~5–15s with the <code>relfast</code> profile.
+  </div>
+<pre><code># Fast engine only
+cargo build --profile relfast --no-default-features \
+  --bin download --bin scan --bin simulate
+
+# Need Nautilus
+cargo build --profile relfast --features verify \
+  --bin verify --bin backtest</code></pre>
+</section>
+
+<section class="section">
+  <h1 class="sec">10. Config and safety</h1>
+  <p><code>config/testnet.toml</code></p>
+  <ul>
+    <li><code>risk.paper_only</code> must be <code>true</code> (live rejected by validation)</li>
+    <li><code>risk.max_leverage</code> validated (1–10 in config)</li>
+    <li><code>venues.okx.maker_fee_bps</code> / <code>taker_fee_bps</code></li>
+  </ul>
+  <p>Secrets only in <code>.env</code> (gitignored). <code>tv_check</code> needs TradingView <code>sessionid</code> cookies. Never commit keys or seed phrases.</p>
+</section>
+
+<section class="section">
+  <h1 class="sec">11. Standard research workflow</h1>
+<pre><code># 1) Two years of trades (end exclusive)
+cargo run --release --bin download -- 2024-10-31 2026-10-31
+
+# 2) Window scan
+cargo run --release --bin scan -- --bucket window \
+  --start 2025-10-01 --end 2026-10-01 --hours 24
+
+# 3) Browse
+./scripts/build_dt.sh
+./dt browse --scan data/windowscan/&lt;dir&gt; --port 8091
+
+# 4) Score walk-forward (Go)
+./dt walk-forward --scan data/windowscan/&lt;dir&gt;
+
+# 5) Price path (Go; M1C1 candle cache under scan/.cache/)
+./dt price-walk --scan data/windowscan/&lt;dir&gt; --price-bars 15m --price-strategy 1 --verify 0
+# or: ./scripts/price_iter.sh</code></pre>
+</section>
+
+<section class="section">
+  <h1 class="sec">12. Cleanup: removed vs replaced</h1>
+  <p>Deleted as unused after the hybrid split (~7.8k lines):</p>
+  <ul>
+    <li><code>browse_full_scan</code> / <code>browse_window_scan</code> → replaced by <code>dt browse</code></li>
+    <li>Thin <code>full_scan</code> / <code>window_scan</code> wrappers → use <code>scan --bucket …</code></li>
+    <li>Legacy orchestration: <code>rsi_combos</code>, <code>walk_forward</code>, <code>walk_forward_trades</code>, <code>full_walk_forward</code>, <code>window_walk_forward</code> (+ HTML reports)</li>
+  </ul>
+  <p>Also removed in the price-path Go port: <code>window_nm_walk_forward</code>, <code>price_model.rs</code>, and the embedded HTML/JS under <code>src/bin/</code>. Still present: engine bins only (<code>download</code>, <code>scan</code>, <code>simulate</code>, <code>verify</code>, <code>backtest</code>, <code>tv_check</code>).</p>
+</section>
+
+<section class="section">
+  <h1 class="sec">13. Where to edit what</h1>
+  <table class="data">
+    <thead><tr><th>You want to…</th><th>Edit</th></tr></thead>
+    <tbody>
+      <tr><td>Change how TP/SL fills</td><td class="path">src/scan.rs + src/strategy.rs, then verify</td></tr>
+      <tr><td>Change OKX download / gaps</td><td class="path">src/okx_history.rs</td></tr>
+      <tr><td>Change scan grid / staged survivors</td><td class="path">src/bin/scan/window.rs</td></tr>
+      <tr><td>Change ranking formula</td><td class="path">src/window_score.rs and internal/score</td></tr>
+      <tr><td>Change N/M walk-forward policy</td><td class="path">internal/walkforward/nm.go</td></tr>
+      <tr><td>Change browse UI</td><td class="path">internal/browse/</td></tr>
+      <tr><td>Change price-path experiment</td><td class="path">internal/pricewalk/ + internal/pricemodel/</td></tr>
+    </tbody>
+  </table>
+  <div class="callout" style="margin-top:16px">
+    Regenerate this PDF: <code>./scripts/build_architecture_pdf.sh</code><br/>
+    On-screen reading: open <code>docs/architecture.html</code> in a browser.<br/>
+    CLI cheat sheet: <code>docs/DT.md</code>
+  </div>
+</section>
+
+</body>
+</html>

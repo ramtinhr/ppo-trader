@@ -10,7 +10,7 @@
 use crate::{
     okx_history::Candle,
     rsi_cross::{RsiCrossParams, RsiCrossSignals},
-    strategy::{BarSignals, Signal},
+    signals::{BarSignals, Signal},
 };
 
 /// Bars of the ATR, TradingView's default.

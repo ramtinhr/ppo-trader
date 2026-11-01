@@ -6,12 +6,12 @@
 use std::ops::Range;
 
 use crate::{
-    backtest::{Fill, FillKind},
     exits::Exits,
+    fills::{Fill, FillKind},
     filters::Filter,
     okx_history::Candle,
     rsi_cross::cross_signal,
-    strategy::Signal,
+    signals::Signal,
     tape::{CloseRanges, Tape},
 };
 
