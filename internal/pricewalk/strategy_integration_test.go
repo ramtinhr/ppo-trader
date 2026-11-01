@@ -66,7 +66,7 @@ func TestRollingRetestsGridEachTrade(t *testing.T) {
 	args := DefaultArgs()
 	args.PriceStrategyMode = 2
 	args.MaxRelErr = 0.01
-	args.PriceStops = []float64{0.5, 0.9, 1.5}
+	args.PriceStops = []float64{1.0, 1.5, 2.0} // must be ≥ err_band 1%
 	args.PriceTargets = []float64{0.1, 0.5, 1.0}
 	args.PriceLeverage = []uint32{1, 2, 3}
 	args.PriceRisk = []float64{5}
@@ -196,5 +196,45 @@ func TestRollingGridFindsTinyTP(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("0.1 TP should win on +0.15% predicted level")
+	}
+}
+
+func TestRejectsStopInsideErrBand(t *testing.T) {
+	// The screenshot bug: SL 0.1% × lev 10 wins absolute $ on a tiny pred move,
+	// then actual noise stops out (−9.99). With err_band=1%, stop < 1% must lose.
+	const barMs = int64(15 * 60_000)
+	start := int64(1_700_000_000_000)
+	start = start - (start % barMs)
+	minutes := synthMinutes(120, barMs, start)
+	models := []pricemodel.Model{pricemodel.ColdStart()}
+	for h := 1; h <= 30; h++ {
+		models = append(models, pricemodel.Model{Alphas: [4]float64{2.0, 0, 0, 0}})
+	}
+	args := DefaultArgs()
+	args.PriceStrategyMode = 2
+	args.MaxRelErr = 0.01
+	args.PriceStops = []float64{0.1, 0.5, 1.0, 1.5} // includes illegal 0.1 under err band
+	args.PriceTargets = []float64{0.1, 0.5, 1.0}
+	args.PriceLeverage = []uint32{1, 5, 10}
+	args.PriceRisk = []float64{5}
+	out, err := runPriceStrategyPerTrade(args, minutes, models, "15m", barMs,
+		start+20*barMs, start+100*barMs, 0.0005, 0.0002, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trades, _ := out["trades"].([]map[string]any)
+	for _, tr := range trades {
+		sl, _ := tr["stop_pct"].(float64)
+		lev, _ := tr["leverage"].(float64)
+		if sl+1e-9 < 1.0 {
+			t.Fatalf("stop %.2f%% < err_band 1%% (lev=%v) — screenshot bug regress", sl, lev)
+		}
+		if lev > 5+1e-9 && sl >= 1.0-1e-9 {
+			// 1%×10 = 10% risk > max_risk 5% should already be blocked; belt+suspenders
+			risk := sl * lev
+			if risk > 5+1e-9 {
+				t.Fatalf("risk %.2f%% > 5%% with lev=%v sl=%v", risk, lev, sl)
+			}
+		}
 	}
 }

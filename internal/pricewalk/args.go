@@ -71,9 +71,9 @@ type BarSize struct {
 
 func DefaultArgs() Args {
 	bars, _ := ParsePriceBars("5m,15m,1h,4h")
-	// Dense asymmetric grid: e.g. TP 0.1% × SL 0.9% × lev is included.
-	stops, _ := ParseRange("0.1-5/0.1")
-	targets, _ := ParseRange("0.1-3/0.1")
+	// Full live grid: TP and SL 0.1..10, lev 1..10 (re-tested every trade).
+	stops, _ := ParseRange("0.1-10/0.1")
+	targets, _ := ParseRange("0.1-10/0.1")
 	tt := make([]int, 0, 10)
 	for k := 10; k >= 1; k-- {
 		tt = append(tt, k*10)
@@ -95,7 +95,8 @@ func DefaultArgs() Args {
 		PriceStops:       stops,
 		PriceTargets:     targets,
 		PriceRisk:        []float64{0.25, 0.5, 1, 2, 3, 5},
-		PriceLeverage:    []uint32{1, 2, 3, 5, 8, 10},
+		// Leverage 1..10 re-tested every trade (0x is not a position).
+		PriceLeverage: []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
 		Verify:           1,
 	}
 }

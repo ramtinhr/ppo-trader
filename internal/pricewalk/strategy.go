@@ -877,8 +877,8 @@ func runRollingPredicted(
 	levs := append([]uint32(nil), args.PriceLeverage...)
 	sort.Slice(levs, func(i, j int) bool { return levs[i] < levs[j] })
 
-	logx.Infof("  %s rolling-predicted: look_ahead=%d (H=%d) · stops=%d · tps=%d · combos=%d · lev=%v · max_risk=%g%% · err_band=%.2f%% · OOS %d..%d",
-		label, pathWindow, hMax, len(usable), len(targets), len(exitGrid), levs, maxRiskPct, errBand*100, oosLo, oosHi)
+	logx.Infof("  %s rolling-predicted: look_ahead=%d (H=%d) · stops=%d · tps=%d · combos=%d · lev=%v · max_risk=%g%% · err_band=%.2f%% · min_stop=%.2f%% · OOS %d..%d",
+		label, pathWindow, hMax, len(usable), len(targets), len(exitGrid), levs, maxRiskPct, errBand*100, errBand*100, oosLo, oosHi)
 
 	balance := args.BalanceUSDT
 	running := 0.0
@@ -922,12 +922,21 @@ func runRollingPredicted(
 			continue
 		}
 
-		// Re-test EVERY TP×SL×lev on this fresh predicted path; keep best mid>0.
+		// Re-test EVERY TP×SL×lev on this fresh predicted path.
+		// Rules (live-honest, no peek):
+		//  - SL must be ≥ err_band (else 15m noise / model error false-stops — that was −9.99 on 0.1%×10x)
+		//  - mid path must hit TP with PnL > 0 (looks profitable on the prediction)
+		//  - not liquidatable; risk ≤ max
+		//  - rank path_r, then LOWER lev (never max $ at 10x on a tiny scalp)
+		minStop := errBand * 100
 		var best *pathPick
 		for _, ex := range exitGrid {
+			if ex.StopPct+1e-12 < minStop {
+				continue
+			}
 			for _, levU := range levs {
 				lev := float64(levU)
-				if lev > maxLev+1e-12 {
+				if lev < 1 || lev > maxLev+1e-12 {
 					continue
 				}
 				riskPct := impliedRiskPct(ex.StopPct, lev)
@@ -943,15 +952,24 @@ func runRollingPredicted(
 					continue
 				}
 				mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
-				if mid.PnL <= 0 {
-					continue // must look profitable on the prediction (not loss-making)
+				if mid.PnL <= 0 || mid.Reason != "tp" {
+					continue
 				}
 				pathR := mid.PnL / math.Max(balance*riskPct/100, 1e-9)
 				dist := liquidDistancePct(ex.StopPct, lev)
-				better := best == nil ||
-					mid.PnL > best.PathPnL+1e-9 ||
-					(math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && pathR > best.PathR+1e-9) ||
-					(math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && math.Abs(pathR-best.PathR) <= 1e-9 && dist > best.LiquidDist)
+				better := best == nil
+				if !better {
+					if pathR > best.PathR+1e-9 {
+						better = true
+					} else if math.Abs(pathR-best.PathR) <= 1e-9 && lev < best.Lev-1e-12 {
+						better = true
+					} else if math.Abs(pathR-best.PathR) <= 1e-9 && math.Abs(lev-best.Lev) <= 1e-12 && mid.PnL > best.PathPnL+1e-9 {
+						better = true
+					} else if math.Abs(pathR-best.PathR) <= 1e-9 && math.Abs(lev-best.Lev) <= 1e-12 &&
+						math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && dist > best.LiquidDist {
+						better = true
+					}
+				}
 				if better {
 					cp := pathPick{
 						Exits: ex, RiskPct: riskPct, Steps: steps, Lev: lev,

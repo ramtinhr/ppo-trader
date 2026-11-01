@@ -60,9 +60,10 @@ OLS return features per bar size, optionally runs per-trade TP/SL:
 
 - `--price-strategy 1` / `oracle` — peek actual future closes (research ceiling → `nm_price_walk_forward.html`)
 - `--price-strategy 2` / `predicted` — **rolling re-test bot**: at each free origin predict
-  the next under-1% closes (raw OLS), **re-search the full TP×SL×lev grid** on that path
-  (keep best mid>0 — combos are never fixed forever), run one trade, then after exit
-  re-predict and re-test the grid again. No invented/shaped path.
+  the next under-1% closes (raw OLS), **re-search TP×SL×lev** (default TP/SL `0.1-10/0.1`,
+  lev `1..10`) on that path. Keep best mid>0 that **hits TP**, with **SL ≥ err_band**
+  (no 0.1%×10x noise stops), rank by path_r then lower lev. One trade → refresh+re-test.
+  Combos are never fixed. Realized PnL is still on actuals (no peek).
   (`nm_price_walk_forward_predicted.html`)
 
 
