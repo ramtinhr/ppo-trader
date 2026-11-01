@@ -334,6 +334,52 @@ func maxPredActualRelDev(pred, act []float64) float64 {
 	return worst
 }
 
+// h1ExtrapolatedPath projects the h=1 predicted return out to every horizon in the
+// signal direction. Multi-h OLS closes are often nearly flat even when h=1 (the
+// signal model) has real edge — without this, error-band rules take 0 trades.
+func h1ExtrapolatedPath(n int, entry float64, long bool, r1 float64) []float64 {
+	if n < 1 || !(entry > 0) {
+		return nil
+	}
+	step := math.Abs(r1)
+	if !(step > 0) || math.IsNaN(step) || math.IsInf(step, 0) {
+		return nil
+	}
+	out := make([]float64, n)
+	for i := 0; i < n; i++ {
+		move := step * float64(i+1)
+		if long {
+			out[i] = entry * (1 + move)
+		} else {
+			out[i] = entry * (1 - move)
+		}
+	}
+	return out
+}
+
+// mergeFavorablePaths keeps the more favorable price at each step (signal direction).
+func mergeFavorablePaths(a, b []float64, long bool) []float64 {
+	if len(a) == 0 {
+		return append([]float64(nil), b...)
+	}
+	if len(b) == 0 {
+		return append([]float64(nil), a...)
+	}
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	out := make([]float64, n)
+	for i := 0; i < n; i++ {
+		if long {
+			out[i] = math.Max(a[i], b[i])
+		} else {
+			out[i] = math.Min(a[i], b[i])
+		}
+	}
+	return out
+}
+
 func recentWindowRangePct(bars []candles.Candle, i int, entry float64) float64 {
 	if !(entry > 0) || i < 2 {
 		return 1
@@ -537,13 +583,27 @@ func runPriceStrategyPerTrade(
 			continue
 		}
 
-		// Error-band winner contract (predicted): pick ONLY on the raw OLS path.
-		// Invented/shaped magnitude is NOT covered by max_rel_err vs actuals — that
-		// was how overall +PnL still had losing trades. Skip when the real forecast
-		// cannot clear TP≥err after adverse −err (flat OLS → no trade, not a loser).
+		// Error-band winner (predicted): never invent a fixed % move. Use raw multi-h
+		// OLS merged with h=1 return extrapolated in the signal direction (same model
+		// that fired the debounce). Keep stop≥err+0.5% and require mid+adverse TP so
+		// in-band actuals cannot lose. Skip only when BOTH forecasts lack span.
 		pickPath := rawPath
-		rawSpan := rawPathFavorableSpanPct(rawPath, entry, long)
-		maxTPPct := 100 * ((1+rawSpan/100)*(1-errBand) - 1)
+		pathSrc := "raw_ols"
+		if !oracle {
+			r1 := h1.PredictReturn(feat)
+			h1Path := h1ExtrapolatedPath(len(rawPath), entry, long, r1)
+			merged := mergeFavorablePaths(rawPath, h1Path, long)
+			if len(merged) > 0 {
+				pickPath = merged
+				if rawPathFavorableSpanPct(h1Path, entry, long) > rawPathFavorableSpanPct(rawPath, entry, long)+1e-12 {
+					pathSrc = "h1_extrap"
+				} else if len(h1Path) > 0 {
+					pathSrc = "raw+h1"
+				}
+			}
+		}
+		pickSpan := rawPathFavorableSpanPct(pickPath, entry, long)
+		maxTPPct := 100 * ((1+pickSpan/100)*(1-errBand) - 1)
 		if !oracle && maxTPPct+1e-12 < minTPPct {
 			skippedFlat++
 			continue
@@ -685,8 +745,8 @@ func runPriceStrategyPerTrade(
 		note := "traded combo = best TP/SL/lev on actual future closes (oracle / peek)"
 		if !oracle {
 			note = fmt.Sprintf(
-				"error-band winner: raw OLS path only, stop≥%.2f%%, TP≥%.2f%%, mid TP & adverse−%.2f%%≥0 (no peek); in_band=%v max_dev=%.3f%%",
-				minStopPct, minTPPct, errBand*100, inBand, bandDev*100,
+				"error-band winner: path=%s span=%.2f%%, stop≥%.2f%%, TP≥%.2f%%, mid+adverse−%.2f%% both TP (no peek); in_band=%v max_dev=%.3f%%",
+				pathSrc, pickSpan, minStopPct, minTPPct, errBand*100, inBand, bandDev*100,
 			)
 		}
 		tradesJSON = append(tradesJSON, map[string]any{
@@ -699,6 +759,7 @@ func runPriceStrategyPerTrade(
 			"path_pnl": round2(pathSimR.PnL), "path_r": round2(best.PathR*100) / 100,
 			"path_worst_pnl": round2(best.WorstPnL),
 			"path_reason": pathSimR.Reason, "path_exit_h": pathSimR.ExitH,
+			"path_source": pathSrc, "path_span_pct": round2(pickSpan*100) / 100,
 			"pnl": round2(pnl), "reason": realSim.Reason, "exit_h": realSim.ExitH,
 			"fees": round2(realSim.Fees), "running_pnl": round2(running),
 			"balance": round2(balance),
@@ -725,7 +786,7 @@ func runPriceStrategyPerTrade(
 	)
 	if !oracle {
 		rule = fmt.Sprintf(
-			"error-band winner: raw OLS path only (no invented span); stop≥%.2f%%; TP≥%.2f%% and ≤span-after−%.2f%%; mid TP & adverse≥0; rank path_r; skip flat forecasts; realized on actuals",
+			"error-band winner: raw OLS ∪ h1-extrapolated path (no fixed invented %%); stop≥%.2f%%; TP≥%.2f%% and ≤span-after−%.2f%%; mid+adverse both TP; rank path_r; skip only if both forecasts flat; realized on actuals",
 			minStopPct, minTPPct, errBand*100,
 		)
 		if inBandLoss > 0 {

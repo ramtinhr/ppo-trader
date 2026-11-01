@@ -8,13 +8,10 @@ import (
 	"github.com/ramtin/dynamic-trader/internal/pricemodel"
 )
 
-// Flat multi-h OLS must skip (not invent a path) — error band does not cover fiction.
-func TestPredictedSkipsFlatOLS(t *testing.T) {
-	const barMs = int64(15 * 60_000)
+func synthMinutes(nBars int, barMs, start int64) []candles.Candle {
 	var minutes []candles.Candle
 	px := 100_000.0
-	start := int64(1_700_000_000_000)
-	for i := 0; i < 240; i++ {
+	for i := 0; i < nBars; i++ {
 		block := i / 20
 		up := block%2 == 0
 		o := px
@@ -34,6 +31,42 @@ func TestPredictedSkipsFlatOLS(t *testing.T) {
 		}
 		px = c
 	}
+	return minutes
+}
+
+// Flat multi-h AND tiny h1 → skip (no invented fixed %).
+func TestPredictedSkipsFlatOLS(t *testing.T) {
+	const barMs = int64(15 * 60_000)
+	start := int64(1_700_000_000_000)
+	minutes := synthMinutes(240, barMs, start)
+	// Near-zero alphas everywhere → no span after −err.
+	h1 := pricemodel.Model{Alphas: [4]float64{0.0001, 0, 0, 0}}
+	models := []pricemodel.Model{pricemodel.ColdStart(), h1}
+	for h := 2; h <= 40; h++ {
+		models = append(models, pricemodel.Model{Alphas: [4]float64{0.0001, 0, 0, 0}})
+	}
+	args := DefaultArgs()
+	args.PriceStrategyMode = 2
+	args.MaxRelErr = 0.01
+	args.PriceStops = []float64{1.5, 2, 2.5, 3}
+	args.PriceLeverage = []uint32{1, 2}
+	args.PriceRisk = []float64{5}
+	out, err := runPriceStrategyPerTrade(args, minutes, models, "15m", barMs,
+		start+40*barMs, start+220*barMs, 0.0005, 0.0002)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, _ := out["closed_trades"].(uint32)
+	if n != 0 {
+		t.Fatalf("zero-edge models must not invent trades, got %d", n)
+	}
+}
+
+// Flat multi-h but strong h1 → h1 extrapolation restores trades.
+func TestPredictedTradesWithH1Extrap(t *testing.T) {
+	const barMs = int64(15 * 60_000)
+	start := int64(1_700_000_000_000)
+	minutes := synthMinutes(240, barMs, start)
 	h1 := pricemodel.Model{Alphas: [4]float64{3.0, 0, 0, 0}}
 	models := []pricemodel.Model{pricemodel.ColdStart(), h1}
 	for h := 2; h <= 40; h++ {
@@ -51,18 +84,17 @@ func TestPredictedSkipsFlatOLS(t *testing.T) {
 		t.Fatal(err)
 	}
 	n, _ := out["closed_trades"].(uint32)
-	skips, _ := out["skips"].(map[string]any)
-	t.Logf("flat → trades=%d skips=%v", n, skips)
-	if n != 0 {
-		t.Fatalf("flat OLS must not invent trades, got %d", n)
+	sig, _ := out["signals_in_oos"].(int)
+	t.Logf("trades=%d signals_in_oos=%v pnl=%v skips=%v", n, sig, out["total_pnl"], out["skips"])
+	if sig == 0 {
+		t.Fatal("expected OOS signals")
 	}
-	if flat, _ := skips["flat"].(int); flat == 0 {
-		t.Fatalf("expected flat skips, got %v", skips)
+	if n == 0 {
+		t.Fatalf("h1 extrap should restore trades; skips=%v", out["skips"])
 	}
 }
 
 func TestInBandActualNeverLoses(t *testing.T) {
-	// Contract: stop outside err band + adverse TP≥0 ⇒ actual within ±err of pred cannot lose.
 	entry := 100.0
 	errBand := 0.01
 	pred := []float64{101.2, 102.0, 102.5, 103.0}
@@ -80,12 +112,21 @@ func TestInBandActualNeverLoses(t *testing.T) {
 	if got.PnL < 0 {
 		t.Fatalf("in-band actual lost: pnl=%v reason=%s", got.PnL, got.Reason)
 	}
-
-	// Stop == err% on a near-entry path false-triggers inside the band (the old bug).
 	tight := exits.Exits{StopPct: 1.0, Targets: [][2]float64{{1.0, 1}}}
-	near := []float64{100.0, 100.02, 102, 103} // adv bar1 = 99.0 → hits 1% stop
+	near := []float64{100.0, 100.02, 102, 103}
 	bad := simulateExitsOnPath(true, entry, tight, steps, adversePath(near, true, errBand), taker, maker)
 	if bad.Reason != "stop" {
 		t.Fatalf("expected tight stop to false-trigger in-band, got %#v", bad)
+	}
+}
+
+func TestH1ExtrapSpan(t *testing.T) {
+	p := h1ExtrapolatedPath(10, 100, true, 0.002)
+	if len(p) != 10 || p[9] < 101.9 {
+		t.Fatalf("%v", p)
+	}
+	m := mergeFavorablePaths([]float64{100.1, 100.2}, p[:2], true)
+	if m[1] < p[1] {
+		t.Fatalf("%v", m)
 	}
 }

@@ -200,7 +200,7 @@ $('#eq').textContent = [
 ].filter(Boolean).join(' · ');
 
 if (predictedMode) {
-  $('#trade-note').innerHTML = `Error-band winner: picks on the <b>raw OLS path only</b> (no invented move). Stop ≥ err+0.5%, TP ≥ err, mid &amp; adverse −err both TP. Flat forecasts skipped. If actual stays within ±err of pred (<code>in_band</code>), trade must not lose. Forecast candles (${S.length}) are not trades.`;
+  $('#trade-note').innerHTML = `Error-band winner: pick path = raw OLS ∪ <b>h1-extrapolated</b> (no fixed invented %). Stop ≥ err+0.5%, TP ≥ err, mid &amp; adverse −err both TP. Skip only if both flat. In-band actuals (<code>in_band</code>) must not lose. Forecast candles (${S.length}) are not trades.`;
 } else {
   $('#trade-note').innerHTML = `Oracle mode: each direction signal picks the <b>best TP/SL/lev</b> on that bar’s <b>actual</b> future path (peek-ahead). Skip if no profitable combo. Forecast candles (${S.length}) are not trades.`;
 }
