@@ -502,24 +502,33 @@ func runPriceStrategyPerTrade(
 
 		// OLS multi-h closes are often nearly flat — useless for TP≥1% (0-trade bug).
 		// Live-honest shaped path: signal direction + span from max(raw move,
-		// recent past range), floored so adverse−err still clears min TP.
+		// recent past range). Floor only so adverse−err can clear min TP — but when
+		// that floor invents edge, restrict the exit grid (otherwise abs-PnL ranking
+		// maxes leverage on a fake ~2% path → large realized losses on actuals).
 		stopLo, stopHi := math.Inf(1), 0.0
 		for _, s := range usable {
 			stopLo = math.Min(stopLo, s)
 			stopHi = math.Max(stopHi, s)
 		}
-		spanPct := pathSpanPctForSignal(bars, i, entry, stopLo, stopHi)
-		if rawSpan := rawPathFavorableSpanPct(rawPath, entry, long); rawSpan > spanPct {
-			spanPct = rawSpan
+		naturalSpan := pathSpanPctForSignal(bars, i, entry, stopLo, stopHi)
+		if rawSpan := rawPathFavorableSpanPct(rawPath, entry, long); rawSpan > naturalSpan {
+			naturalSpan = rawSpan
 		}
-		// Need adverse path to still reach min TP: (1+span/100)*(1-err) ≥ 1+tp/100.
-		// Tiny pad avoids float edge where adv end prints 100.999… and misses TP.
 		minSpanForTP := (100*(1+minTPPct/100)/(1-errBand) - 100) * 1.001
+		spanPct := naturalSpan
+		artificial := false
 		if spanPct < minSpanForTP {
 			spanPct = minSpanForTP
+			artificial = true
 		}
 		if spanPct < minTPPct {
 			spanPct = minTPPct
+			artificial = true
+		}
+		// Largest first-TP the shaped span can still clear after adverse −err.
+		maxTPPct := 100*((1+spanPct/100)*(1-errBand) - 1)
+		if maxTPPct < minTPPct {
+			maxTPPct = minTPPct
 		}
 		pickPath := rawPath
 		if !oracle {
@@ -529,18 +538,38 @@ func runPriceStrategyPerTrade(
 		var best *pathPick
 		for _, stop := range usable {
 			for _, ex := range exitCandidatesForStop(stop) {
+				tp0 := firstTargetPct(ex)
 				// Error-aware: first TP must sit beyond the prediction-error floor.
-				if !oracle && firstTargetPct(ex) < minTPPct-1e-12 {
+				if !oracle && tp0 < minTPPct-1e-12 {
 					skippedTPFloor++
 					continue
+				}
+				// Don't pick TPs the shaped/adverse path cannot reach.
+				if !oracle && tp0 > maxTPPct+1e-9 {
+					skippedTPFloor++
+					continue
+				}
+				// Invented span: only the minimal 1R @ minTP, low leverage.
+				if !oracle && artificial {
+					if tp0 > minTPPct+1e-9 || ex.StopPct > minTPPct+1e-9 {
+						skippedTPFloor++
+						continue
+					}
 				}
 				for _, levU := range args.PriceLeverage {
 					lev := float64(levU)
 					if lev > maxLev+1e-12 {
 						continue
 					}
+					if !oracle && artificial && lev > 2+1e-12 {
+						skippedLiquid++
+						continue
+					}
 					riskPct := impliedRiskPct(ex.StopPct, lev)
 					if riskPct > maxRiskPct+1e-12 {
+						continue
+					}
+					if !oracle && artificial && riskPct > minTPPct*2+1e-12 {
 						continue
 					}
 					steps := sizeForLeverage(balance, lev, entry)
@@ -562,10 +591,10 @@ func runPriceStrategyPerTrade(
 						pathR = sim.PnL / math.Max(balance*riskPct/100, 1e-9)
 						dist = liquidDistancePct(ex.StopPct, lev)
 					} else {
-						// No peek: shaped predicted mid must win; adverse −err must stay ≥ 0.
+						// No peek: shaped mid must TP; adverse −err must stay ≥ 0.
 						mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
 						adv := simulateExitsOnPath(long, entry, ex, steps, adversePath(pickPath, long, errBand), taker, maker)
-						if mid.PnL <= 0 || adv.PnL < 0 {
+						if mid.PnL <= 0 || adv.PnL < 0 || (mid.Reason != "tp" && mid.Reason != "ladder") {
 							skippedRobust++
 							continue
 						}
@@ -576,11 +605,12 @@ func runPriceStrategyPerTrade(
 
 					better := best == nil
 					if !better && !oracle {
-						better = worstPnL > best.WorstPnL+1e-9 ||
-							(math.Abs(worstPnL-best.WorstPnL) <= 1e-9 && rankPnL > best.PathPnL+1e-9) ||
-							(math.Abs(worstPnL-best.WorstPnL) <= 1e-9 && math.Abs(rankPnL-best.PathPnL) <= 1e-9 && pathR > best.PathR+1e-9) ||
-							(math.Abs(worstPnL-best.WorstPnL) <= 1e-9 && math.Abs(rankPnL-best.PathPnL) <= 1e-9 &&
-								math.Abs(pathR-best.PathR) <= 1e-9 && dist > best.LiquidDist)
+						// Risk-adjusted first: abs adverse PnL always preferred max lev on a flat shaped path.
+						better = pathR > best.PathR+1e-9 ||
+							(math.Abs(pathR-best.PathR) <= 1e-9 && worstPnL > best.WorstPnL+1e-9) ||
+							(math.Abs(pathR-best.PathR) <= 1e-9 && math.Abs(worstPnL-best.WorstPnL) <= 1e-9 && rankPnL > best.PathPnL+1e-9) ||
+							(math.Abs(pathR-best.PathR) <= 1e-9 && math.Abs(worstPnL-best.WorstPnL) <= 1e-9 &&
+								math.Abs(rankPnL-best.PathPnL) <= 1e-9 && dist > best.LiquidDist)
 					}
 					if !better && oracle {
 						better = rankPnL > best.PathPnL+1e-9 ||
@@ -630,9 +660,13 @@ func runPriceStrategyPerTrade(
 		}
 		note := "traded combo = best TP/SL/lev on actual future closes (oracle / peek)"
 		if !oracle {
+			art := "natural"
+			if artificial {
+				art = "floored/min-1R"
+			}
 			note = fmt.Sprintf(
-				"traded combo = best adverse-robust TP/SL/lev on front-loaded shaped path (span≥%.2f%%, mid>0, adverse−%.2f%%≥0, no peek); TP≥%.2f%%",
-				spanPct, errBand*100, minTPPct,
+				"traded combo = best risk-adjusted TP/SL/lev on front-loaded shaped path (span≥%.2f%% %s, mid TP, adverse−%.2f%%≥0, no peek); TP∈[%.2f%%, %.2f%%]",
+				spanPct, art, errBand*100, minTPPct, maxTPPct,
 			)
 		}
 		tradesJSON = append(tradesJSON, map[string]any{
@@ -670,7 +704,7 @@ func runPriceStrategyPerTrade(
 	)
 	if !oracle {
 		rule = fmt.Sprintf(
-			"per signal: grid stop×ladder×lev (liquid-safe, stop×lev≤%g%%); require first TP≥%.2f%%; pick on front-loaded shaped path (signal dir + max(raw,live-range) span, floored for TP vs −%.2f%% error) with adverse stress; maximize adverse PnL; realized on actuals (no peek)",
+			"per signal: grid stop×ladder×lev (liquid-safe, stop×lev≤%g%%); TP∈[%.2f%%, span-after-adverse]; front-loaded shaped path (raw/live span, floor only for min TP vs −%.2f%%); floored span → min 1R + lev≤2; rank by adverse path_r then PnL; realized on actuals (no peek)",
 			maxRiskPct, minTPPct, errBand*100,
 		)
 	}

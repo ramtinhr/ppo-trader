@@ -135,6 +135,31 @@ func TestRawPathFavorableSpanFlat(t *testing.T) {
 	}
 }
 
+func TestPredictedRanksRiskAdjustedNotMaxLev(t *testing.T) {
+	// Same % edge on a shaped path: absolute adverse PnL prefers higher lev;
+	// path_r is identical per risk$ — ranking must not blindly max size.
+	entry := 100.0
+	pred := shapedPredictedPath([]float64{100, 100, 100, 100}, entry, true, 2.5)
+	adv := adversePath(pred, true, 0.01)
+	e := exits.Exits{StopPct: 1, Targets: [][2]float64{{1, 1}}}
+	taker, maker := 0.0005, 0.0002
+	bal := 500.0
+	sim := func(lev float64) (pnl, pathR float64) {
+		steps := sizeForLeverage(bal, lev, entry)
+		s := simulateExitsOnPath(true, entry, e, steps, adv, taker, maker)
+		risk := impliedRiskPct(e.StopPct, lev)
+		return s.PnL, s.PnL / math.Max(bal*risk/100, 1e-9)
+	}
+	p1, r1 := sim(1)
+	p3, r3 := sim(3)
+	if !(p3 > p1) {
+		t.Fatalf("expected abs PnL to grow with lev: %g vs %g", p3, p1)
+	}
+	if math.Abs(r1-r3) > 1e-6 {
+		t.Fatalf("path_r should be ~lev-invariant on same %% edge: %g vs %g", r1, r3)
+	}
+}
+
 func TestDebounceSignals(t *testing.T) {
 	// Constant positive-return model via features that produce +r.
 	model := pricemodel.Model{Alphas: [4]float64{1, 0, 0, 0}}

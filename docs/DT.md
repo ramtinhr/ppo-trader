@@ -60,8 +60,9 @@ OLS return features per bar size, optionally runs per-trade TP/SL:
 
 - `--price-strategy 1` / `oracle` — peek actual future closes (research ceiling → `nm_price_walk_forward.html`)
 - `--price-strategy 2` / `predicted` — live-honest: TP ≥ `max_rel_err`, front-loaded shaped path
-  (OLS multi-h closes are often too flat to hit TP; span from signal + live range, floored so
-  adverse −err still clears TP), pick mid>0 & adverse≥0 (`nm_price_walk_forward_predicted.html`)
+  (OLS multi-h closes are often too flat to hit TP; span from raw/live range, floored only for
+  min TP vs adverse −err). Floored span uses min 1R + lev≤2; rank by adverse path_r (not max lev).
+  Realized on actuals (`nm_price_walk_forward_predicted.html`)
 
 Soft-fails OKX official candles when the network is blocked.
 
