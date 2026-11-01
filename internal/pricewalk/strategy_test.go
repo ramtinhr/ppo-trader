@@ -69,34 +69,25 @@ func TestFirstTargetPct(t *testing.T) {
 	}
 }
 
-func TestRobustBandCanRejectFragileTP(t *testing.T) {
-	// Long entry 100; predicted path barely rises then falls — a 0.5% TP is fragile under ±1%.
-	eTight := exits.Exits{StopPct: 2, Targets: [][2]float64{{0.5, 1}}}
-	eWide := exits.Exits{StopPct: 2, Targets: [][2]float64{{1.5, 1}}}
-	pred := []float64{100.4, 100.6, 100.3}
-	errBand := 0.01
+func TestAdversePathLongIsCheaper(t *testing.T) {
+	p := []float64{100, 101, 102}
+	adv := adversePath(p, true, 0.01)
+	if !(adv[1] < p[1]) {
+		t.Fatalf("%v", adv)
+	}
+}
+
+func TestAdverseRobustAllowsClearWinner(t *testing.T) {
+	// Strong predicted rally; 1.5% TP should stay profitable on mid and adverse−1%.
+	e := exits.Exits{StopPct: 2, Targets: [][2]float64{{1.5, 1}}}
+	pred := []float64{101, 102, 103, 104}
 	taker, maker := 0.0005, 0.0002
 	steps := int64(10_000)
-
-	midT := simulateExitsOnPath(true, 100, eTight, steps, pred, taker, maker)
-	hiT := simulateExitsOnPath(true, 100, eTight, steps, scalePath(pred, 1+errBand), taker, maker)
-	loT := simulateExitsOnPath(true, 100, eTight, steps, scalePath(pred, 1-errBand), taker, maker)
-	worstT := math.Min(midT.PnL, math.Min(hiT.PnL, loT.PnL))
-
-	midW := simulateExitsOnPath(true, 100, eWide, steps, pred, taker, maker)
-	hiW := simulateExitsOnPath(true, 100, eWide, steps, scalePath(pred, 1+errBand), taker, maker)
-	loW := simulateExitsOnPath(true, 100, eWide, steps, scalePath(pred, 1-errBand), taker, maker)
-	worstW := math.Min(midW.PnL, math.Min(hiW.PnL, loW.PnL))
-
-	// With min TP floor 1%, tight 0.5% would be filtered; wide should have better worst-case or mid.
-	if firstTargetPct(eTight) >= 1.0 {
-		t.Fatal("fixture")
+	mid := simulateExitsOnPath(true, 100, e, steps, pred, taker, maker)
+	adv := simulateExitsOnPath(true, 100, e, steps, adversePath(pred, true, 0.01), taker, maker)
+	if mid.PnL <= 0 || adv.PnL < 0 {
+		t.Fatalf("mid=%v adv=%v reason mid=%s adv=%s", mid.PnL, adv.PnL, mid.Reason, adv.Reason)
 	}
-	if firstTargetPct(eWide) < 1.0 {
-		t.Fatal("fixture")
-	}
-	_ = worstT
-	_ = worstW
 }
 
 func TestDebounceSignals(t *testing.T) {

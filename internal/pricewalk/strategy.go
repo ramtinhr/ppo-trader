@@ -46,6 +46,15 @@ func scalePath(path []float64, mult float64) []float64 {
 	return out
 }
 
+// adversePath moves every predicted close against the position by errBand (no peek).
+// Long → prices × (1−err); short → prices × (1+err). Favorable shock is not required.
+func adversePath(path []float64, long bool, errBand float64) []float64 {
+	if long {
+		return scalePath(path, 1-errBand)
+	}
+	return scalePath(path, 1+errBand)
+}
+
 func firstTargetPct(e exits.Exits) float64 {
 	if len(e.Targets) == 0 {
 		return 0
@@ -497,17 +506,17 @@ func runPriceStrategyPerTrade(
 						pathR = sim.PnL / math.Max(balance*riskPct/100, 1e-9)
 						dist = liquidDistancePct(ex.StopPct, lev)
 					} else {
-						// Predicted robust: raw OLS path ± errBand; no peek at actuals.
+						// Predicted robust (no peek): mid path must win, and the adverse
+						// errBand shock must still be ≥ 0. Favorable +err is not required
+						// (that dual-band filter traded nothing in practice).
 						mid := simulateExitsOnPath(long, entry, ex, steps, rawPath, taker, maker)
-						hi := simulateExitsOnPath(long, entry, ex, steps, scalePath(rawPath, 1+errBand), taker, maker)
-						lo := simulateExitsOnPath(long, entry, ex, steps, scalePath(rawPath, 1-errBand), taker, maker)
-						worst := math.Min(mid.PnL, math.Min(hi.PnL, lo.PnL))
-						if mid.PnL <= 0 || worst <= 0 {
+						adv := simulateExitsOnPath(long, entry, ex, steps, adversePath(rawPath, long, errBand), taker, maker)
+						if mid.PnL <= 0 || adv.PnL < 0 {
 							skippedRobust++
 							continue
 						}
-						rankPnL, worstPnL = mid.PnL, worst
-						pathR = worst / math.Max(balance*riskPct/100, 1e-9)
+						rankPnL, worstPnL = mid.PnL, adv.PnL
+						pathR = worstPnL / math.Max(balance*riskPct/100, 1e-9)
 						dist = liquidDistancePct(ex.StopPct, lev)
 					}
 
@@ -568,7 +577,7 @@ func runPriceStrategyPerTrade(
 		note := "traded combo = best TP/SL/lev on actual future closes (oracle / peek)"
 		if !oracle {
 			note = fmt.Sprintf(
-				"traded combo = best worst-case TP/SL/lev on predicted path ±%.2f%% (no peek); TP≥%.2f%%",
+				"traded combo = best adverse-robust TP/SL/lev on predicted path (mid>0, adverse−%.2f%%≥0, no peek); TP≥%.2f%%",
 				errBand*100, minTPPct,
 			)
 		}
@@ -607,9 +616,13 @@ func runPriceStrategyPerTrade(
 	)
 	if !oracle {
 		rule = fmt.Sprintf(
-			"per signal: grid stop×ladder×lev (liquid-safe, stop×lev≤%g%%); require first TP≥%.2f%%; pick max worst-case PnL on raw predicted closes ±%.2f%%; skip if mid or worst ≤0; realized PnL on actuals (no peek for pick)",
+			"per signal: grid stop×ladder×lev (liquid-safe, stop×lev≤%g%%); require first TP≥%.2f%%; pick on raw predicted closes with adverse −%.2f%% stress (mid>0 & adverse≥0); maximize adverse PnL; realized on actuals (no peek for pick)",
 			maxRiskPct, minTPPct, errBand*100,
 		)
+	}
+	if !oracle && n == 0 {
+		logx.Warnf("  %s predicted-robust took 0 trades (tp_floor_skips=%d robust_skips=%d). Try lower --max-rel-err or wider --price-stops.",
+			label, skippedTPFloor, skippedRobust)
 	}
 	return map[string]any{
 		"selection_rule": rule,
