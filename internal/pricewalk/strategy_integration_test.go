@@ -53,6 +53,27 @@ func TestExitGridIncludesAsymmetric(t *testing.T) {
 	}
 }
 
+func TestTimeoutLossCappedAtStop(t *testing.T) {
+	// Path never hits TP 0.5% nor quite the old MTM-only timeout; ends underwater.
+	// Must close at stop (1%), not a worse mark-to-market.
+	entry := 100.0
+	path := make([]float64, 10)
+	for i := range path {
+		path[i] = entry * 1.005 // adverse for short… use long underwater:
+		path[i] = entry * 0.995 // −0.5% — inside 1% stop, old code timed out at −0.5%*lev
+	}
+	ex := exits.Exits{StopPct: 1.0, Targets: [][2]float64{{0.5, 1}}}
+	steps := sizeForLeverage(500, 5, entry)
+	sim := simulateExitsOnPath(true, entry, ex, steps, path, 0.0005, 0.0002)
+	if sim.Reason != "stop" {
+		t.Fatalf("losing timeout must become stop, got %s pnl=%.2f", sim.Reason, sim.PnL)
+	}
+	// Stop PnL roughly −1% * notional; should not be a naked timeout bleed.
+	if sim.PnL >= 0 {
+		t.Fatalf("expected stop loss, pnl=%.2f", sim.PnL)
+	}
+}
+
 func TestTruncatePathUntilRelErr(t *testing.T) {
 	pred := []float64{100, 100.5, 101, 110} // last blows 1%
 	act := []float64{100, 100.4, 100.8, 100.9}
@@ -66,13 +87,14 @@ func TestTruncatePathUntilRelErr(t *testing.T) {
 }
 
 func TestRollingMonthPredictTradeRefresh(t *testing.T) {
-	// Alternating synth trend: several trades with predict_at, each after prior exit.
+	// Same edge as retest grid; assert multi-trade refresh + predict_at + under-1% path source.
 	const barMs = int64(15 * 60_000)
 	start := int64(1_700_000_000_000)
 	start = start - (start % barMs)
 	minutes := synthMinutes(240, barMs, start)
-	models := []pricemodel.Model{pricemodel.ColdStart()}
-	for h := 1; h <= 40; h++ {
+	h1 := pricemodel.Model{Alphas: [4]float64{3.0, 0, 0, 0}}
+	models := []pricemodel.Model{pricemodel.ColdStart(), h1}
+	for h := 2; h <= 40; h++ {
 		models = append(models, pricemodel.Model{Alphas: [4]float64{2.0, 0, 0, 0}})
 	}
 	args := DefaultArgs()
@@ -328,6 +350,10 @@ func TestRejectsStopInsideErrBand(t *testing.T) {
 		t.Fatal(err)
 	}
 	trades, _ := out["trades"].([]map[string]any)
+	if len(trades) == 0 {
+		t.Logf("no trades (filters); still OK if illegal stops never appear — skips=%v", out["skips"])
+		return
+	}
 	for _, tr := range trades {
 		sl, _ := tr["stop_pct"].(float64)
 		lev, _ := tr["leverage"].(float64)
@@ -335,11 +361,19 @@ func TestRejectsStopInsideErrBand(t *testing.T) {
 			t.Fatalf("stop %.2f%% < err_band 1%% (lev=%v) — screenshot bug regress", sl, lev)
 		}
 		if lev > 5+1e-9 && sl >= 1.0-1e-9 {
-			// 1%×10 = 10% risk > max_risk 5% should already be blocked; belt+suspenders
 			risk := sl * lev
 			if risk > 5+1e-9 {
 				t.Fatalf("risk %.2f%% > 5%% with lev=%v sl=%v", risk, lev, sl)
 			}
+		}
+		tp := 0.0
+		if ex, ok := tr["exits"].(map[string]any); ok {
+			if tgts, ok := ex["targets"].([][2]float64); ok && len(tgts) > 0 {
+				tp = tgts[0][0]
+			}
+		}
+		if tp > 0 && sl > 0 && tp/sl+1e-12 < PathMinTpSlRatio {
+			t.Fatalf("TP/SL ratio %.3f < min %.2f (tp=%v sl=%v)", tp/sl, PathMinTpSlRatio, tp, sl)
 		}
 	}
 }

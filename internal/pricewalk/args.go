@@ -29,8 +29,9 @@ const (
 	//  - sit out only when peak cannot clear fees
 	//  - no invented / h1-extrapolated / span-floor paths
 	PathTakeFrac      = 0.70
-	PathMinPeakPct    = 0.10 // fee-area floor; don't starve the month loop
+	PathMinPeakPct    = 0.08 // fee-area floor; sit out only true dust
 	PathMinStopPct    = 0.25
+	PathMinTpSlRatio  = 0.25 // reject extreme TP≪SL (0.22% TP / 1% SL @5x → timeout bleed)
 	PathLiveMaxLev    = 10.0 // best lev from grid; still blocked by risk% + no-liquid
 	PathWinRateTarget = 0.80
 	DefaultTradeDays  = 30 // OOS TRADE month

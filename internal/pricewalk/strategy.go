@@ -36,6 +36,7 @@ type pathPick struct {
 	WorstPnL   float64 // robust: min PnL on pred / pred±err
 	PathR      float64
 	LiquidDist float64
+	ExitH      int // predicted bars to TP (prefer earlier)
 }
 
 func scalePath(path []float64, mult float64) []float64 {
@@ -244,10 +245,29 @@ func simulateExitsOnPath(long bool, entry float64, e exits.Exits, steps int64, p
 			fillPx = path[len(path)-1]
 		}
 		qty := float64(remaining) * StepBTC
+		reason := "timeout"
+		kind := "timeout"
+		// Never realize worse than the stop on timeout (the −20 bleed bug).
+		sPx := stopPx(stopPct)
+		mtm := sign * (fillPx - entry) * qty
+		atStop := sign * (sPx - entry) * qty
+		if mtm < atStop || hitStop(fillPx, stopPct) {
+			fillPx = sPx
+			reason = "stop"
+			kind = "stop"
+			mtm = atStop
+		} else if mtm < 0 {
+			// Still losing at horizon end but inside stop band → flatten at stop (risk cap).
+			fillPx = sPx
+			reason = "stop"
+			kind = "stop"
+			mtm = atStop
+		}
 		fee := taker * qty * fillPx
-		realized += sign * (fillPx - entry) * qty
+		realized += mtm
 		fees += fee
-		fills = append(fills, pathExitFill{Kind: "timeout", Price: fillPx, Steps: remaining, Fee: fee, H: len(path)})
+		fills = append(fills, pathExitFill{Kind: kind, Price: fillPx, Steps: remaining, Fee: fee, H: len(path)})
+		return pathSim{PnL: realized - fees, Fees: fees, Reason: reason, ExitH: len(path), Fills: fills}
 	}
 	return pathSim{PnL: realized - fees, Fees: fees, Reason: "timeout", ExitH: len(path), Fills: fills}
 }
@@ -1041,6 +1061,9 @@ func runRollingPredicted(
 			if tp > peak+1e-9 {
 				continue
 			}
+			if ex.StopPct > 0 && tp/ex.StopPct+1e-12 < PathMinTpSlRatio {
+				continue // tiny TP vs fat SL → actuals often timeout into a large loss
+			}
 			for _, levU := range levs {
 				lev := float64(levU)
 				riskPct := impliedRiskPct(ex.StopPct, lev)
@@ -1056,9 +1079,13 @@ func runRollingPredicted(
 					continue
 				}
 				mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
-				// Must win on the predicted path (hit TP, PnL>0) — never pick a loser combo.
+				// Must win on the predicted path (hit TP early enough, PnL>0).
 				if mid.PnL <= 0 || mid.Reason != "tp" {
 					continue
+				}
+				late := max(5, (len(pickPath)*3+3)/4)
+				if mid.ExitH > late {
+					continue // TP only at path tail is fragile → timeout risk on actuals
 				}
 				// −err shock on the path must stay clear of liquidation (stop already liquid-safe).
 				if pathAdversePct(adversePath(pickPath, long, errBand), entry, long) >= liquidPctAtLev(lev)*0.85 {
@@ -1067,25 +1094,29 @@ func runRollingPredicted(
 				}
 				pathR := mid.PnL / math.Max(balance*riskPct/100, 1e-9)
 				dist := liquidDistancePct(ex.StopPct, lev)
+				cand := pathPick{
+					Exits: ex, RiskPct: riskPct, Steps: steps, Lev: lev,
+					PathPnL: mid.PnL, WorstPnL: mid.PnL, PathR: pathR, LiquidDist: dist,
+					ExitH: mid.ExitH,
+				}
 				better := best == nil
 				if !better {
 					if pathR > best.PathR+1e-9 {
 						better = true
-					} else if math.Abs(pathR-best.PathR) <= 1e-9 && lev < best.Lev-1e-12 {
+					} else if math.Abs(pathR-best.PathR) <= 1e-9 && cand.ExitH < best.ExitH {
 						better = true
-					} else if math.Abs(pathR-best.PathR) <= 1e-9 && math.Abs(lev-best.Lev) <= 1e-12 && mid.PnL > best.PathPnL+1e-9 {
+					} else if math.Abs(pathR-best.PathR) <= 1e-9 && cand.ExitH == best.ExitH && lev < best.Lev-1e-12 {
 						better = true
-					} else if math.Abs(pathR-best.PathR) <= 1e-9 && math.Abs(lev-best.Lev) <= 1e-12 &&
-						math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && dist > best.LiquidDist {
+					} else if math.Abs(pathR-best.PathR) <= 1e-9 && cand.ExitH == best.ExitH &&
+						math.Abs(lev-best.Lev) <= 1e-12 && mid.PnL > best.PathPnL+1e-9 {
+						better = true
+					} else if math.Abs(pathR-best.PathR) <= 1e-9 && cand.ExitH == best.ExitH &&
+						math.Abs(lev-best.Lev) <= 1e-12 && math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && dist > best.LiquidDist {
 						better = true
 					}
 				}
 				if better {
-					cp := pathPick{
-						Exits: ex, RiskPct: riskPct, Steps: steps, Lev: lev,
-						PathPnL: mid.PnL, WorstPnL: mid.PnL, PathR: pathR, LiquidDist: dist,
-					}
-					best = &cp
+					best = &cand
 				}
 			}
 		}
