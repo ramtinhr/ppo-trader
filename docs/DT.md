@@ -59,10 +59,10 @@ Pure Go (`internal/pricewalk`). Aggregates 1m candles (M1C1 cache under `scan/.c
 OLS return features per bar size, optionally runs per-trade TP/SL:
 
 - `--price-strategy 1` / `oracle` — peek actual future closes (research ceiling → `nm_price_walk_forward.html`)
-- `--price-strategy 2` / `predicted` — **rolling predicted-path bot**: at each free origin,
-  look at the next under-1% predicted closes (~160), take side + TP/SL from that raw OLS
-  path (TP ≈ 70% of predicted peak, SL beyond path adverse capped near err-band), run
-  one trade, then re-predict from the exit bar. No invented/shaped path. Lev capped at 2.
+- `--price-strategy 2` / `predicted` — **rolling re-test bot**: at each free origin predict
+  the next under-1% closes (raw OLS), **re-search the full TP×SL×lev grid** on that path
+  (keep best mid>0 — combos are never fixed forever), run one trade, then after exit
+  re-predict and re-test the grid again. No invented/shaped path.
   (`nm_price_walk_forward_predicted.html`)
 
 

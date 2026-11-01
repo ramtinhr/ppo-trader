@@ -506,8 +506,8 @@ func runOnePriceBar(
 		)
 	case 2:
 		signalRule = fmt.Sprintf(
-			"rolling predicted path: trade one using next %d predicted closes (side+TP/SL from raw OLS path); after exit re-predict next window; lev≤2; design win-rate target %.0f%%; no peek",
-			horizons.PathUnder1Pct, PathWinRateTarget*100,
+			"rolling: each free bar predict next %d closes; re-test full TP×SL×lev on raw path (best mid>0); one trade then refresh+re-test; no peek",
+			horizons.PathUnder1Pct,
 		)
 	}
 

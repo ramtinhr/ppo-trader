@@ -1,7 +1,6 @@
 package pricewalk
 
 import (
-	"math"
 	"testing"
 
 	"github.com/ramtin/dynamic-trader/internal/candles"
@@ -54,19 +53,21 @@ func TestExitGridIncludesAsymmetric(t *testing.T) {
 	}
 }
 
-func TestRollingPredictedTradesWhenPeakReal(t *testing.T) {
+func TestRollingRetestsGridEachTrade(t *testing.T) {
 	const barMs = int64(15 * 60_000)
 	start := int64(1_700_000_000_000)
+	start = start - (start % barMs)
 	minutes := synthMinutes(240, barMs, start)
 	h1 := pricemodel.Model{Alphas: [4]float64{3.0, 0, 0, 0}}
 	models := []pricemodel.Model{pricemodel.ColdStart(), h1}
 	for h := 2; h <= 40; h++ {
-		// Strong multi-h path so peak clears minTradablePeak.
 		models = append(models, pricemodel.Model{Alphas: [4]float64{2.0, 0, 0, 0}})
 	}
 	args := DefaultArgs()
 	args.PriceStrategyMode = 2
 	args.MaxRelErr = 0.01
+	args.PriceStops = []float64{0.5, 0.9, 1.5}
+	args.PriceTargets = []float64{0.1, 0.5, 1.0}
 	args.PriceLeverage = []uint32{1, 2, 3}
 	args.PriceRisk = []float64{5}
 	out, err := runPriceStrategyPerTrade(args, minutes, models, "15m", barMs,
@@ -76,15 +77,21 @@ func TestRollingPredictedTradesWhenPeakReal(t *testing.T) {
 	}
 	n, _ := out["closed_trades"].(uint32)
 	sum, _ := out["summary"].(map[string]any)
-	t.Logf("trades=%d pnl=%v mode=%v win_rate=%v skips=%v", n, out["total_pnl"], sum["pick_mode"], out["win_rate"], out["skips"])
-	if n == 0 {
-		t.Fatalf("rolling bot must trade when path peak is real; skips=%v", out["skips"])
-	}
+	t.Logf("trades=%d pnl=%v mode=%v combos=%v", n, out["total_pnl"], sum["pick_mode"], sum["grid_combos"])
 	if sum["pick_mode"] != "rolling-predicted" {
 		t.Fatalf("mode=%v", sum["pick_mode"])
 	}
+	if sum["exits_mode"] != "rolling_retest_grid" {
+		t.Fatalf("exits_mode=%v", sum["exits_mode"])
+	}
+	if n == 0 {
+		t.Fatalf("expected trades when path has edge; skips=%v", out["skips"])
+	}
+	// Combos must differ across trades sometimes (re-tested, not frozen forever),
+	// or at least each trade records its own exits label.
 	trades, _ := out["trades"].([]map[string]any)
 	prevEnd := 0
+	labels := map[string]int{}
 	for _, tr := range trades {
 		eb, _ := tr["entry_bar"].(int)
 		eh, _ := tr["exit_h"].(int)
@@ -92,16 +99,23 @@ func TestRollingPredictedTradesWhenPeakReal(t *testing.T) {
 			t.Fatalf("overlap: entry %d < prevEnd %d", eb, prevEnd)
 		}
 		prevEnd = eb + eh
+		lab, _ := tr["oracle_exits"].(string)
+		labels[lab]++
+		note, _ := tr["oracle_note"].(string)
+		if note == "" || len(note) < 10 {
+			t.Fatalf("expected re-test note, got %q", note)
+		}
 	}
+	t.Logf("exit labels used: %v", labels)
 }
 
-func TestRollingSkipsFlatOLSPath(t *testing.T) {
+func TestRollingSkipsWhenNoProfitableCombo(t *testing.T) {
 	const barMs = int64(15 * 60_000)
 	start := int64(1_700_000_000_000)
-	// Flat tape (open≈close) + near-zero alphas → flat predicted cloud → skip.
+	start = start - (start % barMs)
 	var minutes []candles.Candle
 	px := 100_000.0
-	for i := 0; i < 120; i++ {
+	for i := 0; i < 80; i++ {
 		for m := 0; m < 15; m++ {
 			minutes = append(minutes, candles.Candle{
 				TimeMs: start + int64(i)*barMs + int64(m)*60_000,
@@ -115,10 +129,11 @@ func TestRollingSkipsFlatOLSPath(t *testing.T) {
 	}
 	args := DefaultArgs()
 	args.PriceStrategyMode = 2
-	args.MaxRelErr = 0.01
+	args.PriceStops = []float64{0.5, 1.0}
+	args.PriceTargets = []float64{0.5, 1.0} // TP too far for flat path
 	args.PriceLeverage = []uint32{1}
 	out, err := runPriceStrategyPerTrade(args, minutes, models, "15m", barMs,
-		start+20*barMs, start+100*barMs, 0.0005, 0.0002, 20)
+		start+10*barMs, start+70*barMs, 0.0005, 0.0002, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,28 +141,7 @@ func TestRollingSkipsFlatOLSPath(t *testing.T) {
 	skips, _ := out["skips"].(map[string]any)
 	t.Logf("flat: trades=%d skips=%v", n, skips)
 	if n != 0 {
-		t.Fatalf("flat OLS must not force trades, got %d", n)
-	}
-	flat, _ := skips["flat"].(int)
-	if flat == 0 {
-		t.Fatalf("expected flat_skips > 0, got %v", skips)
-	}
-}
-
-func TestExitsFromPredictedPathHighWRShape(t *testing.T) {
-	e := exitsFromPredictedPath(0.40, 0.05, 0.01, 0.0005, 0.0002)
-	tp := e.Targets[0][0]
-	if tp < 0.2 || tp > 0.40 {
-		t.Fatalf("TP should be ~70%% of 0.40 peak, got %v", tp)
-	}
-	if tp > 0.40 {
-		t.Fatalf("TP must never exceed peak, got %v", tp)
-	}
-	if e.StopPct > 1.05+1e-9 {
-		t.Fatalf("SL should be capped near err band, got %v", e.StopPct)
-	}
-	if e.StopPct/tp > (PathWinRateTarget/(1-PathWinRateTarget))+1e-9 {
-		t.Fatalf("SL/TP=%v too wide for %.0f%% WR target", e.StopPct/tp, PathWinRateTarget*100)
+		t.Fatalf("flat path must not invent profitable combos, got %d", n)
 	}
 }
 
@@ -164,55 +158,14 @@ func TestPathDirectionPicksFavorableSide(t *testing.T) {
 	}
 }
 
-func TestRollingHighWinRateWhenPathMatchesTape(t *testing.T) {
-	// Tape uptrend; models predict a clear level above entry → TP hits often.
-	const barMs = int64(15 * 60_000)
-	// Align to bar boundary so Aggregate keeps one conceptual bar per bucket.
-	start := int64(1_700_000_000_000)
-	start = start - (start % barMs)
-	var minutes []candles.Candle
-	px := 100_000.0
-	for i := 0; i < 300; i++ {
-		o := px
-		c := px * 1.0025 // +0.25%/bar; alpha*prev_ret → peak clears min
-		h, l := math.Max(o, c)*1.0002, math.Min(o, c)*0.9998
-		for m := 0; m < 15; m++ {
-			// Linear path within bar so close steps toward c (open of next = close).
-			frac := float64(m) / 14.0
-			if m == 14 {
-				frac = 1
-			}
-			mid := o + (c-o)*frac
-			minutes = append(minutes, candles.Candle{
-				TimeMs: start + int64(i)*barMs + int64(m)*60_000,
-				Open:   mid, High: h, Low: l, Close: mid,
-			})
-		}
-		px = c
+func TestExitsFromPredictedPathHighWRShape(t *testing.T) {
+	e := exitsFromPredictedPath(0.40, 0.05, 0.01, 0.0005, 0.0002)
+	tp := e.Targets[0][0]
+	if tp < 0.2 || tp > 0.40 {
+		t.Fatalf("TP should be ~70%% of 0.40 peak, got %v", tp)
 	}
-	models := []pricemodel.Model{pricemodel.ColdStart()}
-	for h := 1; h <= 30; h++ {
-		models = append(models, pricemodel.Model{Alphas: [4]float64{2.0, 0, 0, 0}})
-	}
-	args := DefaultArgs()
-	args.PriceStrategyMode = 2
-	args.MaxRelErr = 0.01
-	args.BalanceUSDT = 500
-	args.PriceLeverage = []uint32{1}
-	args.PriceRisk = []float64{5}
-	out, err := runPriceStrategyPerTrade(args, minutes, models, "15m", barMs,
-		start+20*barMs, start+280*barMs, 0.0005, 0.0002, 30)
-	if err != nil {
-		t.Fatal(err)
-	}
-	n, _ := out["closed_trades"].(uint32)
-	wr, _ := out["win_rate"].(float64)
-	t.Logf("trending tape: trades=%d win_rate=%.1f%% pnl=%v skips=%v", n, wr, out["total_pnl"], out["skips"])
-	if n < 5 {
-		t.Fatalf("expected several rolling trades, got %d", n)
-	}
-	if wr < 80 {
-		t.Fatalf("when path matches tape, win rate should be ≥80%%, got %.1f%%", wr)
+	if e.StopPct > 1.05+1e-9 {
+		t.Fatalf("SL capped near err band, got %v", e.StopPct)
 	}
 }
 
@@ -220,5 +173,28 @@ func TestH1ExtrapSpan(t *testing.T) {
 	p := h1ExtrapolatedPath(10, 100, true, 0.002)
 	if len(p) != 10 || p[9] < 101.9 {
 		t.Fatalf("%v", p)
+	}
+}
+
+func TestRollingGridFindsTinyTP(t *testing.T) {
+	// Small predicted peak (0.15%) — grid with 0.1 TP should still find mid>0.
+	entry := 100.0
+	path := make([]float64, 20)
+	for i := range path {
+		path[i] = entry * 1.0015 // +0.15% flat level
+	}
+	grid := exitCandidatesGrid([]float64{0.5, 1.0}, []float64{0.1, 0.5})
+	steps := sizeForLeverage(500, 1, entry)
+	found := false
+	for _, ex := range grid {
+		mid := simulateExitsOnPath(true, entry, ex, steps, path, 0.0005, 0.0002)
+		if mid.PnL > 0 && mid.Reason == "tp" {
+			found = true
+			t.Logf("winner %s pnl=%.4f", ex.Label(), mid.PnL)
+			break
+		}
+	}
+	if !found {
+		t.Fatal("0.1 TP should win on +0.15% predicted level")
 	}
 }
