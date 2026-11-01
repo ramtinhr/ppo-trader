@@ -168,12 +168,12 @@ func runPriceWalk(argv []string) error {
 Candle OLS price path (Go). Fits return features on OHLC bars; optional per-trade exits:
   --price-strategy 0          off
   --price-strategy 1|oracle   peek actual future closes (research ceiling)
-  --price-strategy 2|predicted  live-honest: TP beyond max_rel_err, robust ±err band
+  --price-strategy 2|predicted  full TP×SL×lev grid on predicted path; trade if mid>0
 
 Common flags (see scripts/price_iter.sh):
   --scan DIR  --data DIR  --config PATH  --balance-usdt N
   --price-bars 15m,1h  --price-strategy 0|1|2  --price-horizon auto|N
-  --price-stops 0.5-5/0.5  --price-leverage 1,2,3,5,8,10
+  --price-stops 0.1-5/0.1  --price-targets 0.1-3/0.1  --price-leverage 1,2,3,5,8,10
   --reserve-trade-days N  --min-fit-pairs N  --max-rel-err 0.01
   --require-fit 0|1  --html-only  --verify 0`)
 		return nil

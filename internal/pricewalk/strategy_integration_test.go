@@ -34,12 +34,30 @@ func synthMinutes(nBars int, barMs, start int64) []candles.Candle {
 	return minutes
 }
 
-// Even flat multi-h + tiny h1 must still trade via span floor (TP≥err after −err).
-func TestPredictedTradesWithSpanFloor(t *testing.T) {
+func TestExitGridIncludesAsymmetric(t *testing.T) {
+	grid := exitCandidatesGrid([]float64{0.9, 1.5}, []float64{0.1, 0.5, 1.0})
+	want := map[string]bool{
+		exits.Exits{StopPct: 0.9, Targets: [][2]float64{{0.1, 1}}}.Label(): false,
+		exits.Exits{StopPct: 0.9, Targets: [][2]float64{{0.5, 1}}}.Label(): false,
+		exits.Exits{StopPct: 1.5, Targets: [][2]float64{{0.1, 1}}}.Label(): false,
+	}
+	for _, e := range grid {
+		if _, ok := want[e.Label()]; ok {
+			want[e.Label()] = true
+		}
+	}
+	for lab, ok := range want {
+		if !ok {
+			t.Fatalf("missing combo %s in %d exits", lab, len(grid))
+		}
+	}
+}
+
+func TestPredictedTradesFullGrid(t *testing.T) {
 	const barMs = int64(15 * 60_000)
 	start := int64(1_700_000_000_000)
 	minutes := synthMinutes(240, barMs, start)
-	h1 := pricemodel.Model{Alphas: [4]float64{3.0, 0, 0, 0}} // need signals
+	h1 := pricemodel.Model{Alphas: [4]float64{3.0, 0, 0, 0}}
 	models := []pricemodel.Model{pricemodel.ColdStart(), h1}
 	for h := 2; h <= 40; h++ {
 		models = append(models, pricemodel.Model{Alphas: [4]float64{0.0001, 0, 0, 0}})
@@ -47,8 +65,9 @@ func TestPredictedTradesWithSpanFloor(t *testing.T) {
 	args := DefaultArgs()
 	args.PriceStrategyMode = 2
 	args.MaxRelErr = 0.01
-	args.PriceStops = []float64{1.5, 2, 2.5, 3}
-	args.PriceLeverage = []uint32{1, 2}
+	args.PriceStops = []float64{0.5, 0.9, 1.5, 2}
+	args.PriceTargets = []float64{0.1, 0.5, 1.0}
+	args.PriceLeverage = []uint32{1, 2, 3}
 	args.PriceRisk = []float64{5}
 	out, err := runPriceStrategyPerTrade(args, minutes, models, "15m", barMs,
 		start+40*barMs, start+220*barMs, 0.0005, 0.0002)
@@ -57,46 +76,10 @@ func TestPredictedTradesWithSpanFloor(t *testing.T) {
 	}
 	n, _ := out["closed_trades"].(uint32)
 	sig, _ := out["signals_in_oos"].(int)
-	t.Logf("trades=%d signals=%v pnl=%v skips=%v", n, sig, out["total_pnl"], out["skips"])
-	if sig == 0 {
-		t.Fatal("expected OOS signals")
-	}
+	sum, _ := out["summary"].(map[string]any)
+	t.Logf("trades=%d signals=%v pnl=%v grid=%v skips=%v", n, sig, out["total_pnl"], sum["grid_combos"], out["skips"])
 	if n == 0 {
-		t.Fatalf("span floor must allow trades; skips=%v", out["skips"])
-	}
-}
-
-func TestInBandActualNeverLoses(t *testing.T) {
-	entry := 100.0
-	errBand := 0.01
-	pred := []float64{101.2, 102.0, 102.5, 103.0}
-	e := exits.Exits{StopPct: 1.5, Targets: [][2]float64{{1.0, 1}}}
-	taker, maker := 0.0005, 0.0002
-	steps := sizeForLeverage(500, 1, entry)
-	mid := simulateExitsOnPath(true, entry, e, steps, pred, taker, maker)
-	advPath := adversePath(pred, true, errBand)
-	adv := simulateExitsOnPath(true, entry, e, steps, advPath, taker, maker)
-	if mid.PnL <= 0 || adv.PnL < 0 || (mid.Reason != "tp" && mid.Reason != "ladder") ||
-		(adv.Reason != "tp" && adv.Reason != "ladder") {
-		t.Fatalf("setup mid=%v (%s) adv=%v (%s)", mid.PnL, mid.Reason, adv.PnL, adv.Reason)
-	}
-	got := simulateExitsOnPath(true, entry, e, steps, advPath, taker, maker)
-	if got.PnL < 0 {
-		t.Fatalf("in-band actual lost: pnl=%v reason=%s", got.PnL, got.Reason)
-	}
-}
-
-func TestMinSpanForOnePctTP(t *testing.T) {
-	// err=1%, TP=1% → need span ≥ 100*(1.01/0.99 - 1) ≈ 2.0202%
-	errBand, minTP := 0.01, 1.0
-	minSpan := 100*(1+minTP/100)/(1-errBand) - 100
-	if minSpan < 2.02 || minSpan > 2.03 {
-		t.Fatalf("minSpan=%g", minSpan)
-	}
-	// span=1.5% (stop floor only) is NOT enough — explains user's flat_skips.
-	maxTP := 100 * ((1+1.5/100)*(1-errBand) - 1)
-	if maxTP >= minTP {
-		t.Fatalf("1.5%% span should not clear 1%% TP after −err, maxTP=%g", maxTP)
+		t.Fatalf("full TP×SL×lev grid must find trades; skips=%v", out["skips"])
 	}
 }
 

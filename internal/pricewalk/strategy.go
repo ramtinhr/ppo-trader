@@ -433,17 +433,38 @@ func actualCloses(bars []candles.Candle, entryBar, hMax int) []float64 {
 }
 
 func exitCandidatesForStop(stopPct float64) []exits.Exits {
-	out := []exits.Exits{{
-		StopPct: stopPct,
-		Targets: [][2]float64{{stopPct, 1}},
-	}}
-	for _, p := range exits.DefaultScaleoutProfiles() {
-		if len(p.LadderR) == 1 && math.Abs(p.LadderR[0]-1) < 1e-12 {
+	return exitCandidatesGrid([]float64{stopPct}, nil)
+}
+
+// exitCandidatesGrid builds the full SL×TP asymmetric grid (e.g. 0.1 TP with 0.9 SL).
+// When targets is empty, falls back to TP=SL plus default R-multiple ladders.
+func exitCandidatesGrid(stops, targets []float64) []exits.Exits {
+	var out []exits.Exits
+	seen := map[string]bool{}
+	add := func(e exits.Exits) {
+		if e.Validate(10_000) != nil {
+			return
+		}
+		k := e.Label()
+		if seen[k] {
+			return
+		}
+		seen[k] = true
+		out = append(out, e)
+	}
+	for _, stop := range stops {
+		if len(targets) == 0 {
+			add(exits.Exits{StopPct: stop, Targets: [][2]float64{{stop, 1}}})
+			for _, p := range exits.DefaultScaleoutProfiles() {
+				if len(p.LadderR) == 1 && math.Abs(p.LadderR[0]-1) < 1e-12 {
+					continue
+				}
+				add(p.ToExits(stop))
+			}
 			continue
 		}
-		e := p.ToExits(stopPct)
-		if e.Validate(10_000) == nil {
-			out = append(out, e)
+		for _, tp := range targets {
+			add(exits.Exits{StopPct: stop, Targets: [][2]float64{{tp, 1}}})
 		}
 	}
 	return out
@@ -480,11 +501,6 @@ func runPriceStrategyPerTrade(
 	if errBand <= 0 {
 		errBand = 0.01
 	}
-	minTPPct := errBand * 100 // TP must clear prediction-error floor
-	// Stop must sit strictly outside the error band. With multiplicative ±err on a
-	// path that starts near entry, stop==err% ties the adverse bar-1 print and
-	// false-stops — that is exactly how "err<1% but trade loses" happens.
-	minStopPct := minTPPct + 0.5
 
 	if len(models) <= 1 {
 		return nil, fmt.Errorf("%s: need horizon models for strategy", label)
@@ -513,36 +529,34 @@ func runPriceStrategyPerTrade(
 			maxRiskPct = r
 		}
 	}
+	targets := args.PriceTargets
 	var usable, skippedFee []float64
 	for _, s := range args.PriceStops {
-		if !oracle && s+1e-12 < minStopPct {
+		// Oracle: keep TP=SL fee-floor. Predicted: test the full asymmetric grid;
+		// profitability is decided by mid-path PnL after fees (includes 0.1TP/0.9SL).
+		if oracle && breakevenWinTpEqSl(s, taker, maker) > PriceMaxBreakevenWin {
 			skippedFee = append(skippedFee, s)
 			continue
 		}
-		if breakevenWinTpEqSl(s, taker, maker) <= PriceMaxBreakevenWin {
-			usable = append(usable, s)
-		} else {
-			skippedFee = append(skippedFee, s)
-		}
+		usable = append(usable, s)
 	}
 	if len(skippedFee) > 0 {
-		if oracle {
-			logx.Infof("  %s fee-floor skip stops %v (need win > %.0f%%)", label, skippedFee, 100*PriceMaxBreakevenWin)
-		} else {
-			logx.Infof("  %s skip stops %v (need stop≥%.2f%% error-band + fee floor win≤%.0f%%)",
-				label, skippedFee, minStopPct, 100*PriceMaxBreakevenWin)
-		}
+		logx.Infof("  %s fee-floor skip stops %v (need win > %.0f%% for TP=SL)", label, skippedFee, 100*PriceMaxBreakevenWin)
 	}
 	if len(usable) == 0 {
-		return nil, fmt.Errorf("%s: all stops failed fee floor / error-band floor", label)
+		return nil, fmt.Errorf("%s: no usable stops", label)
+	}
+	exitGrid := exitCandidatesGrid(usable, targets)
+	if len(exitGrid) == 0 {
+		return nil, fmt.Errorf("%s: empty TP/SL grid", label)
 	}
 
 	modeName := "oracle"
 	if !oracle {
 		modeName = "predicted-robust"
 	}
-	logx.Infof("  %s per-trade exits (%s): H=%d · stops=%d · lev=%v · max_risk=%g%% · err_band=%.2f%% · min_tp=%.2f%% · min_stop=%.2f%% · debounce=%d · signals=%d · OOS %d..%d",
-		label, modeName, hMax, len(usable), args.PriceLeverage, maxRiskPct, errBand*100, minTPPct, minStopPct,
+	logx.Infof("  %s per-trade exits (%s): H=%d · stops=%d · tps=%d · combos=%d · lev=%v · max_risk=%g%% · err_band=%.2f%% · debounce=%d · signals=%d · OOS %d..%d",
+		label, modeName, hMax, len(usable), len(targets), len(exitGrid), args.PriceLeverage, maxRiskPct, errBand*100,
 		PriceSignalConfirmBars, len(signals), oosLo, oosHi)
 
 	balance := args.BalanceUSDT
@@ -583,11 +597,8 @@ func runPriceStrategyPerTrade(
 			continue
 		}
 
-		// Predicted pick path:
-		// TP≥err after adverse −err needs span≥~2.02% when err=1%. Raw multi-h OLS and
-		// even h1 extrapolation are often flatter than that (→ flat_skips=all). So:
-		// span = max(raw, h1-extrap, live range), floored to minSpanForTP; front-loaded
-		// in the *signal* direction. Stop≥err+0.5% so −err cannot false-stop bar1.
+		// Predicted pick path: max(raw, h1-extrap, live-range), front-loaded so the
+		// full TP×SL×lev grid can find any profitable combo (incl. 0.1TP/0.9SL).
 		pickPath := rawPath
 		pathSrc := "raw_ols"
 		pickSpan := rawPathFavorableSpanPct(rawPath, entry, long)
@@ -608,100 +619,82 @@ func runPriceStrategyPerTrade(
 			} else if rangeSpan > rawPathFavorableSpanPct(rawPath, entry, long) {
 				pathSrc = "live_range"
 			}
-			// Floor: otherwise TP≥minTP is impossible after −err (your flat_skips=60 case).
-			minSpanForTP := (100*(1+minTPPct/100)/(1-errBand) - 100) * 1.001
-			if pickSpan < minSpanForTP {
-				pickSpan = minSpanForTP
-				pathSrc = pathSrc + "+span_floor"
+			// Mild floor so tiny-TP combos can still print a mid>0 on a dead-flat OLS.
+			if pickSpan < 0.5 {
+				pickSpan = 0.5
+				pathSrc += "+span_floor"
 			}
 			pickPath = shapedPredictedPath(rawPath, entry, long, pickSpan)
 		}
-		maxTPPct := 100 * ((1+pickSpan/100)*(1-errBand) - 1)
-		if maxTPPct < minTPPct {
-			maxTPPct = minTPPct
-		}
 
 		var best *pathPick
-		for _, stop := range usable {
-			for _, ex := range exitCandidatesForStop(stop) {
-				tp0 := firstTargetPct(ex)
-				if !oracle && tp0 < minTPPct-1e-12 {
-					skippedTPFloor++
+		for _, ex := range exitGrid {
+			for _, levU := range args.PriceLeverage {
+				lev := float64(levU)
+				if lev > maxLev+1e-12 {
 					continue
 				}
-				if !oracle && tp0 > maxTPPct+1e-9 {
-					skippedTPFloor++
+				riskPct := impliedRiskPct(ex.StopPct, lev)
+				if riskPct > maxRiskPct+1e-12 {
 					continue
 				}
-				for _, levU := range args.PriceLeverage {
-					lev := float64(levU)
-					if lev > maxLev+1e-12 {
-						continue
-					}
-					riskPct := impliedRiskPct(ex.StopPct, lev)
-					if riskPct > maxRiskPct+1e-12 {
-						continue
-					}
-					steps := sizeForLeverage(balance, lev, entry)
-					if steps <= 0 || ex.Validate(steps) != nil {
-						continue
-					}
-					if comboCanLiquid(ex.StopPct, lev) {
-						skippedLiquid++
-						continue
-					}
+				steps := sizeForLeverage(balance, lev, entry)
+				if steps <= 0 || ex.Validate(steps) != nil {
+					continue
+				}
+				if comboCanLiquid(ex.StopPct, lev) {
+					skippedLiquid++
+					continue
+				}
 
-					var rankPnL, worstPnL, pathR, dist float64
-					if oracle {
-						sim := simulateExitsOnPath(long, entry, ex, steps, actPath, taker, maker)
-						if sim.PnL <= 0 {
-							continue
-						}
-						rankPnL, worstPnL = sim.PnL, sim.PnL
-						pathR = sim.PnL / math.Max(balance*riskPct/100, 1e-9)
-						dist = liquidDistancePct(ex.StopPct, lev)
-					} else {
-						// Guarantee: if actual stays within ±err of pred, worst case is adversePath.
-						mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
-						adv := simulateExitsOnPath(long, entry, ex, steps, adversePath(pickPath, long, errBand), taker, maker)
-						midTP := mid.Reason == "tp" || mid.Reason == "ladder"
-						advTP := adv.Reason == "tp" || adv.Reason == "ladder"
-						// Both mid and adverse must TP with PnL≥0 → in-band actuals cannot lose.
-						if !midTP || !advTP || mid.PnL <= 0 || adv.PnL < 0 {
-							skippedRobust++
-							continue
-						}
-						rankPnL, worstPnL = mid.PnL, adv.PnL
-						pathR = worstPnL / math.Max(balance*riskPct/100, 1e-9)
-						dist = liquidDistancePct(ex.StopPct, lev)
+				var rankPnL, worstPnL, pathR, dist float64
+				if oracle {
+					sim := simulateExitsOnPath(long, entry, ex, steps, actPath, taker, maker)
+					if sim.PnL <= 0 {
+						continue
 					}
+					rankPnL, worstPnL = sim.PnL, sim.PnL
+					pathR = sim.PnL / math.Max(balance*riskPct/100, 1e-9)
+					dist = liquidDistancePct(ex.StopPct, lev)
+				} else {
+					// Trade if predicted mid path is profitable after fees — full grid search.
+					mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
+					if mid.PnL <= 0 {
+						skippedRobust++
+						continue
+					}
+					adv := simulateExitsOnPath(long, entry, ex, steps, adversePath(pickPath, long, errBand), taker, maker)
+					rankPnL, worstPnL = mid.PnL, adv.PnL
+					pathR = mid.PnL / math.Max(balance*riskPct/100, 1e-9)
+					dist = liquidDistancePct(ex.StopPct, lev)
+				}
 
-					better := best == nil
-					if !better && !oracle {
-						better = pathR > best.PathR+1e-9 ||
-							(math.Abs(pathR-best.PathR) <= 1e-9 && worstPnL > best.WorstPnL+1e-9) ||
-							(math.Abs(pathR-best.PathR) <= 1e-9 && math.Abs(worstPnL-best.WorstPnL) <= 1e-9 && rankPnL > best.PathPnL+1e-9) ||
-							(math.Abs(pathR-best.PathR) <= 1e-9 && math.Abs(worstPnL-best.WorstPnL) <= 1e-9 &&
-								math.Abs(rankPnL-best.PathPnL) <= 1e-9 && dist > best.LiquidDist)
+				better := best == nil
+				if !better && !oracle {
+					// Prefer higher mid path_r; tie-break on adverse, then mid PnL, then liquid dist.
+					better = pathR > best.PathR+1e-9 ||
+						(math.Abs(pathR-best.PathR) <= 1e-9 && worstPnL > best.WorstPnL+1e-9) ||
+						(math.Abs(pathR-best.PathR) <= 1e-9 && math.Abs(worstPnL-best.WorstPnL) <= 1e-9 && rankPnL > best.PathPnL+1e-9) ||
+						(math.Abs(pathR-best.PathR) <= 1e-9 && math.Abs(worstPnL-best.WorstPnL) <= 1e-9 &&
+							math.Abs(rankPnL-best.PathPnL) <= 1e-9 && dist > best.LiquidDist)
+				}
+				if !better && oracle {
+					better = rankPnL > best.PathPnL+1e-9 ||
+						(math.Abs(rankPnL-best.PathPnL) <= 1e-9 && pathR > best.PathR+1e-9) ||
+						(math.Abs(rankPnL-best.PathPnL) <= 1e-9 && math.Abs(pathR-best.PathR) <= 1e-9 && dist > best.LiquidDist)
+				}
+				if better {
+					cp := pathPick{
+						Exits: ex, RiskPct: riskPct, Steps: steps, Lev: lev,
+						PathPnL: rankPnL, WorstPnL: worstPnL, PathR: pathR, LiquidDist: dist,
 					}
-					if !better && oracle {
-						better = rankPnL > best.PathPnL+1e-9 ||
-							(math.Abs(rankPnL-best.PathPnL) <= 1e-9 && pathR > best.PathR+1e-9) ||
-							(math.Abs(rankPnL-best.PathPnL) <= 1e-9 && math.Abs(pathR-best.PathR) <= 1e-9 && dist > best.LiquidDist)
-					}
-					if better {
-						cp := pathPick{
-							Exits: ex, RiskPct: riskPct, Steps: steps, Lev: lev,
-							PathPnL: rankPnL, WorstPnL: worstPnL, PathR: pathR, LiquidDist: dist,
-						}
-						best = &cp
-					}
+					best = &cp
 				}
 			}
 		}
 		if best == nil || best.Steps <= 0 {
 			if !oracle {
-				skippedRobust++
+				skippedFlat++ // no profitable TP/SL/lev on predicted path
 			}
 			continue
 		}
@@ -757,8 +750,8 @@ func runPriceStrategyPerTrade(
 		note := "traded combo = best TP/SL/lev on actual future closes (oracle / peek)"
 		if !oracle {
 			note = fmt.Sprintf(
-				"error-band winner: path=%s span=%.2f%%, stop≥%.2f%%, TP≥%.2f%%, mid+adverse−%.2f%% both TP (no peek); in_band=%v max_dev=%.3f%%",
-				pathSrc, pickSpan, minStopPct, minTPPct, errBand*100, inBand, bandDev*100,
+				"full TP×SL×lev grid on path=%s span=%.2f%%; traded best mid>0 after fees (no peek); in_band=%v max_dev=%.3f%%",
+				pathSrc, pickSpan, inBand, bandDev*100,
 			)
 		}
 		tradesJSON = append(tradesJSON, map[string]any{
@@ -798,24 +791,21 @@ func runPriceStrategyPerTrade(
 	)
 	if !oracle {
 		rule = fmt.Sprintf(
-			"predicted-robust: front-loaded path span=max(raw,h1,live-range) floored for TP≥%.2f%% after −%.2f%%; stop≥%.2f%%; mid+adverse both TP; rank path_r; realized on actuals",
-			minTPPct, errBand*100, minStopPct,
+			"predicted-robust: full asymmetric TP×SL×lev grid (%d combos) on front-loaded path span=max(raw,h1,live-range); trade if mid PnL>0 after fees; rank path_r; risk≤%g%%; realized on actuals",
+			len(exitGrid), maxRiskPct,
 		)
-		if inBandLoss > 0 {
-			logx.Warnf("  %s CONTRACT BREACH: %d in-band trades lost (max_rel_err should imply win) — check fees/stop floor",
-				label, inBandLoss)
-		}
 	}
 	if !oracle && n == 0 {
-		logx.Warnf("  %s predicted-robust took 0 trades (flat_skips=%d tp_floor_skips=%d robust_skips=%d liquid_skips=%d). Check stop grid ≥%.2f%% and risk/lev caps.",
-			label, skippedFlat, skippedTPFloor, skippedRobust, skippedLiquid, minStopPct)
+		logx.Warnf("  %s predicted-robust took 0 trades (no_mid_profit=%d liquid_skips=%d). Tried %d TP/SL combos × lev.",
+			label, skippedFlat, skippedLiquid, len(exitGrid))
 	}
 	return map[string]any{
 		"selection_rule": rule,
 		"summary": map[string]any{
 			"exits_mode": "per_trade", "pick_mode": modeName, "horizon": hMax,
 			"confirm_bars": PriceSignalConfirmBars, "max_leverage": maxLev,
-			"err_band": errBand, "min_tp_pct": minTPPct, "min_stop_pct": minStopPct,
+			"err_band": errBand, "grid_stops": len(usable), "grid_tps": len(targets),
+			"grid_combos": len(exitGrid),
 			"in_band_trades": inBandN, "in_band_losses": inBandLoss,
 			"taker_fee_bps": taker * 10_000, "maker_fee_bps": maker * 10_000,
 			"balance_start": args.BalanceUSDT, "balance_end": round2(balance),

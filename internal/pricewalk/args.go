@@ -50,6 +50,7 @@ type Args struct {
 	// PriceStrategyMode: 0=off, 1=oracle (peek actuals), 2=predicted robust (±max_rel_err).
 	PriceStrategyMode int
 	PriceStops        []float64
+	PriceTargets      []float64 // asymmetric TP grid (paired with every stop)
 	PriceRisk         []float64
 	PriceLeverage     []uint32
 }
@@ -61,7 +62,9 @@ type BarSize struct {
 
 func DefaultArgs() Args {
 	bars, _ := ParsePriceBars("5m,15m,1h,4h")
-	stops, _ := ParseRange("0.5-5/0.5")
+	// Dense asymmetric grid: e.g. TP 0.1% × SL 0.9% × lev is included.
+	stops, _ := ParseRange("0.1-5/0.1")
+	targets, _ := ParseRange("0.1-3/0.1")
 	tt := make([]int, 0, 10)
 	for k := 10; k >= 1; k-- {
 		tt = append(tt, k*10)
@@ -81,6 +84,7 @@ func DefaultArgs() Args {
 		PriceHorizon:     PriceHorizonAutoCap,
 		PriceHorizonAuto: true,
 		PriceStops:       stops,
+		PriceTargets:     targets,
 		PriceRisk:        []float64{0.25, 0.5, 1, 2, 3, 5},
 		PriceLeverage:    []uint32{1, 2, 3, 5, 8, 10},
 		Verify:           1,
@@ -304,6 +308,21 @@ func ParseArgs(argv []string) (Args, error) {
 				return args, err
 			}
 			args.PriceStops = stops
+		case "--price-targets", "--price-tps":
+			v, err := need()
+			if err != nil {
+				return args, err
+			}
+			tgts, err := parseStopsList(v)
+			if err != nil {
+				return args, fmt.Errorf("bad --price-targets: %w", err)
+			}
+			for _, t := range tgts {
+				if t <= 0 || t >= 50 {
+					return args, fmt.Errorf("--price-targets must be in (0, 50)")
+				}
+			}
+			args.PriceTargets = tgts
 		case "--price-risk":
 			v, err := need()
 			if err != nil {
