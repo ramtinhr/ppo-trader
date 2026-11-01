@@ -59,10 +59,11 @@ Pure Go (`internal/pricewalk`). Aggregates 1m candles (M1C1 cache under `scan/.c
 OLS return features per bar size, optionally runs per-trade TP/SL:
 
 - `--price-strategy 1` / `oracle` — peek actual future closes (research ceiling → `nm_price_walk_forward.html`)
-- `--price-strategy 2` / `predicted` — full asymmetric **TP×SL×lev** grid (default
-  `--price-targets 0.1-3/0.1` × `--price-stops 0.1-5/0.1`, e.g. 0.1TP/0.9SL×lev).
-  Front-loaded pick path from max(raw, h1, live-range). **Trade only if mid > 0 and
-  adverse −max_rel_err ≥ 0** (option 1 stress). (`nm_price_walk_forward_predicted.html`)
+- `--price-strategy 2` / `predicted` — **rolling predicted-path bot**: at each free origin,
+  look at the next under-1% predicted closes (~160), take side + TP/SL from that raw OLS
+  path (TP ≈ 70% of predicted peak, SL beyond path adverse capped near err-band), run
+  one trade, then re-predict from the exit bar. No invented/shaped path. Lev capped at 2.
+  (`nm_price_walk_forward_predicted.html`)
 
 
 Soft-fails OKX official candles when the network is blocked.

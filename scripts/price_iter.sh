@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fast price-strategy iteration loop (Go price-walk; 1m candle cache under scan/.cache/).
-# STRATEGY=1 oracle (default) | STRATEGY=2 predicted-robust (live-honest)
+# STRATEGY=1 oracle (default) | STRATEGY=2 rolling predicted-path bot (trade→refresh)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

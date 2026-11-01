@@ -53,56 +53,118 @@ func TestExitGridIncludesAsymmetric(t *testing.T) {
 	}
 }
 
-func TestPredictedTradesFullGrid(t *testing.T) {
+func TestRollingPredictedAlwaysTrades(t *testing.T) {
 	const barMs = int64(15 * 60_000)
 	start := int64(1_700_000_000_000)
 	minutes := synthMinutes(240, barMs, start)
 	h1 := pricemodel.Model{Alphas: [4]float64{3.0, 0, 0, 0}}
 	models := []pricemodel.Model{pricemodel.ColdStart(), h1}
 	for h := 2; h <= 40; h++ {
-		models = append(models, pricemodel.Model{Alphas: [4]float64{0.0001, 0, 0, 0}})
+		// Mild upward multi-h path so peak > 0.
+		models = append(models, pricemodel.Model{Alphas: [4]float64{0.5, 0, 0, 0}})
 	}
 	args := DefaultArgs()
 	args.PriceStrategyMode = 2
 	args.MaxRelErr = 0.01
-	args.PriceStops = []float64{0.5, 0.9, 1.5, 2}
-	args.PriceTargets = []float64{0.1, 0.5, 1.0}
 	args.PriceLeverage = []uint32{1, 2, 3}
 	args.PriceRisk = []float64{5}
 	out, err := runPriceStrategyPerTrade(args, minutes, models, "15m", barMs,
-		start+40*barMs, start+220*barMs, 0.0005, 0.0002)
+		start+40*barMs, start+220*barMs, 0.0005, 0.0002, 40)
 	if err != nil {
 		t.Fatal(err)
 	}
 	n, _ := out["closed_trades"].(uint32)
-	sig, _ := out["signals_in_oos"].(int)
 	sum, _ := out["summary"].(map[string]any)
-	t.Logf("trades=%d signals=%v pnl=%v grid=%v skips=%v", n, sig, out["total_pnl"], sum["grid_combos"], out["skips"])
+	t.Logf("trades=%d pnl=%v mode=%v win_rate=%v", n, out["total_pnl"], sum["pick_mode"], out["win_rate"])
 	if n == 0 {
-		t.Fatalf("option1 grid must find trades with mid>0 & adverse≥0; skips=%v", out["skips"])
+		t.Fatalf("rolling bot must place trades on every free origin; skips=%v", out["skips"])
+	}
+	if sum["pick_mode"] != "rolling-predicted" {
+		t.Fatalf("mode=%v", sum["pick_mode"])
+	}
+	// Sequential: each trade entry_bar >= previous exit.
+	trades, _ := out["trades"].([]map[string]any)
+	prevEnd := 0
+	for _, tr := range trades {
+		eb, _ := tr["entry_bar"].(int)
+		eh, _ := tr["exit_h"].(int)
+		if eb < prevEnd {
+			t.Fatalf("overlap: entry %d < prevEnd %d", eb, prevEnd)
+		}
+		prevEnd = eb + eh
 	}
 }
 
-func TestOption1RequiresAdverseNonNegative(t *testing.T) {
-	entry := 100.0
-	pred := shapedPredictedPath([]float64{100, 100, 100, 100}, entry, true, 1.2) // enough for 0.1TP after −1%
-	e := exits.Exits{StopPct: 0.9, Targets: [][2]float64{{0.1, 1}}}
-	steps := sizeForLeverage(500, 1, entry)
-	mid := simulateExitsOnPath(true, entry, e, steps, pred, 0.0005, 0.0002)
-	adv := simulateExitsOnPath(true, entry, e, steps, adversePath(pred, true, 0.01), 0.0005, 0.0002)
-	if mid.PnL <= 0 || adv.PnL < 0 {
-		t.Fatalf("option1 setup should pass: mid=%v adv=%v", mid.PnL, adv.PnL)
+func TestExitsFromPredictedPathHighWRShape(t *testing.T) {
+	e := exitsFromPredictedPath(0.40, 0.05, 0.01, 0.0005, 0.0002)
+	tp := e.Targets[0][0]
+	if tp < 0.2 || tp > 0.40 {
+		t.Fatalf("TP should be ~70%% of 0.40 peak, got %v", tp)
 	}
-	// Tight stop under err band fails adverse (false stop) — must not be selected.
-	tight := exits.Exits{StopPct: 0.3, Targets: [][2]float64{{0.1, 1}}}
-	near := shapedPredictedPath([]float64{100, 100}, entry, true, 0.2)
-	bad := simulateExitsOnPath(true, entry, tight, steps, adversePath(near, true, 0.01), 0.0005, 0.0002)
-	if bad.PnL >= 0 && bad.Reason != "stop" {
-		// near+adverse should lose or stop; either way option1 rejects PnL<0
-		t.Logf("tight adverse=%v reason=%s", bad.PnL, bad.Reason)
+	// SL capped near err band and not huge vs TP (80% WR design).
+	if e.StopPct > 1.05+1e-9 {
+		t.Fatalf("SL should be capped near err band, got %v", e.StopPct)
 	}
-	if bad.PnL >= 0 && bad.Reason == "tp" {
-		t.Fatalf("expected tight stop to fail adverse stress, got %#v", bad)
+	if e.StopPct/tp > (PathWinRateTarget/(1-PathWinRateTarget))+1e-9 {
+		t.Fatalf("SL/TP=%v too wide for %.0f%% WR target", e.StopPct/tp, PathWinRateTarget*100)
+	}
+}
+
+func TestPathDirectionPicksFavorableSide(t *testing.T) {
+	up := []float64{100.2, 100.5, 100.1}
+	long, peak := pathDirection(up, 100)
+	if !long || peak < 0.4 {
+		t.Fatalf("long=%v peak=%v", long, peak)
+	}
+	dn := []float64{99.8, 99.4, 99.9}
+	long, peak = pathDirection(dn, 100)
+	if long || peak < 0.5 {
+		t.Fatalf("short expected: long=%v peak=%v", long, peak)
+	}
+}
+
+func TestRollingHighWinRateWhenPathMatchesTape(t *testing.T) {
+	// Tape follows a steady uptrend; multi-h models predict up → TP should hit often.
+	const barMs = int64(15 * 60_000)
+	start := int64(1_700_000_000_000)
+	var minutes []candles.Candle
+	px := 100_000.0
+	for i := 0; i < 300; i++ {
+		o := px
+		c := px * 1.0015 // +0.15%/bar — larger than PathMinTP
+		h, l := c*1.0002, o*0.9998
+		for m := 0; m < 15; m++ {
+			minutes = append(minutes, candles.Candle{
+				TimeMs: start + int64(i)*barMs + int64(m)*60_000,
+				Open:   o, High: h, Low: l, Close: c,
+			})
+		}
+		px = c
+	}
+	models := []pricemodel.Model{pricemodel.ColdStart()}
+	for h := 1; h <= 30; h++ {
+		// Strong prev_return → predicted path continues up with the tape.
+		models = append(models, pricemodel.Model{Alphas: [4]float64{2.0, 0, 0, 0}})
+	}
+	args := DefaultArgs()
+	args.PriceStrategyMode = 2
+	args.MaxRelErr = 0.01
+	args.BalanceUSDT = 500
+	args.PriceLeverage = []uint32{1}
+	args.PriceRisk = []float64{5}
+	out, err := runPriceStrategyPerTrade(args, minutes, models, "15m", barMs,
+		start+20*barMs, start+280*barMs, 0.0005, 0.0002, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, _ := out["closed_trades"].(uint32)
+	wr, _ := out["win_rate"].(float64)
+	t.Logf("trending tape: trades=%d win_rate=%.1f%% pnl=%v", n, wr, out["total_pnl"])
+	if n < 5 {
+		t.Fatalf("expected several rolling trades, got %d", n)
+	}
+	if wr < 80 {
+		t.Fatalf("when path matches tape, win rate should be ≥80%%, got %.1f%%", wr)
 	}
 }
 

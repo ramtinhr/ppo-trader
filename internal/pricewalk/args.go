@@ -20,6 +20,14 @@ const (
 	PriceRangeStopFrac       = 0.5
 	StepBTC                  = 0.0001
 	ReplayBalance            = 1e9
+
+	// Rolling predicted-path bot (mode 2): take this fraction of the predicted
+	// peak as TP; keep a micro floor so every refresh still places a trade.
+	PathTakeFrac   = 0.70
+	PathMinTPPct   = 0.08
+	PathMinStopPct = 0.25
+	// Design target used when sizing SL vs TP (high win-rate scalp).
+	PathWinRateTarget = 0.80
 )
 
 var errHelp = errors.New("help")

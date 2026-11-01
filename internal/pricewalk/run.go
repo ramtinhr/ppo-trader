@@ -465,7 +465,11 @@ func runOnePriceBar(
 	var strategy map[string]any
 	balancePnL := 0.0
 	if args.PriceStrategyMode == 1 || args.PriceStrategyMode == 2 {
-		strategy, err = runPriceStrategyPerTrade(args, minutes, horizons.Models, label, barMs, tradeStart, tradeEnd, taker, maker)
+		pathWin := horizons.PathUnder1Pct
+		if pathWin <= 0 {
+			pathWin = horizons.Horizon
+		}
+		strategy, err = runPriceStrategyPerTrade(args, minutes, horizons.Models, label, barMs, tradeStart, tradeEnd, taker, maker, pathWin)
 		if err != nil {
 			return priceBarRun{}, err
 		}
@@ -502,8 +506,8 @@ func runOnePriceBar(
 		)
 	case 2:
 		signalRule = fmt.Sprintf(
-			"debounced dir from h=1 return (%d bars); per-trade TP/SL/lev = max worst-case on predicted closes ±%.2f%% with TP≥%.2f%% (no peek); realized on actuals",
-			PriceSignalConfirmBars, args.MaxRelErr*100, args.MaxRelErr*100,
+			"rolling predicted path: trade one using next %d predicted closes (side+TP/SL from raw OLS path); after exit re-predict next window; lev≤2; design win-rate target %.0f%%; no peek",
+			horizons.PathUnder1Pct, PathWinRateTarget*100,
 		)
 	}
 
