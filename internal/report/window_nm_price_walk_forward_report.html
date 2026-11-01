@@ -200,7 +200,7 @@ $('#eq').textContent = [
 ].filter(Boolean).join(' · ');
 
 if (predictedMode) {
-  $('#trade-note').innerHTML = `Rolling OOS month: <b>predict@entry</b> (~under-1% path) → pick best <b>TP×SL×lev</b> (must win on that path, no liquid) → <b>one trade</b> → after exit <b>re-predict + re-pick</b> until <code>${M.trade_end || 'trade_end'}</code>. The FORWARD table below is a <b>demo from the last tape candle</b> — it is <b>not</b> the trade origin. Chart forecast steps ≠ trades.`;
+  $('#trade-note').innerHTML = `Rolling OOS month: <b>predict from older bar</b> → path grows until <b>|pred−actual|≥1%</b> (dynamic length) → <b>trade AFTER that origin</b> with best TP×SL×lev → after exit <b>re-predict</b> until <code>${M.trade_end || 'trade_end'}</code>. Example table below is from trade_start only — each trade recomputes its own under-1% length.`;
 } else {
   $('#trade-note').innerHTML = `Oracle mode: each direction signal picks the <b>best TP/SL/lev</b> on that bar’s <b>actual</b> future path (peek-ahead). Skip if no profitable combo. Forecast candles (${S.length}) are not trades.`;
 }
@@ -258,8 +258,8 @@ const PE = M.path_example;
 if (PE && PE.steps && PE.steps.length) {
   $('#path-card').style.display = '';
   const under = PE.path_under_1pct ?? M.path_under_1pct;
-  $('#path-title').textContent = `⚠ FORWARD DEMO ONLY — not a trade · origin ${PE.origin || '?'} (close ${fmt(PE.origin_close, 2)}) · under-1% = ${under ?? '—'} candles`;
-  $('#path-note').textContent = `Ignore this block for trade dates. Real trades predict from each entry inside TRADE ${M.trade_start || '?'} → ${M.trade_end || '?'}: predict → best TP/SL/lev → one trade → refresh until month ends. This table is a post-tape demo path from the last candle only.`;
+  $('#path-title').textContent = `Under-1% EXAMPLE from ${PE.origin || '?'} (close ${fmt(PE.origin_close, 2)}) · length until err≥1% = ${under ?? '—'} (not fixed 160)`;
+  $('#path-note').textContent = `Illustrative path from before TRADE (older tape date). Real trades each: predict from that bar → continue until |pred−actual|≥1% → enter AFTER origin with best TP/SL/lev → after exit re-predict. TRADE ${M.trade_start || '?'} → ${M.trade_end || '?'}.`;
   $('#path-ex thead').innerHTML = `<tr><th>h</th><th>Time</th><th>Predicted</th><th>Actual</th><th>Source</th><th>Err%</th><th>In under-1% path</th></tr>`;
   $('#path-ex tbody').innerHTML = PE.steps.map((s) => {
     const spot = s.spot == null ? 'n/a' : fmt(s.spot, 2);

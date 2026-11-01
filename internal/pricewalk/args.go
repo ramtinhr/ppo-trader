@@ -22,10 +22,10 @@ const (
 	ReplayBalance            = 1e9
 
 	// Live predicted bot (mode 2) — master loop for ONE OOS month:
-	//  at each free bar: predict under-1% path (~160×15m) from THAT bar →
-	//  pick best TP×SL×lev (wins on path, SL≥err_band, no liquid) →
-	//  take ONE trade → after exit, new origin, repeat until trade_end.
-	//  FORWARD chart from last tape candle is DEMO ONLY — not a trade origin.
+	//  predict from an older tape bar → path continues until |pred−actual|≥err_band
+	//  (dynamic length, not a fixed 160) → trade AFTER that origin with best
+	//  TP×SL×lev (wins on path, SL≥err_band, no liquid) → after exit re-predict
+	//  until trade_end. path_example is illustrative from trade_start only.
 	//  - sit out only when peak cannot clear fees
 	//  - no invented / h1-extrapolated / span-floor paths
 	PathTakeFrac      = 0.70

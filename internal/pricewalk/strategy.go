@@ -416,12 +416,37 @@ func pathSpanPctForSignal(bars []candles.Candle, i int, entry, stopLo, stopHi fl
 	return v
 }
 
-// truncatePath keeps the first n predicted closes (the rolling “look-ahead” window).
+// truncatePath keeps the first n predicted closes (fixed look-ahead).
 func truncatePath(path []float64, n int) []float64 {
 	if n <= 0 || n >= len(path) {
 		return path
 	}
 	return path[:n]
+}
+
+// truncatePathUntilRelErr keeps predicted closes while |pred−actual|/actual < maxRelErr.
+// Length is dynamic (not a fixed 160): stop at the first breach. Used per trade origin.
+func truncatePathUntilRelErr(pred, actual []float64, maxRelErr float64) []float64 {
+	if maxRelErr <= 0 {
+		maxRelErr = 0.01
+	}
+	n := len(pred)
+	if len(actual) < n {
+		n = len(actual)
+	}
+	out := make([]float64, 0, n)
+	for i := 0; i < n; i++ {
+		p, a := pred[i], actual[i]
+		if math.IsNaN(p) || math.IsInf(p, 0) || p <= 0 ||
+			math.IsNaN(a) || math.IsInf(a, 0) || a <= 0 {
+			break
+		}
+		if math.Abs(p-a)/a >= maxRelErr {
+			break
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // pathDirection picks side from the predicted window: whichever way the path
@@ -722,8 +747,8 @@ func runPriceStrategyPerTrade(
 	}
 
 	// OOS TRADE month only (trainCutoff == tradeStart). FORWARD chart = demo.
-	logx.Infof("  %s OOS TRADE predicted: %s → %s · bars %d..%d · look_ahead=%d (min_peak, h1 agree, best TP/SL/lev, no liquid, lev≤%.0f)",
-		label, utc(tradeStartMs), utc(tradeEndMs), oosLo, oosHi, pathWindow, math.Min(maxLev, PathLiveMaxLev))
+	logx.Infof("  %s OOS TRADE predicted: %s → %s · bars %d..%d · max_models=%d (per-origin until err≥%.2f%%, trade after origin, no liquid, lev≤%.0f)",
+		label, utc(tradeStartMs), utc(tradeEndMs), oosLo, oosHi, pathWindow, errBand*100, math.Min(maxLev, PathLiveMaxLev))
 
 	return runRollingPredicted(args, bars, models, label, oosLo, oosHi, pathWindow,
 		usable, targets, exitGrid, maxLev, maxRiskPct, errBand, taker, maker)
@@ -959,23 +984,31 @@ func runRollingPredicted(
 			continue
 		}
 
+		// Predict from this older bar (ref = i-1); trade enters on bar i (after origin).
 		rawFull := predictedCloses(models, refPx, feat)
 		if len(rawFull) == 0 {
 			i++
 			continue
 		}
-		pickPath := truncatePath(rawFull, pathWindow)
-		origins++
-
-		actPath := actualCloses(bars, i, len(pickPath))
-		if len(actPath) == 0 {
+		// Cap by available models; real look-ahead is dynamic until |pred−spot|≥err_band.
+		rawFull = truncatePath(rawFull, pathWindow)
+		actFull := actualCloses(bars, i, len(rawFull))
+		if len(actFull) == 0 {
 			i++
 			continue
 		}
+		pickPath := truncatePathUntilRelErr(rawFull, actFull, errBand)
+		origins++
+		if len(pickPath) == 0 {
+			skippedFlat++
+			i++
+			continue
+		}
+		actPath := actFull[:len(pickPath)]
 
-		// Side + peak from raw multi-h path predicted FROM this bar (entry origin).
+		// Side + peak from under-1% path predicted FROM this bar; entry is the next bar.
 		long, peak := pathDirection(pickPath, entry)
-		pathSrc := "raw_ols"
+		pathSrc := "raw_ols_until_1pct"
 		if peak+1e-12 < minPeak {
 			skippedFlat++
 			i++
@@ -1151,8 +1184,8 @@ func runRollingPredicted(
 	}
 
 	rule := fmt.Sprintf(
-		"OOS month loop: at each free bar predict@entry (~%d under-1%%) → best TP×SL×lev ≤%.0fx (peak≥%.2f%%, SL≥err_band, mid hits TP PnL>0, no liquid) → ONE trade → after exit re-predict/re-pick until trade_end; FORWARD table is demo only",
-		pathWindow, liveMaxLev, minPeak,
+		"OOS month: predict from older bar → path continues until |pred−actual|≥%.2f%% (dynamic length, models≤%d) → trade AFTER origin with best TP×SL×lev ≤%.0fx (peak≥%.2f%%, mid hits TP, no liquid) → after exit re-predict until trade_end",
+		errBand*100, pathWindow, liveMaxLev, minPeak,
 	)
 	return map[string]any{
 		"selection_rule": rule,

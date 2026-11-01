@@ -60,19 +60,19 @@ OLS return features per bar size, optionally runs per-trade TP/SL:
 
 - `--price-strategy 1` / `oracle` — peek actual future closes (research ceiling → `nm_price_walk_forward.html`)
 - `--price-strategy 2` / `predicted` — **master loop** for one OOS month:
-  at each free bar **predict@entry** (~160 under 1%) → best TP×SL×lev (wins on path,
-  SL≥err_band, no liquid) → **one trade** → after exit **re-predict + re-pick** until
-  `trade_end`. The FORWARD table from the last tape candle is **demo only** — not a trade
-  origin. (`nm_price_walk_forward_predicted.html`)
+  **predict from an older tape bar** → path continues until **\|pred−actual\|≥1%**
+  (dynamic length) → **trade AFTER that origin** with best TP×SL×lev → after exit
+  **re-predict** until `trade_end`. Report example path is from `trade_start`, not
+  post-tape. (`nm_price_walk_forward_predicted.html`)
 
-### Master loop: TRAIN → predict@entry → trade → refresh (1 OOS month)
+### Master loop: TRAIN → predict until 1% → trade after → refresh (1 OOS month)
 
 | Phase | Rule |
 |-------|------|
 | **TRAIN** | All dates **before** `trade_start` (fit only) |
-| **Each decision** | Predict from **that bar** (~`path_under_1pct` candles) → pick best combo → trade once |
-| **After exit** | New origin → predict again → new combo → trade again … until `trade_end` |
-| **FORWARD demo** | Path from last tape candle (e.g. 2026-10-10) — **ignore for trade dates** |
+| **Predict** | From an **older** bar we have; length = until \|pred−actual\|≥1% (not fixed 160) |
+| **Trade** | Enter **after** that origin; TP/SL/lev from that under-1% path |
+| **After exit** | New origin → predict again until 1% → trade again … until `trade_end` |
 
 Defaults: `--reserve-trade-days 30 --trade-days 30`. Short scan → shrink TRAIN, keep TRADE.
 

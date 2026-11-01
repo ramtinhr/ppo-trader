@@ -112,22 +112,17 @@ func evalPriceHorizons(
 	}
 	fitN := len(models) - 1
 
-	pathExample, pathUnder := buildForwardPath(bars, models, barMs, tradeEndMs, fitN, oosHorizon, maxRelErr)
-
-	// Live / predicted trades need the under-1% look-ahead (~160×15m), not only the
-	// shorter OOS mean-err horizon. Keep TRAIN-fitted models through pathUnder.
-	tradeModels := models
-	keepTo := oosHorizon
-	if pathUnder > keepTo {
-		keepTo = pathUnder
-	}
-	if auto && keepTo > 0 && len(tradeModels) > keepTo+1 {
-		tradeModels = tradeModels[:keepTo+1]
+	// Example path from just before TRADE (older tape date) — NOT post-tape / last candle.
+	// Strategy look-ahead is per-origin until |pred−actual|≥maxRelErr; keep all fitted models.
+	pathExample, pathUnder := buildForwardPath(bars, models, barMs, tradeStartMs, fitN, oosHorizon, maxRelErr)
+	if pathExample != nil {
+		pathExample["kind"] = "example_from_trade_start"
+		pathExample["note"] = "illustrative under-1% path from before TRADE; each real trade recomputes length until err≥1%"
 	}
 
 	return horizonEval{
 		Table: table, PathExample: pathExample, Horizon: oosHorizon,
-		PathUnder1Pct: pathUnder, Models: tradeModels,
+		PathUnder1Pct: pathUnder, Models: models,
 		OOSH1PriceErr: oosH1Price, OOSH1BaseErr: oosH1Base,
 		OOSHMaxPriceErr: oosHMaxPrice, OOSHMaxBaseErr: oosHMaxBase,
 	}, nil

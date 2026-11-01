@@ -456,7 +456,7 @@ func runOnePriceBar(
 	if horizons.PathExample != nil {
 		if steps, ok := horizons.PathExample["steps"].([]map[string]any); ok && len(steps) > 0 {
 			fwdN := len(steps)
-			logx.Infof("  %s FORWARD DEMO only from last candle %v (close %v) → %d steps (under-1%%=%d) — NOT a trade origin. Mode2 trades OOS month %s→%s: predict@each entry → combo → trade → refresh",
+			logx.Infof("  %s under-1%% EXAMPLE from before TRADE %v (close %v) → %d steps (under-1%%=%d). Real trades: each origin predicts until err≥1%%, then enters AFTER that origin through %s→%s",
 				label, horizons.PathExample["origin"], horizons.PathExample["origin_close"],
 				fwdN, horizons.PathUnder1Pct, utc(tradeStart), utc(tradeEnd))
 			show := func(s map[string]any) {
@@ -494,9 +494,13 @@ func runOnePriceBar(
 	var strategy map[string]any
 	balancePnL := 0.0
 	if args.PriceStrategyMode == 1 || args.PriceStrategyMode == 2 {
-		pathWin := horizons.PathUnder1Pct
-		if pathWin <= 0 {
+		// Max model horizon available; mode2 truncates each origin until |pred−actual|≥err_band.
+		pathWin := len(horizons.Models) - 1
+		if pathWin < 1 {
 			pathWin = horizons.Horizon
+		}
+		if pathWin < 1 {
+			pathWin = horizons.PathUnder1Pct
 		}
 		strategy, err = runPriceStrategyPerTrade(args, minutes, horizons.Models, label, barMs, tradeStart, tradeEnd, taker, maker, pathWin)
 		if err != nil {
@@ -535,8 +539,8 @@ func runOnePriceBar(
 		)
 	case 2:
 		signalRule = fmt.Sprintf(
-			"OOS month %s→%s: each free bar predict@entry look_ahead≈%d → best TP×SL×lev (mid hits TP, SL≥err_band, no liquid) → one trade → refresh until month ends; FORWARD path_example is DEMO only (not trade origin)",
-			utc(tradeStart), utc(tradeEnd), horizons.PathUnder1Pct,
+			"OOS month %s→%s: predict from older bar → path until |pred−actual|≥%.2f%% (dynamic; models≤%d) → trade AFTER origin with best TP×SL×lev → after exit re-predict until month ends; path_example is illustrative from trade_start only",
+			utc(tradeStart), utc(tradeEnd), args.MaxRelErr*100, len(horizons.Models)-1,
 		)
 	}
 
