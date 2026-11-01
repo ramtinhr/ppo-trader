@@ -82,7 +82,9 @@ Use archives you already have for 2024–2025 (no 2023).
 ./scripts/build_dt.sh
 cargo build --profile relfast --no-default-features --bin download --bin scan
 
-# 1) fill 2024→2026 gaps only if needed (END exclusive; skip if archives already there)
+# 1) archives for TRAIN+TRADE (END exclusive). Skips days already verified.
+#    If scan dies on a missing zip (e.g. 2025-01-02), download that year:
+#      ./dt download 2025-01-01 2026-01-01
 #    use --proxy socks5://127.0.0.1:1080 if OKX is blocked
 ./dt download 2024-01-01 2026-01-01
 
