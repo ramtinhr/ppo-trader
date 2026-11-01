@@ -64,24 +64,32 @@ OLS return features per bar size, optionally runs per-trade TP/SL:
   re-test TP×SL×lev (SL≥err_band, lev≤3). FORWARD chart is post-period demo only.
   (`nm_price_walk_forward_predicted.html`)
 
-### Train 2024 → trade 2025 (one year)
+### TRAIN 2024→2025, TRADE 2025→2026
 
-Use your existing **2024→2025** archives (no 2023). Staged scan output:
-`data/windowscan/2024-01-01_2026-01-01_24h_staged`. Last 365 days = TRADE (~2025).
+Exact split:
+
+| Phase | From | Until |
+|-------|------|-------|
+| **TRAIN** | 2024-01-01 | 2025-01-01 |
+| **TRADE** | 2025-01-01 | 2026-01-01 |
+
+Scan covers both years (`--start 2024-01-01 --end 2026-01-01`). Then
+`--reserve-trade-days 365` holds back 2025→2026 as TRADE; TRAIN is 2024→2025.
+Use archives you already have for 2024–2025 (no 2023).
 
 ```bash
 # 0) build dt + Rust engine once
 ./scripts/build_dt.sh
 cargo build --profile relfast --no-default-features --bin download --bin scan
 
-# 1) only fill gaps for 2024–2025 if needed (END exclusive; skip if archives already there)
+# 1) fill 2024→2026 gaps only if needed (END exclusive; skip if archives already there)
 #    use --proxy socks5://127.0.0.1:1080 if OKX is blocked
 ./dt download 2024-01-01 2026-01-01
 
 # 2) windowscan — creates data/windowscan/2024-01-01_2026-01-01_24h_staged/
 ./dt scan --bucket window --start 2024-01-01 --end 2026-01-01 --hours 24
 
-# 3) live predicted bot: TRAIN≈2024, TRADE≈2025
+# 3) TRAIN 2024→2025, TRADE 2025→2026
 ./dt price-walk \
   --scan data/windowscan/2024-01-01_2026-01-01_24h_staged \
   --data data/okx/BTC-USDT-SWAP/archives \

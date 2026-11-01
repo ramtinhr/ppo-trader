@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fast price-strategy iteration loop (Go price-walk; 1m candle cache under scan/.cache/).
 # STRATEGY=1 oracle | STRATEGY=2 live TRADE-year predicted bot
-# Year example (after download + scan):
+# TRAIN 2024→2025 / TRADE 2025→2026 (after download + scan):
 #   SCAN=data/windowscan/2024-01-01_2026-01-01_24h_staged RESERVE=365 TRADE_DAYS=365 STRATEGY=2
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
