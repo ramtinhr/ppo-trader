@@ -296,14 +296,13 @@ func TestPathDirectionPicksFavorableSide(t *testing.T) {
 }
 
 func TestExitsFromPredictedPathHighWRShape(t *testing.T) {
-	// peak 1.0% with quiet adverse → TP≈0.70, SL from min_stop/adverse (formula).
-	e := exitsFromPredictedPath(1.0, 0.05, 0.01, 0.0005, 0.0002)
+	e := exitsFromPredictedPath(1.5, 0.05, 0.01, 0.0005, 0.0002)
 	tp := e.Targets[0][0]
-	if tp < 0.6 || tp > 1.0 {
-		t.Fatalf("TP should be ~70%% of 1.0 peak, got %v", tp)
+	if math.Abs(tp-PathTargetTPPct) > 0.05 {
+		t.Fatalf("TP want %.2f got %v", PathTargetTPPct, tp)
 	}
-	if e.StopPct < PathMinStopPct-1e-9 || e.StopPct > tp/PathMinTpSlRatio+0.2 {
-		t.Fatalf("SL out of formula band: tp=%.3f sl=%.3f", tp, e.StopPct)
+	if e.StopPct < PathSLLoPct-1e-9 || e.StopPct > PathSLHiPct+1e-9 {
+		t.Fatalf("SL out of analyze band: tp=%.3f sl=%.3f", tp, e.StopPct)
 	}
 }
 
@@ -337,51 +336,46 @@ func TestRollingGridFindsTinyTP(t *testing.T) {
 	}
 }
 
-func TestPathFormulaTPAndSLFromPeakAndNoise(t *testing.T) {
-	// rangePct here = mean per-bar range (noise), not window high−low.
-	ex, ok := exitsFromPathFormula(2.5, 0.05, 0.80, 0.0005, 0.0002)
+func TestPathFormulaAnalyzeBackedShape(t *testing.T) {
+	// Peak ≥ 0.8% → TP 0.8%, SL clamped into 1.0–1.2%.
+	ex, ok := exitsFromPathFormula(1.5, 0.05, 0.40, 0.0005, 0.0002)
 	if !ok {
-		t.Fatal("expected formula ok on 2.5% peak")
+		t.Fatal("expected formula ok on 1.5% peak")
 	}
 	tp := firstTargetPct(ex)
-	if math.Abs(tp-2.5*PathTakeFrac) > 0.05 {
-		t.Fatalf("TP should track peak×take_frac, got %.3f (sl=%.3f)", tp, ex.StopPct)
+	if math.Abs(tp-PathTargetTPPct) > 0.05 {
+		t.Fatalf("TP want %.2f got %.3f", PathTargetTPPct, tp)
 	}
-	// mean bar range 0.80 × 0.5 = 0.40 → SL ≈ 0.40
-	if ex.StopPct < 0.30 || ex.StopPct > 0.55 {
-		t.Fatalf("SL should follow bar-range noise ~0.40, got %.3f", ex.StopPct)
+	if ex.StopPct < PathSLLoPct-1e-9 || ex.StopPct > PathSLHiPct+1e-9 {
+		t.Fatalf("SL want %.2f–%.2f got %.3f", PathSLLoPct, PathSLHiPct, ex.StopPct)
 	}
-	ex2, ok2 := exitsFromPathFormula(2.5, 0.05, 1.60, 0.0005, 0.0002)
-	if !ok2 {
-		t.Fatal("expected formula ok on wider bar range")
+	// Peak below target TP → sit out (entry filter).
+	if _, ok := exitsFromPathFormula(0.50, 0, 0.40, 0.0005, 0.0002); ok {
+		t.Fatal("peak < 0.8% must sit out")
 	}
-	if math.Abs(ex2.StopPct-ex.StopPct) < 0.1 {
-		t.Fatalf("SL must change with bar-range noise: %.3f vs %.3f", ex.StopPct, ex2.StopPct)
-	}
-	if _, ok := exitsFromPathFormula(0.20, 0, 1.5, 0.0005, 0.0002); ok {
-		t.Fatal("sucker peak vs fat bar-range must sit out")
+	// Noise needing SL > 1.2% → sit out.
+	if _, ok := exitsFromPathFormula(1.5, 0.05, 4.0, 0.0005, 0.0002); ok {
+		t.Fatal("fat noise above SL hi must sit out")
 	}
 }
 
-func TestBestLevCapsRiskNotMaxMidPnL(t *testing.T) {
+func TestBestLevPrefersAnalyzeBand(t *testing.T) {
 	entry := 100.0
 	path := make([]float64, 16)
 	for i := range path {
-		path[i] = entry * 1.02
+		path[i] = entry * 1.02 // clears TP 0.8%
 	}
-	ex := exits.Exits{StopPct: 0.25, Targets: [][2]float64{{1.4, 1}}}
+	ex := exits.Exits{StopPct: 1.2, Targets: [][2]float64{{0.8, 1}}}
 	adv := adversePath(path, true, 0.01)
-	// maxRisk 5% would allow 0.25×20 — but PathTargetRiskPct=1% → lev ≤ 4.
 	best := bestLevOnPath(true, entry, ex, path, adv, []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, 500, 5, 0.0005, 0.0002)
 	if best == nil {
 		t.Fatal("expected lev pick")
 	}
+	if best.Lev < float64(PathPreferLevLo)-1e-9 || best.Lev > float64(PathPreferLevHi)+1e-9 {
+		t.Fatalf("want lev %d–%d got %.0f", PathPreferLevLo, PathPreferLevHi, best.Lev)
+	}
 	if best.RiskPct > PathTargetRiskPct+1e-9 {
-		t.Fatalf("risk %.2f%% > target %.2f%% (lev=%.0f) — this was the −$17 stop bug", best.RiskPct, PathTargetRiskPct, best.Lev)
+		t.Fatalf("risk %.2f%% > %.2f%%", best.RiskPct, PathTargetRiskPct)
 	}
-	stopLossUSD := 500 * best.RiskPct / 100
-	if stopLossUSD > 6 {
-		t.Fatalf("stop $ loss budget too fat: $%.2f with lev=%.0f sl=%.2f", stopLossUSD, best.Lev, best.Exits.StopPct)
-	}
-	t.Logf("lev=%.0f risk=%.2f%% mid=%.2f stop≈$%.2f", best.Lev, best.RiskPct, best.PathPnL, stopLossUSD)
+	t.Logf("lev=%.0f risk=%.2f%% mid=%.2f", best.Lev, best.RiskPct, best.PathPnL)
 }

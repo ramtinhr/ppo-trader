@@ -30,22 +30,25 @@ const (
 	//  - sit out only when peak cannot clear fees
 	//  - no invented / h1-extrapolated / span-floor paths
 	//  - losing timeout capped at SL; skewed TP≪SL → lev ≤ PathSkewMaxLev
-	// Per-trade formula (not a collapsing grid):
-	//   TP = take_frac × predicted peak (≤ peak)
-	//   SL = max(path_adverse×1.25, recent_range×frac, min_stop)
-	//   sit out if TP/SL < PathMinTpSlRatio or SL too wide for target WR
-	//   Lev from target risk (NOT max mid-$): stop×lev ≈ PathTargetRiskPct
-	//   so one stop can't print −$17 on a $500 book. Rank by pathR (gain per risk $).
-	PathTakeFrac       = 0.70
-	PathMinPeakPct     = 0.08
-	PathMinStopPct     = 0.25
-	PathSkewMaxLev     = 1.0
-	PathMinTpSlRatio   = 0.50
-	PathLiveMaxLev     = 10.0
-	PathWinRateTarget  = 0.80
-	PathMinHorizonH    = 4
-	PathTargetRiskPct  = 1.0 // max ~1% of balance lost on a stop (lowest lossable)
-	DefaultTradeDays   = 30
+	// Live exits from price-analyze winners on 2025 OOS report:
+	//   fixed-ish TP≈0.8% / SL≈1.0–1.2% / lev 4–5 → ~90% WR on reachable paths.
+	//   Sit out when predicted peak < TP (entry filter).
+	//   Lev risk cap ~5% so SL 1.2% × lev 4 is allowed (not the old 0.25%×10 blow-up).
+	PathTakeFrac      = 0.70
+	PathMinPeakPct    = 0.08 // fee floor only; real gate is PathTargetTPPct
+	PathTargetTPPct   = 0.80 // analyze best: tp_pct 0.8
+	PathSLLoPct       = 1.00 // analyze band
+	PathSLHiPct       = 1.20
+	PathMinStopPct    = 0.25 // legacy floor; formula uses PathSLLoPct
+	PathSkewMaxLev    = 1.0
+	PathMinTpSlRatio  = 0.50
+	PathLiveMaxLev    = 10.0
+	PathWinRateTarget = 0.80
+	PathMinHorizonH   = 4
+	PathTargetRiskPct = 5.0 // allow lev 4–5 with SL ~1–1.2%
+	PathPreferLevLo   = 4
+	PathPreferLevHi   = 5
+	DefaultTradeDays  = 30
 )
 
 var errHelp = errors.New("help")

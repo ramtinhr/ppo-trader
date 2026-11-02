@@ -552,42 +552,36 @@ func pathAdversePct(path []float64, entry float64, long bool) float64 {
 	return worst
 }
 
-// minTradablePeakPct is the smallest predicted favorable move we will trade.
-// Below this the multi-h OLS path is noise (typical flat ~0.05–0.15%).
+// minTradablePeakPct — entry gate: peak must be able to reach PathTargetTPPct (0.8%).
 func minTradablePeakPct(taker, maker float64) float64 {
 	feePct := (taker + maker) * 100
-	// Need peak so that take_frac*peak clears round-trip fees with cushion.
-	need := (feePct + 0.05) / PathTakeFrac
+	need := PathTargetTPPct
+	if feeNeed := (feePct + 0.05) / PathTakeFrac; feeNeed > need {
+		need = feeNeed
+	}
 	if need < PathMinPeakPct {
 		need = PathMinPeakPct
 	}
 	return need
 }
 
-// exitsFromPathFormula — per-trade TP/SL from path + tape (not a grid, not frozen 1%).
+// exitsFromPathFormula — analyze-backed shape (not micro-SL, not frozen grid collapse).
 //
-//	TP  = take_frac × peak          (highest reachable gain on the predicted path)
-//	SL  = max(adverse×1.25, range×frac, min_stop)   (lowest loss that clears path+noise)
-//	ok  = false → sit out (fee dust, sucker TP/SL, or SL too wide for target WR)
+//	Entry: peak ≥ PathTargetTPPct (caller sits out otherwise)
+//	TP  = PathTargetTPPct (0.8%), must be ≤ peak
+//	SL  = clamp(max(path_adverse, bar_noise), PathSLLoPct..PathSLHiPct) → ~1.0–1.2%
+//	ok  = false if noise needs SL > PathSLHiPct or TP/SL sucker
 func exitsFromPathFormula(peakPct, adversePct, rangePct, taker, maker float64) (exits.Exits, bool) {
-	feePct := (taker + maker) * 100
-	if !(peakPct > 0) {
+	_ = taker
+	_ = maker
+	if !(peakPct > 0) || peakPct+1e-12 < PathTargetTPPct {
 		return exits.Exits{}, false
 	}
-	tp := peakPct * PathTakeFrac
+	tp := PathTargetTPPct
 	if tp > peakPct {
 		tp = peakPct * 0.95
 	}
-	if tp < feePct+0.02 {
-		if peakPct < feePct+0.02 {
-			return exits.Exits{}, false
-		}
-		tp = feePct + 0.02
-		if tp > peakPct {
-			tp = peakPct * 0.95
-		}
-	}
-	if tp < 0.01 {
+	if tp+1e-12 < PathTargetTPPct*0.95 {
 		return exits.Exits{}, false
 	}
 
@@ -599,19 +593,15 @@ func exitsFromPathFormula(peakPct, adversePct, rangePct, taker, maker float64) (
 	if noise > sl {
 		sl = noise
 	}
-	if sl < PathMinStopPct {
-		sl = PathMinStopPct
+	if sl < PathSLLoPct {
+		sl = PathSLLoPct
 	}
-	// Sucker payoff: predicted gain too small vs required stop → sit out.
-	if tp/sl+1e-12 < PathMinTpSlRatio {
+	if sl > PathSLHiPct {
+		// Path/tape needs a wider stop than the +EV band we validated → sit out.
 		return exits.Exits{}, false
 	}
-	// SL wider than +EV band at PathWinRateTarget → sit out (don't invent a tighter SL).
-	if PathWinRateTarget > 0 && PathWinRateTarget < 1 {
-		maxSL := tp * (PathWinRateTarget / (1 - PathWinRateTarget))
-		if sl > maxSL+1e-12 {
-			return exits.Exits{}, false
-		}
+	if tp/sl+1e-12 < PathMinTpSlRatio {
+		return exits.Exits{}, false
 	}
 	return exits.Exits{
 		StopPct: round2(sl),
@@ -635,9 +625,8 @@ func exitsFromPredictedPath(peakPct, adversePct, errBand, taker, maker float64) 
 	return ex
 }
 
-// bestLevOnPath sizes leverage for gain-per-risk, not max absolute mid $.
-// Old bug: max mid.PnL always picked max lev → SL 0.25%×10x ≈ −$12..$18 stops.
-// Now: stop×lev ≤ min(maxRisk, PathTargetRiskPct); rank by pathR then lower risk.
+// bestLevOnPath: stop×lev ≤ min(maxRisk, PathTargetRiskPct); prefer lev in 4–5
+// (analyze winners), then highest pathR / mid PnL among those that hit TP on mid.
 func bestLevOnPath(
 	long bool, entry float64, ex exits.Exits, pickPath, advShock []float64,
 	levs []uint32, balance, maxRiskPct, taker, maker float64,
@@ -645,6 +634,9 @@ func bestLevOnPath(
 	targetRisk := maxRiskPct
 	if PathTargetRiskPct > 0 && PathTargetRiskPct < targetRisk {
 		targetRisk = PathTargetRiskPct
+	}
+	prefer := func(lev float64) bool {
+		return lev+1e-12 >= float64(PathPreferLevLo) && lev <= float64(PathPreferLevHi)+1e-12
 	}
 	var best *pathPick
 	for _, levU := range levs {
@@ -674,19 +666,20 @@ func bestLevOnPath(
 			PathPnL: mid.PnL, WorstPnL: advSim.PnL, PathR: pathR,
 			LiquidDist: liquidDistancePct(ex.StopPct, lev), ExitH: mid.ExitH,
 		}
-		// Highest gain per risk $ → lowest risk $ (lowest lossable) → lower lev.
 		better := best == nil
 		if !better {
-			if pathR > best.PathR+1e-9 {
+			bp, cp := prefer(best.Lev), prefer(lev)
+			if cp && !bp {
 				better = true
-			} else if math.Abs(pathR-best.PathR) <= 1e-9 && riskPct < best.RiskPct-1e-12 {
-				better = true
-			} else if math.Abs(pathR-best.PathR) <= 1e-9 && math.Abs(riskPct-best.RiskPct) <= 1e-12 &&
-				advSim.PnL > best.WorstPnL+1e-9 {
-				better = true
-			} else if math.Abs(pathR-best.PathR) <= 1e-9 && math.Abs(riskPct-best.RiskPct) <= 1e-12 &&
-				math.Abs(advSim.PnL-best.WorstPnL) <= 1e-9 && lev < best.Lev-1e-12 {
-				better = true
+			} else if cp == bp {
+				if mid.PnL > best.PathPnL+1e-9 {
+					better = true
+				} else if math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && pathR > best.PathR+1e-9 {
+					better = true
+				} else if math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && math.Abs(pathR-best.PathR) <= 1e-9 &&
+					advSim.PnL > best.WorstPnL+1e-9 {
+					better = true
+				}
 			}
 		}
 		if better {
@@ -1207,10 +1200,8 @@ func runRollingPredicted(
 		predOriginMs := bars[i-1].TimeMs
 		predOriginPx := refPx
 
-		// Formula (per origin):
-		//   TP = 0.70 × peak
-		//   SL = max(path_adverse×1.25, mean_bar_range×frac, min_stop)
-		//   Lev from ~PathTargetRiskPct (gain per risk $) — never max-lev a 0.25% SL
+		// Formula from analyze winners:
+		//   sit out if peak < 0.8%; TP=0.8%; SL in 1.0–1.2%; prefer lev 4–5
 		advPct := pathAdversePct(pickPath, entry, long)
 		rangePct := recentMeanBarRangePct(bars, i, entry)
 		ex, ok := exitsFromPathFormula(peak, advPct, rangePct, taker, maker)
@@ -1317,8 +1308,9 @@ func runRollingPredicted(
 	}
 
 	rule := fmt.Sprintf(
-		"IS origin → N=%d under-%.2f%% H → formula TP=%.0f%%×peak, SL=max(path_adv,bar_range,min), lev from ≤%.2f%% risk (pathR, not max mid $; TP/SL≥%.2f or sit out) → append → re-validate H until trade_end",
-		lookbackN, errBand*100, PathTakeFrac*100, PathTargetRiskPct, PathMinTpSlRatio,
+		"IS origin → N=%d under-%.2f%% H → sit out peak<%.2f%%; TP=%.2f%% SL=%.2f–%.2f%% lev prefer %d–%d (risk≤%.1f%%) → append → re-validate H until trade_end",
+		lookbackN, errBand*100, PathTargetTPPct, PathTargetTPPct, PathSLLoPct, PathSLHiPct,
+		PathPreferLevLo, PathPreferLevHi, PathTargetRiskPct,
 	)
 	return map[string]any{
 		"selection_rule": rule,
