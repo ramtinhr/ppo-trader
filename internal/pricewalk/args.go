@@ -22,8 +22,9 @@ const (
 	ReplayBalance            = 1e9
 
 	// Live predicted bot (mode 2) — trade the full OOS year:
-	//  re-find N/H → re-predict → enter on fee-floor side → SCORE TP×SL×lev on
-	//  recent TRAIN actuals every origin (max train PnL in band; dynamic, not static).
+	//  re-find N/H → re-predict path → SCORE TP×SL×lev on that path (fee floor +
+	//  ±errBand adverse) for max mid gain / least risk / no liquid → trade →
+	//  append actuals → re-find N → predict again. No sit-out starve.
 	PathTakeFrac      = 0.70
 	PathMinPeakPct    = 0.08 // fee-area floor only — do not starve the year book
 	PathMinStopPct    = 0.25
@@ -33,12 +34,6 @@ const (
 	PathWinRateTarget = 0.80
 	PathMinHorizonH   = 4
 	PathTargetRiskPct = 5.0
-	PathTrainSamples  = 96 // more recent train origins for stabler scores
-	// Dynamic score band (searched every origin — not one frozen combo).
-	PathScoreTPLo     = 0.40
-	PathScoreTPHi     = 1.20
-	PathScoreSLLo     = 0.70
-	PathScoreSLHi     = 1.50
 	DefaultTradeDays  = 30
 )
 

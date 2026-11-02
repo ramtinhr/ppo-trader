@@ -61,8 +61,9 @@ OLS return features per bar size, optionally runs per-trade TP/SL:
 - `--price-strategy 1` / `oracle` — peek actual future closes (research ceiling → `nm_price_walk_forward.html`)
 - `--price-strategy 2` / `predicted` — **confirmed IS/OOS loop**:
   each entry origin → **re-find** lookback **N** + under-1% **H** from past → **re-predict** H closes →
-  **score** TP×SL×lev on TRAIN lookback (most train PnL) → trade after origin at bar open → **append actuals** →
-  next entry **re-finds N** and **predicts again** until `trade_end`. (`nm_price_walk_forward_predicted.html`)
+  **score** TP×SL×lev on that predicted path (fee floor + ±errBand adverse; max mid gain / least risk / no liquid) →
+  trade after origin at bar open → **append actuals** → next entry **re-finds N** and **predicts again** until `trade_end`.
+  (`nm_price_walk_forward_predicted.html`)
 
 ### Master loop: find N → predict → trade → append → re-find N → predict again
 
@@ -71,7 +72,7 @@ OLS return features per bar size, optionally runs per-trade TP/SL:
 | **IS (TRAIN)** | All dates **before** `trade_start` (fit OLS) |
 | **N / H** | At **each entry** origin: walk back lookback **N** + forward **H** with mean err &lt; `--max-rel-err` (from past data only — includes appended actuals). Not frozen after trade 1 |
 | **Predict** | Fresh every origin from `bars[i-1]` features; enter at `bars[i].Open` (never reuse the prior path) |
-| **Combo** | **Entry:** fee-floor peak only (trade the year — no adverse/WR sit-outs). **Exits:** dynamic score on band TP 0.4–1.2 / SL 0.7–1.5 — pick **max train PnL** every origin (path-mid if train thin; not static) |
+| **Combo** | **Entry:** fee-floor peak only (trade the year — no sit-out starve). **Exits:** score TP×SL×lev on the **predicted path** with fee floor + ±errBand (1%) adverse — must hit TP on mid; pick max mid gain then least risk / no liquid |
 | **OOS trade** | Predict **H** → enter **after** → realize on actuals |
 | **After exit** | **Append** entry→exit actual candles → **re-find N/H** → **re-predict** → re-score exits; continue until `trade_end` |
 

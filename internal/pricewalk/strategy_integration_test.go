@@ -129,11 +129,11 @@ func TestRollingMonthPredictTradeRefresh(t *testing.T) {
 			t.Fatalf("trade missing horizon_h: %+v", tr)
 		}
 		note, _ := tr["oracle_note"].(string)
-		if note == "" || !strings.Contains(note, "train_score") || !strings.Contains(note, "re-find N=") {
-			t.Fatalf("note should mention re-find N + train_score, got %q", note)
+		if note == "" || !strings.Contains(note, "path_score") || !strings.Contains(note, "re-find N=") {
+			t.Fatalf("note should mention re-find N + path_score, got %q", note)
 		}
-		if _, ok := tr["train_pnl"]; !ok {
-			t.Fatalf("trade missing train_pnl: %+v", tr)
+		if _, ok := tr["path_worst_pnl"]; !ok {
+			t.Fatalf("trade missing path_worst_pnl: %+v", tr)
 		}
 		eb, _ := tr["entry_bar"].(int)
 		eh, _ := tr["exit_h"].(int)
@@ -142,8 +142,8 @@ func TestRollingMonthPredictTradeRefresh(t *testing.T) {
 		}
 		prevEnd = eb + eh
 		src, _ := tr["path_source"].(string)
-		if src != "train_score_tp_sl_lev" {
-			t.Fatalf("path_source=%q want train_score_tp_sl_lev", src)
+		if src != "predicted_path_tp_sl_lev" {
+			t.Fatalf("path_source=%q want predicted_path_tp_sl_lev", src)
 		}
 	}
 	sumSkips, _ := out["skips"].(map[string]any)
@@ -230,7 +230,7 @@ func TestRollingRetestsGridEachTrade(t *testing.T) {
 	if sum["pick_mode"] != "rolling-predicted" {
 		t.Fatalf("mode=%v", sum["pick_mode"])
 	}
-	if sum["exits_mode"] != "train_score" {
+	if sum["exits_mode"] != "predicted_path" {
 		t.Fatalf("exits_mode=%v", sum["exits_mode"])
 	}
 	if n == 0 {
@@ -392,46 +392,24 @@ func TestRollingGridFindsTinyTP(t *testing.T) {
 	}
 }
 
-func TestPickExitsByTrainGainMostPnL(t *testing.T) {
-	const barMs = int64(15 * 60_000)
-	start := int64(1_700_000_000_000)
-	start = start - (start % barMs)
-	// Strong up-drift: train scoring should prefer a reachable TP + moderate SL/lev.
-	minutes := synthMinutes(160, barMs, start)
-	bars := candles.Aggregate(minutes, barMs)
-	h1 := pricemodel.Model{Alphas: [4]float64{8.0, 0, 0, 0}}
-	models := []pricemodel.Model{pricemodel.ColdStart(), h1}
-	for h := 2; h <= 40; h++ {
-		models = append(models, pricemodel.Model{Alphas: [4]float64{8.0, 0, 0, 0}})
-	}
-	origin := 80
-	if origin >= len(bars) {
-		t.Fatalf("need bars, got %d", len(bars))
-	}
-	feat, ok := pricemodel.CandleFeatures(bars[origin-1], bars[origin-2].Close)
-	if !ok {
-		t.Fatal("features")
-	}
-	entry := bars[origin].Open
-	raw := predictedCloses(models, bars[origin-1].Close, feat)
-	pickPath := truncatePath(raw, 20)
+func TestPickExitsByPredictedPathHitsTP(t *testing.T) {
+	entry := 100.0
+	// Clear +1.2% peak — scorer must pick a TP that hits on mid and stay liquid-safe.
+	pickPath := []float64{100.4, 100.8, 101.0, 101.2, 101.1}
 	long, peak := pathDirection(pickPath, entry)
-	if peak < 0.05 {
-		t.Fatalf("need directional peak, got %.4f", peak)
+	if !long || peak < 1.0 {
+		t.Fatalf("long=%v peak=%.3f", long, peak)
 	}
-	best := pickExitsByTrainGain(
-		bars, models, 10, origin, 20,
-		long, entry, pickPath,
-		[]float64{0.5, 1.0, 1.5, 2.0},
-		[]float64{0.1, 0.5, 1.0, 1.5},
-		[]uint32{1, 2, 3, 4, 5},
-		500, 5, 0.08, 0.0005, 0.0002,
+	stops := []float64{0.5, 0.7, 1.0, 1.5}
+	targets := []float64{0.1, 0.5, 0.7, 1.0}
+	grid := exitCandidatesGrid(stops, targets)
+	best := pickExitsByPredictedPath(
+		long, entry, pickPath, peak,
+		stops, targets, grid, []uint32{1, 2, 3, 4, 5},
+		500, 5, 0.08, 0.01, 0.0005, 0.0002,
 	)
 	if best == nil {
-		t.Fatal("expected train-scored combo")
-	}
-	if best.TrainN < 1 {
-		t.Fatalf("train_n=%d", best.TrainN)
+		t.Fatal("expected path-scored combo")
 	}
 	if best.Lev < 1 {
 		t.Fatalf("lev=%.0f", best.Lev)
@@ -439,77 +417,29 @@ func TestPickExitsByTrainGainMostPnL(t *testing.T) {
 	if best.RiskPct > PathTargetRiskPct+1e-9 {
 		t.Fatalf("risk %.2f%% > %.2f%%", best.RiskPct, PathTargetRiskPct)
 	}
-	t.Logf("pick %s lev=%.0f train_pnl=%.2f n=%d mid=%.2f",
-		best.Exits.Label(), best.Lev, best.TrainPnL, best.TrainN, best.PathPnL)
+	if firstTargetPct(best.Exits) > peak+1e-9 {
+		t.Fatalf("TP %.3f > peak %.3f", firstTargetPct(best.Exits), peak)
+	}
+	mid := simulateExitsOnPath(long, entry, best.Exits, best.Steps, pickPath, 0.0005, 0.0002)
+	if mid.Reason != "tp" || mid.PnL <= 0 {
+		t.Fatalf("picked combo must hit TP on mid: %#v", mid)
+	}
+	t.Logf("pick %s lev=%.0f mid=%.2f worst=%.2f risk=%.2f%%",
+		best.Exits.Label(), best.Lev, best.PathPnL, best.WorstPnL, best.RiskPct)
 }
 
-func TestScoreComboPrefersWinningTP(t *testing.T) {
-	// Up to ~0.7% then dump through −1% — reachable 0.5 TP wins; unreachable 5% TP stops out.
-	samples := []trainSample{
-		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.4, 100.7, 99.2, 99.0}},
-		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.3, 100.6, 99.1, 98.9}},
-		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.5, 100.65, 99.3, 99.0}},
-		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.35, 100.55, 99.0, 98.8}},
-		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.45, 100.7, 99.2, 99.1}},
-		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.5, 100.8, 99.0, 98.7}},
-		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.2, 100.6, 99.15, 99.0}},
-		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.4, 100.75, 99.05, 98.9}},
+func TestBetterPathPickPrefersGainThenLowRisk(t *testing.T) {
+	fat := &pathPick{PathPnL: 100, WorstPnL: -10, RiskPct: 5, Lev: 5, ExitH: 3,
+		Exits: exits.Exits{StopPct: 1, Targets: [][2]float64{{0.7, 1}}}, LiquidDist: 10}
+	thin := &pathPick{PathPnL: 80, WorstPnL: 0, RiskPct: 2, Lev: 2, ExitH: 3,
+		Exits: exits.Exits{StopPct: 1, Targets: [][2]float64{{0.7, 1}}}, LiquidDist: 40}
+	if !betterPathPick(fat, thin) {
+		t.Fatal("higher mid PnL must win")
 	}
-	good := exits.Exits{StopPct: 1.0, Targets: [][2]float64{{0.5, 1}}}
-	bad := exits.Exits{StopPct: 1.0, Targets: [][2]float64{{5.0, 1}}}
-	gs := scoreComboOnSamples(samples, good, 3, 500, 5, 0.0005, 0.0002)
-	bs := scoreComboOnSamples(samples, bad, 3, 500, 5, 0.0005, 0.0002)
-	if gs.N < 5 || bs.N < 5 {
-		t.Fatalf("coverage good=%d bad=%d", gs.N, bs.N)
-	}
-	if gs.PnL <= bs.PnL {
-		t.Fatalf("reachable TP should score higher: good=%.4f bad=%.4f", gs.PnL, bs.PnL)
-	}
-	if trainWR(gs) <= trainWR(bs) {
-		t.Fatalf("reachable TP should win more often: goodWR=%.2f badWR=%.2f", trainWR(gs), trainWR(bs))
-	}
-}
-
-func TestTrainScoreGridIncludesAnalyzeBand(t *testing.T) {
-	// Default CLI 0.1-10 stride used to skip TP0.7 / SL1.0 — must always be present.
-	stops, _ := ParseRange("0.1-10/0.1")
-	targets, _ := ParseRange("0.1-10/0.1")
-	ss, tt := trainScoreGrid(stops, targets)
-	has := func(xs []float64, want float64) bool {
-		for _, x := range xs {
-			if math.Abs(x-want) < 1e-9 {
-				return true
-			}
-		}
-		return false
-	}
-	for _, want := range []float64{0.7, 0.9, 1.0, 1.2} {
-		if !has(ss, want) {
-			t.Fatalf("score stops missing %.1f (got %v)", want, ss)
-		}
-	}
-	for _, want := range []float64{0.5, 0.6, 0.7, 0.8} {
-		if !has(tt, want) {
-			t.Fatalf("score tps missing %.1f (got %v)", want, tt)
-		}
-	}
-}
-
-func TestBetterTrainPickPrefersMostPnL(t *testing.T) {
-	// Most train PnL wins even if WR is lower (analyze objective = gain).
-	fat := &trainPick{TrainPnL: 100, TrainWR: 0.40, TrainN: 20, pathPick: pathPick{Lev: 5, PathPnL: 1}}
-	thin := &trainPick{TrainPnL: 80, TrainWR: 0.90, TrainN: 20, pathPick: pathPick{Lev: 5, PathPnL: 1}}
-	if !betterTrainPick(fat, thin) {
-		t.Fatal("higher train PnL must win")
-	}
-	tiedHiWR := &trainPick{TrainPnL: 100, TrainWR: 0.90, TrainN: 20, pathPick: pathPick{Lev: 5, PathPnL: 1}}
-	if !betterTrainPick(tiedHiWR, fat) {
-		t.Fatal("tied PnL → higher WR")
-	}
-	hiLev := &trainPick{TrainPnL: 100, TrainWR: 0.90, TrainN: 20, pathPick: pathPick{Lev: 5, PathPnL: 1}}
-	loLev := &trainPick{TrainPnL: 100, TrainWR: 0.90, TrainN: 20, pathPick: pathPick{Lev: 3, PathPnL: 1}}
-	if !betterTrainPick(hiLev, loLev) {
-		t.Fatal("tied gain → prefer higher lev")
+	safer := &pathPick{PathPnL: 100, WorstPnL: -10, RiskPct: 2, Lev: 2, ExitH: 3,
+		Exits: exits.Exits{StopPct: 1, Targets: [][2]float64{{0.7, 1}}}, LiquidDist: 40}
+	if !betterPathPick(safer, fat) {
+		t.Fatal("tied mid/adverse → lower risk")
 	}
 }
 
@@ -521,58 +451,32 @@ func TestFeeFloorOnlyAllowsAdverseDominatedPeak(t *testing.T) {
 		t.Fatalf("fixture peak %.3f below fee floor %.3f", peak, minPeak)
 	}
 	if peak < adverse {
-		// still a valid entry under fee-floor rule
 		return
 	}
 	t.Fatal("fixture should be adverse-dominated")
 }
 
-func TestPickExitsAllowsNegativeTrainPnL(t *testing.T) {
-	// Dump paths lose on train — scorer still returns a combo (least-loss), no +PnL gate.
-	samples := make([]trainSample, 0, 12)
-	for i := 0; i < 12; i++ {
-		samples = append(samples, trainSample{
-			Long: true, Entry: 100, Peak: 0.4,
-			Act: []float64{99.7, 99.4, 99.0, 98.8},
-		})
+func TestPickExitsPrefersReachableTPUnderErrBand(t *testing.T) {
+	entry := 100.0
+	pickPath := []float64{100.5, 100.9, 101.0, 100.8} // peak ~1.0%
+	long, peak := pathDirection(pickPath, entry)
+	stops := []float64{0.7, 1.0}
+	targets := []float64{0.5, 0.7, 0.95}
+	grid := exitCandidatesGrid(stops, targets)
+	best := pickExitsByPredictedPath(
+		long, entry, pickPath, peak,
+		stops, targets, grid, []uint32{1, 2, 3},
+		500, 5, 0.08, 0.01, 0.0005, 0.0002,
+	)
+	if best == nil {
+		t.Fatal("expected a combo under 1% err band")
 	}
-	// Both stay inside 5% risk at lev 3 (0.7×3=2.1, 1.2×3=3.6).
-	tight := scoreComboOnSamples(samples, exits.Exits{StopPct: 0.7, Targets: [][2]float64{{0.5, 1}}}, 3, 500, 5, 0.0005, 0.0002)
-	wide := scoreComboOnSamples(samples, exits.Exits{StopPct: 1.2, Targets: [][2]float64{{0.7, 1}}}, 3, 500, 5, 0.0005, 0.0002)
-	if tight.N < 5 || wide.N < 5 {
-		t.Fatalf("coverage tight=%d wide=%d", tight.N, wide.N)
+	// Unreachable near-peak TP should lose to a smaller TP that clears fees on mid.
+	if firstTargetPct(best.Exits) > peak+1e-9 {
+		t.Fatalf("TP above peak")
 	}
-	if tight.PnL > 0 || wide.PnL > 0 {
-		t.Fatalf("dump paths should lose: tight=%.2f wide=%.2f", tight.PnL, wide.PnL)
-	}
-	// Max-PnL pick prefers the less-negative (tighter stop exits sooner on dump).
-	if tight.PnL <= wide.PnL {
-		t.Fatalf("tighter stop should lose less on dump: tight=%.2f wide=%.2f", tight.PnL, wide.PnL)
-	}
-}
-
-func TestPickExitsFindsAnalyzeLikeCombo(t *testing.T) {
-	// Most paths hit ~0.75% then fade a bit (still above −1% SL). Tight SL0.5×TP2 gets stopped.
-	samples := make([]trainSample, 0, 20)
-	for i := 0; i < 16; i++ {
-		entry := 100.0
-		act := []float64{entry * 1.004, entry * 1.0075, entry * 1.006, entry * 1.005}
-		if i%4 == 0 {
-			// Occasional deep dip — tight SL dies, 1% SL survives then TP.
-			act = []float64{entry * 1.003, entry * 0.996, entry * 1.007, entry * 1.008}
-		}
-		samples = append(samples, trainSample{Long: true, Entry: entry, Peak: 0.2, Act: act})
-	}
-	good := scoreComboOnSamples(samples, exits.Exits{StopPct: 1.0, Targets: [][2]float64{{0.7, 1}}}, 5, 500, 5, 0.0005, 0.0002)
-	bad := scoreComboOnSamples(samples, exits.Exits{StopPct: 0.5, Targets: [][2]float64{{2.0, 1}}}, 5, 500, 5, 0.0005, 0.0002)
-	if good.N < 10 {
-		t.Fatalf("good coverage %d", good.N)
-	}
-	if trainWR(good) < 0.85 {
-		t.Fatalf("analyze-like combo WR=%.2f want ≥0.85 pnl=%.2f", trainWR(good), good.PnL)
-	}
-	if good.PnL <= bad.PnL {
-		t.Fatalf("0.7/1.0/5 should dominate sucker: good pnl=%.2f wr=%.2f bad pnl=%.2f wr=%.2f",
-			good.PnL, trainWR(good), bad.PnL, trainWR(bad))
+	mid := simulateExitsOnPath(long, entry, best.Exits, best.Steps, pickPath, 0.0005, 0.0002)
+	if mid.Reason != "tp" {
+		t.Fatalf("must hit TP on predicted path, got %s", mid.Reason)
 	}
 }
