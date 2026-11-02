@@ -22,17 +22,22 @@ const (
 	ReplayBalance            = 1e9
 
 	// Live predicted bot (mode 2) — trade the full OOS year:
-	//  re-find N/H → re-predict → SCORE TP×SL×lev on path: fee floor, survive
-	//  ±errBand adverse, prefer risk-adjusted gain (not max-lev dust TP/SL).
+	//  fee-floor entries (don't starve) + exits that cannot collapse to 0.3%×10x.
+	//  Rank path_r / adverse soft; do NOT hard-sit-out on adverse (that left ~4 trades).
 	PathTakeFrac      = 0.70
-	PathMinPeakPct    = 0.35 // need real edge before fee; kills 0.17% TP dust
-	PathMinStopPct    = 0.70 // analyze floor — 0.3%×10x was the loser cluster
+	PathMinPeakPct    = 0.08 // fee-area floor — fill the year book
+	PathMinStopPct    = 0.70 // hard floor: forbids the 0.3% sucker cluster
 	PathSkewMaxLev    = 1.0
-	PathMinTpSlRatio  = 0.70 // TP not ≪ SL
-	PathLiveMaxLev    = 5.0  // cap; 10x on noise stops destroyed the book
-	PathWinRateTarget = 0.90
+	PathMinTpSlRatio  = 0.50
+	PathLiveMaxLev    = 5.0
+	PathWinRateTarget = 0.80
 	PathMinHorizonH   = 4
-	PathTargetRiskPct = 3.5 // stop×lev ceiling
+	PathTargetRiskPct = 5.0
+	// Preferred score band (always searched — analyze winners live here).
+	PathScoreTPLo     = 0.40
+	PathScoreTPHi     = 1.20
+	PathScoreSLLo     = 0.70
+	PathScoreSLHi     = 1.50
 	DefaultTradeDays  = 30
 )
 

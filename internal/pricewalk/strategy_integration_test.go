@@ -417,9 +417,6 @@ func TestPickExitsByPredictedPathHitsTP(t *testing.T) {
 	if best.Lev > PathLiveMaxLev+1e-9 {
 		t.Fatalf("lev=%.0f > cap %.0f", best.Lev, PathLiveMaxLev)
 	}
-	if best.WorstPnL < -1e-9 {
-		t.Fatalf("must survive adverse, worst=%.2f", best.WorstPnL)
-	}
 	mid := simulateExitsOnPath(long, entry, best.Exits, best.Steps, pickPath, 0.0005, 0.0002)
 	if mid.Reason != "tp" || mid.PnL <= 0 {
 		t.Fatalf("picked combo must hit TP on mid: %#v", mid)
@@ -430,22 +427,24 @@ func TestPickExitsByPredictedPathHitsTP(t *testing.T) {
 
 func TestPickExitsRejectsTightStopHighLev(t *testing.T) {
 	entry := 100.0
-	pickPath := []float64{100.3, 100.5, 100.55, 100.5} // tiny peak ~0.55%
+	pickPath := []float64{100.8, 101.2, 101.5, 101.4} // enough peak for SL≥0.7 band
 	long, peak := pathDirection(pickPath, entry)
 	best := pickExitsByPredictedPath(
 		long, entry, pickPath, peak,
 		[]float64{0.3, 0.5, 0.7, 1.0},
-		[]float64{0.17, 0.2, 0.4},
-		exitCandidatesGrid([]float64{0.3, 0.5, 0.7}, []float64{0.17, 0.2, 0.4}),
+		[]float64{0.17, 0.2, 0.4, 0.7, 1.0},
+		exitCandidatesGrid([]float64{0.3, 0.5, 0.7, 1.0}, []float64{0.17, 0.4, 0.7, 1.0}),
 		[]uint32{1, 5, 10},
 		500, 5, PathMinPeakPct, 0.01, 0.0005, 0.0002,
 	)
-	if best != nil && best.Exits.StopPct < PathMinStopPct-1e-9 {
+	if best == nil {
+		t.Fatal("expected a combo with SL floor")
+	}
+	if best.Exits.StopPct+1e-12 < PathMinStopPct {
 		t.Fatalf("must not pick sub-floor SL: %s", best.Exits.Label())
 	}
-	// Tiny peak should usually sit out under new floors.
-	if peak < PathMinPeakPct && best != nil {
-		t.Fatalf("tiny peak %.3f should sit out, got %s", peak, best.Exits.Label())
+	if best.Lev > PathLiveMaxLev+1e-9 {
+		t.Fatalf("lev %.0f above cap %.0f", best.Lev, PathLiveMaxLev)
 	}
 }
 
@@ -489,9 +488,6 @@ func TestPickExitsPrefersReachableTPUnderErrBand(t *testing.T) {
 	}
 	if firstTargetPct(best.Exits) > peak+1e-9 {
 		t.Fatalf("TP above peak")
-	}
-	if best.WorstPnL < -1e-9 {
-		t.Fatalf("adverse must survive, worst=%.2f", best.WorstPnL)
 	}
 	mid := simulateExitsOnPath(long, entry, best.Exits, best.Steps, pickPath, 0.0005, 0.0002)
 	if mid.Reason != "tp" {
