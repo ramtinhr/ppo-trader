@@ -71,7 +71,7 @@ OLS return features per bar size, optionally runs per-trade TP/SL:
 | **IS (TRAIN)** | All dates **before** `trade_start` (fit OLS) |
 | **N / H** | At **each entry** origin: walk back lookback **N** + forward **H** with mean err &lt; `--max-rel-err` (from past data only — includes appended actuals). Not frozen after trade 1 |
 | **Predict** | Fresh every origin from `bars[i-1]` features; enter at `bars[i].Open` (never reuse the prior path) |
-| **Combo** | **Entry:** peak≥0.25% and peak≥predicted adverse (skip weak/dir-fragile). **Exits:** dynamic score on band TP 0.4–1.2 / SL 0.7–1.5 — require **+train PnL**, WR≥55%, TP-hit≥35%; pick most train PnL (not static) |
+| **Combo** | **Entry:** fee-floor peak only (trade the year — no adverse/WR sit-outs). **Exits:** dynamic score on band TP 0.4–1.2 / SL 0.7–1.5 — pick **max train PnL** every origin (path-mid if train thin; not static) |
 | **OOS trade** | Predict **H** → enter **after** → realize on actuals |
 | **After exit** | **Append** entry→exit actual candles → **re-find N/H** → **re-predict** → re-score exits; continue until `trade_end` |
 

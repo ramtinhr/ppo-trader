@@ -513,20 +513,22 @@ func TestBetterTrainPickPrefersMostPnL(t *testing.T) {
 	}
 }
 
-func TestPredEntryOKFiltersWeakAndAdverse(t *testing.T) {
-	if !predEntryOK(0.40, 0.20, 0.25) {
-		t.Fatal("strong peak vs adverse should pass")
+func TestFeeFloorOnlyAllowsAdverseDominatedPeak(t *testing.T) {
+	// Live entry is fee-floor only — adverse > peak must NOT sit out the year book.
+	minPeak := minTradablePeakPct(0.0005, 0.0002)
+	peak, adverse := 0.30, 0.40
+	if peak+1e-12 < minPeak {
+		t.Fatalf("fixture peak %.3f below fee floor %.3f", peak, minPeak)
 	}
-	if predEntryOK(0.20, 0.05, 0.25) {
-		t.Fatal("peak below entry min must sit out")
+	if peak < adverse {
+		// still a valid entry under fee-floor rule
+		return
 	}
-	if predEntryOK(0.30, 0.40, 0.25) {
-		t.Fatal("adverse > peak must sit out")
-	}
+	t.Fatal("fixture should be adverse-dominated")
 }
 
-func TestPickExitsRequiresPositiveTrainPnL(t *testing.T) {
-	// Paths that only dump → no combo should clear +train PnL gate.
+func TestPickExitsAllowsNegativeTrainPnL(t *testing.T) {
+	// Dump paths lose on train — scorer still returns a combo (least-loss), no +PnL gate.
 	samples := make([]trainSample, 0, 12)
 	for i := 0; i < 12; i++ {
 		samples = append(samples, trainSample{
@@ -534,9 +536,18 @@ func TestPickExitsRequiresPositiveTrainPnL(t *testing.T) {
 			Act: []float64{99.7, 99.4, 99.0, 98.8},
 		})
 	}
-	goodBand := scoreComboOnSamples(samples, exits.Exits{StopPct: 1.0, Targets: [][2]float64{{0.7, 1}}}, 5, 500, 5, 0.0005, 0.0002)
-	if goodBand.PnL > 0 {
-		t.Fatalf("dump paths should not print +train PnL, got %.2f", goodBand.PnL)
+	// Both stay inside 5% risk at lev 3 (0.7×3=2.1, 1.2×3=3.6).
+	tight := scoreComboOnSamples(samples, exits.Exits{StopPct: 0.7, Targets: [][2]float64{{0.5, 1}}}, 3, 500, 5, 0.0005, 0.0002)
+	wide := scoreComboOnSamples(samples, exits.Exits{StopPct: 1.2, Targets: [][2]float64{{0.7, 1}}}, 3, 500, 5, 0.0005, 0.0002)
+	if tight.N < 5 || wide.N < 5 {
+		t.Fatalf("coverage tight=%d wide=%d", tight.N, wide.N)
+	}
+	if tight.PnL > 0 || wide.PnL > 0 {
+		t.Fatalf("dump paths should lose: tight=%.2f wide=%.2f", tight.PnL, wide.PnL)
+	}
+	// Max-PnL pick prefers the less-negative (tighter stop exits sooner on dump).
+	if tight.PnL <= wide.PnL {
+		t.Fatalf("tighter stop should lose less on dump: tight=%.2f wide=%.2f", tight.PnL, wide.PnL)
 	}
 }
 

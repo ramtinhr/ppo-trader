@@ -562,26 +562,6 @@ func minTradablePeakPct(taker, maker float64) float64 {
 	return need
 }
 
-// liveEntryMinPeak — fee floor raised to PathEntryMinPeakPct (skip tiny OLS wiggles).
-func liveEntryMinPeak(taker, maker float64) float64 {
-	need := minTradablePeakPct(taker, maker)
-	if need < PathEntryMinPeakPct {
-		need = PathEntryMinPeakPct
-	}
-	return need
-}
-
-// predEntryOK — live-honest entry gate (no peek). Skip weak / adverse-dominated peaks.
-func predEntryOK(peak, adverse, minPeak float64) bool {
-	if peak+1e-12 < minPeak {
-		return false
-	}
-	if adverse > 0 && peak+1e-12 < adverse*PathEntryMinPeakAdv {
-		return false
-	}
-	return true
-}
-
 // exitsFromPredictedPath — legacy helper for geometry unit tests.
 func exitsFromPredictedPath(peakPct, adversePct, errBand, taker, maker float64) exits.Exits {
 	_ = errBand
@@ -641,8 +621,7 @@ func collectTrainSamples(
 		}
 		pred := truncatePath(raw, hWin)
 		long, peak := pathDirection(pred, entry)
-		adv := pathAdversePct(pred, entry, long)
-		if !predEntryOK(peak, adv, minPeak) {
+		if peak+1e-12 < minPeak {
 			continue
 		}
 		act := actualCloses(bars, t, hWin)
@@ -703,8 +682,7 @@ type trainScore struct {
 	TPHits int
 }
 
-// scoreComboOnSamples sums PnL of one TP×SL×lev on TRAIN actual paths.
-// Recent samples (front of slice) are weighted heavier. Actuals decide — not pred peak.
+// scoreComboOnSamples sums PnL of one TP×SL×lev on TRAIN actual paths (equal weight).
 func scoreComboOnSamples(
 	samples []trainSample,
 	ex exits.Exits, lev float64,
@@ -721,17 +699,14 @@ func scoreComboOnSamples(
 	if tp/ex.StopPct+1e-12 < PathMinTpSlRatio {
 		return trainScore{}
 	}
-	nSamp := len(samples)
 	var out trainScore
-	for i, s := range samples {
+	for _, s := range samples {
 		steps := sizeForLeverage(balance, lev, s.Entry)
 		if steps <= 0 || ex.Validate(steps) != nil {
 			continue
 		}
 		sim := simulateExitsOnPath(s.Long, s.Entry, ex, steps, s.Act, taker, maker)
-		// Newest-first list: weight 1.0 … ~0.35 so recent regime dominates.
-		w := 0.35 + 0.65*float64(nSamp-i)/float64(nSamp)
-		out.PnL += sim.PnL * w
+		out.PnL += sim.PnL
 		out.N++
 		if sim.PnL > 0 {
 			out.Wins++
@@ -789,8 +764,69 @@ func betterTrainPick(cand, best *trainPick) bool {
 	return cand.Lev > best.Lev+1e-12
 }
 
-// pickExitsByTrainGain dynamically scores TP×SL×lev on recent TRAIN actuals.
-// Only returns a combo with +train PnL and minimum train WR — never a frozen static exit.
+// pickExitsByPathMid scores the band on the predicted path only (used when train is thin
+// so the year book still trades — still dynamic, not a frozen combo).
+func pickExitsByPathMid(
+	long bool, entry float64, pickPath []float64,
+	stops, targets []float64, levs []uint32,
+	balance, maxRiskPct, minPeak, taker, maker float64,
+) *trainPick {
+	targetRisk := maxRiskPct
+	if PathTargetRiskPct > 0 && PathTargetRiskPct < targetRisk {
+		targetRisk = PathTargetRiskPct
+	}
+	scoreStops, scoreTPs := trainScoreGrid(stops, targets)
+	advShock := adversePath(pickPath, long, 0.01)
+	minTP := minPeak * PathTakeFrac
+	var best *trainPick
+	for _, stop := range scoreStops {
+		if stop+1e-12 < PathMinStopPct {
+			continue
+		}
+		for _, tp := range scoreTPs {
+			if tp+1e-12 < minTP || tp/stop+1e-12 < PathMinTpSlRatio {
+				continue
+			}
+			ex := exits.Exits{StopPct: stop, Targets: [][2]float64{{tp, 1}}}
+			for _, levU := range levs {
+				lev := float64(levU)
+				riskPct := impliedRiskPct(stop, lev)
+				if riskPct > targetRisk+1e-12 || comboCanLiquid(stop, lev) {
+					continue
+				}
+				steps := sizeForLeverage(balance, lev, entry)
+				if steps <= 0 || ex.Validate(steps) != nil {
+					continue
+				}
+				if pathAdversePct(advShock, entry, long) >= liquidPctAtLev(lev)*0.85 {
+					continue
+				}
+				mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
+				pathR := mid.PnL / math.Max(balance*riskPct/100, 1e-9)
+				cand := trainPick{
+					pathPick: pathPick{
+						Exits: ex, RiskPct: riskPct, Steps: steps, Lev: lev,
+						PathPnL: mid.PnL, WorstPnL: mid.PnL, PathR: pathR,
+						LiquidDist: liquidDistancePct(stop, lev), ExitH: mid.ExitH,
+					},
+					TrainPnL: mid.PnL, TrainN: 0, TrainWins: 0, TrainWR: 0,
+				}
+				if cand.ExitH < 1 {
+					cand.ExitH = 1
+				}
+				if betterTrainPick(&cand, best) {
+					cp := cand
+					best = &cp
+				}
+			}
+		}
+	}
+	return best
+}
+
+// pickExitsByTrainGain scores TP×SL×lev on recent TRAIN actuals every origin —
+// picks the combo with the most train PnL (dynamic). No WR/TP sit-out gates that
+// starve the year book. If train is thin, falls back to scoring the predicted path.
 func pickExitsByTrainGain(
 	bars []candles.Candle,
 	models []pricemodel.Model,
@@ -800,9 +836,6 @@ func pickExitsByTrainGain(
 	balance, maxRiskPct, minPeak, taker, maker float64,
 ) *trainPick {
 	samples := collectTrainSamples(bars, models, lookbackStart, origin, hWin, minPeak)
-	if len(samples) == 0 {
-		return nil
-	}
 	targetRisk := maxRiskPct
 	if PathTargetRiskPct > 0 && PathTargetRiskPct < targetRisk {
 		targetRisk = PathTargetRiskPct
@@ -810,9 +843,9 @@ func pickExitsByTrainGain(
 	minN := 5
 	if len(samples) < 5 {
 		minN = len(samples)
-		if minN < 1 {
-			return nil
-		}
+	}
+	if len(samples) == 0 || minN < 1 {
+		return pickExitsByPathMid(long, entry, pickPath, stops, targets, levs, balance, maxRiskPct, minPeak, taker, maker)
 	}
 	scoreStops, scoreTPs := trainScoreGrid(stops, targets)
 	advShock := adversePath(pickPath, long, 0.01)
@@ -850,18 +883,8 @@ func pickExitsByTrainGain(
 				if sc.N < minN {
 					continue
 				}
-				// Must make money on train — no losing-on-train picks.
-				if sc.PnL <= 1e-9 {
-					continue
-				}
 				wr := trainWR(sc)
-				if wr+1e-12 < PathTrainMinWR {
-					continue
-				}
 				tpRate := trainTPRate(sc)
-				if tpRate+1e-12 < PathTrainMinTPHit {
-					continue
-				}
 				mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
 				pathR := mid.PnL / math.Max(balance*riskPct/100, 1e-9)
 				cand := trainPick{
@@ -883,7 +906,10 @@ func pickExitsByTrainGain(
 			}
 		}
 	}
-	return best
+	if best != nil {
+		return best
+	}
+	return pickExitsByPathMid(long, entry, pickPath, stops, targets, levs, balance, maxRiskPct, minPeak, taker, maker)
 }
 
 func actualCloses(bars []candles.Candle, entryBar, hMax int) []float64 {
@@ -1245,8 +1271,8 @@ func runOracleGrid(
 }
 
 // runRollingPredicted — confirmed IS/OOS loop:
-//   re-find N/H → re-predict → entry filter (weak/adverse peaks sit out) →
-//   dynamic train-score TP×SL×lev (+train PnL only) → trade → append → repeat.
+//   re-find N/H → re-predict → enter on fee-floor side → SCORE TP×SL×lev on
+//   TRAIN (max train PnL in band; path-mid if thin) → trade → append → repeat.
 func runRollingPredicted(
 	args Args,
 	bars []candles.Candle,
@@ -1271,7 +1297,7 @@ func runRollingPredicted(
 	}
 	sort.Slice(levs, func(i, j int) bool { return levs[i] < levs[j] })
 
-	minPeak := liveEntryMinPeak(taker, maker)
+	minPeak := minTradablePeakPct(taker, maker)
 
 	lookbackN := 0
 	liveH := max(pathWindow, 1)
@@ -1393,7 +1419,8 @@ func runRollingPredicted(
 		long, peak := pathDirection(pickPath, entry)
 		pathSrc := "train_score_tp_sl_lev"
 		advPct := pathAdversePct(pickPath, entry, long)
-		if !predEntryOK(peak, advPct, minPeak) {
+		// Fee-floor only — do not starve the year book with adverse/WR sit-outs.
+		if peak+1e-12 < minPeak {
 			skippedFlat++
 			i++
 			continue
@@ -1401,7 +1428,7 @@ func runRollingPredicted(
 		predOriginMs := bars[i-1].TimeMs
 		predOriginPx := refPx
 
-		// Dynamic TP×SL×lev on recent TRAIN (+PnL / WR / TP-hit) — never frozen static.
+		// Dynamic TP×SL×lev on recent TRAIN (max train PnL in band) — never frozen static.
 		best := pickExitsByTrainGain(
 			bars, models, trainStart, i, liveH,
 			long, entry, pickPath,
@@ -1412,6 +1439,9 @@ func runRollingPredicted(
 			skippedNoCombo++
 			i++
 			continue
+		}
+		if best.TrainN < 1 {
+			pathSrc = "path_mid_score"
 		}
 
 		realSim := simulateExitsOnPath(long, entry, best.Exits, best.Steps, actPath, taker, maker)
@@ -1507,9 +1537,9 @@ func runRollingPredicted(
 	}
 
 	rule := fmt.Sprintf(
-		"each entry: re-find N + under-%.2f%% H → re-predict → entry peak≥%.2f%% & peak≥adverse → SCORE band TP%.1f–%.1f/SL%.1f–%.1f for +train PnL (WR≥%.0f%%, TP-hit≥%.0f%%; dynamic, not static) → append (last N=%d H=%d)",
+		"each entry: re-find N + under-%.2f%% H → re-predict → fee-floor peak≥%.2f%% → SCORE band TP%.1f–%.1f/SL%.1f–%.1f for max train PnL (dynamic; path-mid if thin) → append (last N=%d H=%d)",
 		errBand*100, minPeak, PathScoreTPLo, PathScoreTPHi, PathScoreSLLo, PathScoreSLHi,
-		100*PathTrainMinWR, 100*PathTrainMinTPHit, lookbackN, liveH,
+		lookbackN, liveH,
 	)
 	return map[string]any{
 		"selection_rule": rule,

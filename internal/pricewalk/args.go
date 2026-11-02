@@ -21,30 +21,25 @@ const (
 	StepBTC                  = 0.0001
 	ReplayBalance            = 1e9
 
-	// Live predicted bot (mode 2):
-	//  re-find N/H → re-predict → ENTRY filter (skip weak/dir-fragile peaks) →
-	//  SCORE TP×SL×lev on recent TRAIN actuals (dynamic every origin, not static) →
-	//  trade only if some combo has +train PnL → append → repeat.
-	PathTakeFrac         = 0.70
-	PathMinPeakPct       = 0.08 // absolute fee-area floor
-	PathEntryMinPeakPct  = 0.25 // live entry: skip fee-floor wiggles (dir_wrong cluster)
-	PathEntryMinPeakAdv  = 1.00 // require peak ≥ predicted adverse
-	PathMinStopPct       = 0.25
-	PathSkewMaxLev       = 1.0
-	PathMinTpSlRatio     = 0.50
-	PathLiveMaxLev       = 10.0
-	PathWinRateTarget    = 0.80
-	PathMinHorizonH      = 4
-	PathTargetRiskPct    = 5.0
-	PathTrainSamples     = 64
-	PathTrainMinWR       = 0.55 // reject combos that lose often on train
-	PathTrainMinTPHit    = 0.35 // prefer shapes that actually hit TP on train
-	// Score band (still searched dynamically — not a frozen single combo).
-	PathScoreTPLo        = 0.40
-	PathScoreTPHi        = 1.20
-	PathScoreSLLo        = 0.70
-	PathScoreSLHi        = 1.50
-	DefaultTradeDays     = 30
+	// Live predicted bot (mode 2) — trade the full OOS year:
+	//  re-find N/H → re-predict → enter on fee-floor side → SCORE TP×SL×lev on
+	//  recent TRAIN actuals every origin (max train PnL in band; dynamic, not static).
+	PathTakeFrac      = 0.70
+	PathMinPeakPct    = 0.08 // fee-area floor only — do not starve the year book
+	PathMinStopPct    = 0.25
+	PathSkewMaxLev    = 1.0
+	PathMinTpSlRatio  = 0.50
+	PathLiveMaxLev    = 10.0
+	PathWinRateTarget = 0.80
+	PathMinHorizonH   = 4
+	PathTargetRiskPct = 5.0
+	PathTrainSamples  = 96 // more recent train origins for stabler scores
+	// Dynamic score band (searched every origin — not one frozen combo).
+	PathScoreTPLo     = 0.40
+	PathScoreTPHi     = 1.20
+	PathScoreSLLo     = 0.70
+	PathScoreSLHi     = 1.50
+	DefaultTradeDays  = 30
 )
 
 var errHelp = errors.New("help")
