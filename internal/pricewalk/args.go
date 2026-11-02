@@ -22,13 +22,12 @@ const (
 	ReplayBalance            = 1e9
 
 	// Live predicted bot (mode 2) — confirmed IS/OOS loop:
-	//  Origin at latest IS → discover lookback N + under-1% H from data →
-	//  SCORE TP×SL×lev on expanding TRAIN lookback (most train PnL on actuals) →
-	//  trade AFTER origin → APPEND actual entry→exit candles →
-	//  re-validate H + re-score combo (stable expanding/rolling N; widen N only
-	//  if H collapses) → repeat until trade_end (~1y with --trade-days 365).
+	//  Each entry: FIND lookback N + under-1% H from past → PREDICT H again →
+	//  SCORE TP×SL×lev on TRAIN lookback (most train PnL) → trade at bar open →
+	//  APPEND actuals → next entry RE-FINDS N and PREDICTS again (until trade_end).
 	//  - sit out only when peak cannot clear fees
 	//  - no invented / h1-extrapolated / span-floor paths
+	//  - never reuse a prior predicted path / entry after a fill
 	//  - exits NOT static — re-scored every origin for most train gain
 	PathTakeFrac      = 0.70
 	PathMinPeakPct    = 0.08 // fee-area floor for a directional side

@@ -312,9 +312,10 @@ func under1PctHorizonLookback(
 	return best
 }
 
-// discoverLookbackNH walks expanding lookback sizes from the IS origin until
-// under-1% H is found. Returns the stable N size-class (not re-bruteforced every
-// trade) and the matching H. Numbers come from data.
+// discoverLookbackNH walks lookback size classes ending at originIdx until
+// under-1% H is found. Called at the first origin and again after every closed
+// trade (appended actuals change the past) so the next entry re-finds N then
+// re-predicts. Numbers come from past data only.
 func discoverLookbackNH(
 	models []pricemodel.Model,
 	bars []candles.Candle,
@@ -353,9 +354,8 @@ func discoverLookbackNH(
 			bestH, bestN = h, n
 		}
 		if h >= minUsable {
-			// First working size class = stable N.
-			logx.Infof("    discover N/H: lookback N=%d → under-%.2f%% H=%d (first working class)",
-				n, maxRelErr*100, h)
+			logx.Infof("    discover N/H @%d: lookback N=%d → under-%.2f%% H=%d (first working class)",
+				originIdx, n, maxRelErr*100, h)
 			return n, h
 		}
 		if n == available {
@@ -363,12 +363,17 @@ func discoverLookbackNH(
 		}
 	}
 	if bestH < 1 {
-		if hintH > 0 {
+		bestN = max(available, 16)
+		// Cap fallback H so train samples (t+H < origin inside N) can exist.
+		capH := max(bestN/2, 1)
+		if hintH > 0 && hintH < capH {
 			bestH = hintH
 		} else {
+			bestH = capH
+		}
+		if bestH < 1 {
 			bestH = 1
 		}
-		bestN = max(available, 16)
 		logx.Warnf("    discover N/H: no under-%.2f%% H on lookback — fall back N=%d H=%d",
 			maxRelErr*100, bestN, bestH)
 		return bestN, bestH

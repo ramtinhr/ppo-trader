@@ -60,20 +60,20 @@ OLS return features per bar size, optionally runs per-trade TP/SL:
 
 - `--price-strategy 1` / `oracle` — peek actual future closes (research ceiling → `nm_price_walk_forward.html`)
 - `--price-strategy 2` / `predicted` — **confirmed IS/OOS loop**:
-  origin at latest IS → discover lookback **N** + under-1% **H** from data →
-  **score** TP×SL×lev on expanding TRAIN lookback (most train PnL) → trade after origin → **append actuals** →
-  re-validate **H** + re-score combo (stable expanding/rolling **N**; widen N only if
-  H collapses) until `trade_end`. (`nm_price_walk_forward_predicted.html`)
+  each entry origin → **re-find** lookback **N** + under-1% **H** from past → **re-predict** H closes →
+  **score** TP×SL×lev on TRAIN lookback (most train PnL) → trade after origin at bar open → **append actuals** →
+  next entry **re-finds N** and **predicts again** until `trade_end`. (`nm_price_walk_forward_predicted.html`)
 
-### Master loop: IS origin → N/H under 1% → trade → append → re-validate
+### Master loop: find N → predict → trade → append → re-find N → predict again
 
 | Phase | Rule |
 |-------|------|
-| **IS (TRAIN)** | All dates **before** `trade_start` (fit OLS); origin = latest IS bar |
-| **N / H** | Walk back from origin: lookback **N** + forward **H** with mean err &lt; `--max-rel-err` (from data, not fixed) |
-| **Combo** | Enter on predicted **side** (fee-floor peak). Exits: **score TP×SL×lev on TRAIN lookback actuals each origin** — pick the combo with the most train PnL (not static 0.8/1.2/4–5) |
-| **OOS trade** | Predict **H** from older bar → enter **after** → realize on actuals |
-| **After exit** | **Append** entry→exit actual candles → re-validate **H** + re-score TP/SL/lev; widen **N** only if H collapses; continue until `trade_end` (loss does not halt) |
+| **IS (TRAIN)** | All dates **before** `trade_start` (fit OLS) |
+| **N / H** | At **each entry** origin: walk back lookback **N** + forward **H** with mean err &lt; `--max-rel-err` (from past data only — includes appended actuals). Not frozen after trade 1 |
+| **Predict** | Fresh every origin from `bars[i-1]` features; enter at `bars[i].Open` (never reuse the prior path) |
+| **Combo** | Enter on predicted **side** (fee-floor peak). Exits: **score TP×SL×lev on TRAIN lookback actuals each origin** — most train PnL |
+| **OOS trade** | Predict **H** → enter **after** → realize on actuals |
+| **After exit** | **Append** entry→exit actual candles → **re-find N/H** → **re-predict** → re-score exits; continue until `trade_end` |
 
 Defaults for a **1-month** smoke test: `--reserve-trade-days 30 --trade-days 30`.
 Year run: `--reserve-trade-days 365 --trade-days 365`. Short scan → shrink TRAIN, keep TRADE.

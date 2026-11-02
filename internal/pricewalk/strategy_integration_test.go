@@ -129,8 +129,8 @@ func TestRollingMonthPredictTradeRefresh(t *testing.T) {
 			t.Fatalf("trade missing horizon_h: %+v", tr)
 		}
 		note, _ := tr["oracle_note"].(string)
-		if note == "" || !strings.Contains(note, "train_score") || !strings.Contains(note, "N=") {
-			t.Fatalf("note should mention N + train_score, got %q", note)
+		if note == "" || !strings.Contains(note, "train_score") || !strings.Contains(note, "re-find N=") {
+			t.Fatalf("note should mention re-find N + train_score, got %q", note)
 		}
 		if _, ok := tr["train_pnl"]; !ok {
 			t.Fatalf("trade missing train_pnl: %+v", tr)
@@ -145,6 +145,58 @@ func TestRollingMonthPredictTradeRefresh(t *testing.T) {
 		if src != "train_score_tp_sl_lev" {
 			t.Fatalf("path_source=%q want train_score_tp_sl_lev", src)
 		}
+	}
+	sumSkips, _ := out["skips"].(map[string]any)
+	nRefind, _ := sumSkips["n_rediscover"].(int)
+	if nRefind < int(n) {
+		t.Fatalf("expected ≥1 N re-find per trade, n_rediscover=%d trades=%d", nRefind, n)
+	}
+}
+
+func TestEachTradeRepredictsFreshEntry(t *testing.T) {
+	// After trade 1, next entry must use a later predict_at / entry_bar (fresh path).
+	const barMs = int64(15 * 60_000)
+	start := int64(1_700_000_000_000)
+	start = start - (start % barMs)
+	minutes := synthMinutes(240, barMs, start)
+	h1 := pricemodel.Model{Alphas: [4]float64{8.0, 0, 0, 0}}
+	models := []pricemodel.Model{pricemodel.ColdStart(), h1}
+	for h := 2; h <= 40; h++ {
+		models = append(models, pricemodel.Model{Alphas: [4]float64{8.0, 0, 0, 0}})
+	}
+	args := DefaultArgs()
+	args.PriceStrategyMode = 2
+	args.MaxRelErr = 0.01
+	args.PriceStops = []float64{1.0, 1.5, 2.0}
+	args.PriceTargets = []float64{0.1, 0.5, 1.0}
+	args.PriceLeverage = []uint32{1, 2, 3}
+	args.PriceRisk = []float64{5}
+	out, err := runPriceStrategyPerTrade(args, minutes, models, "15m", barMs,
+		start+40*barMs, start+200*barMs, 0.0005, 0.0002, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trades, _ := out["trades"].([]map[string]any)
+	if len(trades) < 2 {
+		t.Fatalf("need ≥2 trades to prove re-predict, got %d skips=%v", len(trades), out["skips"])
+	}
+	prevPred := ""
+	prevEntry := 0
+	for i, tr := range trades {
+		predAt, _ := tr["predict_at"].(string)
+		eb, _ := tr["entry_bar"].(int)
+		ep, _ := tr["entry_price"].(float64)
+		pc, _ := tr["predict_close"].(float64)
+		if predAt == "" || eb < 2 || !(ep > 0) || !(pc > 0) {
+			t.Fatalf("trade %d missing fresh predict/entry: %+v", i, tr)
+		}
+		if predAt == prevPred {
+			t.Fatalf("trade %d reused predict_at %s — must re-predict", i, predAt)
+		}
+		if eb <= prevEntry {
+			t.Fatalf("trade %d entry_bar %d ≤ prior %d", i, eb, prevEntry)
+		}
+		prevPred, prevEntry = predAt, eb
 	}
 }
 

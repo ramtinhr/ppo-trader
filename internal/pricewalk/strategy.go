@@ -1130,11 +1130,11 @@ func runOracleGrid(
 }
 
 // runRollingPredicted — confirmed IS/OOS loop:
-//   Origin at latest IS → discover lookback N + under-1% H from data →
-//   predict H → SCORE TP×SL×lev on expanding TRAIN lookback (most train PnL) →
-//   trade AFTER origin → APPEND actual entry→exit candles into lookback →
-//   re-validate H + re-score combo (stable expanding/rolling N; widen N only if
-//   H collapses) → repeat until trade_end. Flat forecast = sit out.
+//   At each entry origin: FIND lookback N + under-1% H from past data →
+//   PREDICT H closes from bars[i-1] → SCORE TP×SL×lev on TRAIN lookback →
+//   trade AFTER origin at bars[i].Open → APPEND actual entry→exit candles →
+//   next origin RE-FINDS N (past now includes appended actuals) and PREDICTS again.
+//   Flat forecast = sit out (still re-predicts every bar; re-finds N after a fill).
 func runRollingPredicted(
 	args Args,
 	bars []candles.Candle,
@@ -1161,25 +1161,19 @@ func runRollingPredicted(
 
 	minPeak := minTradablePeakPct(taker, maker)
 
-	// Origin = latest IS bar (just before TRADE). Discover N/H from past data only.
-	isOrigin := oosLo
-	if isOrigin < 2 {
-		isOrigin = 2
-	}
-	lookbackN, liveH := discoverLookbackNH(models, bars, isOrigin, errBand, pathWindow)
-	if liveH < 1 {
-		liveH = max(pathWindow, 1)
-	}
+	lookbackN := 0
+	liveH := max(pathWindow, 1)
 	if liveH > hMax {
 		liveH = hMax
 	}
-	// Expanding window start: keep size-class N behind the first IS origin.
-	lookbackStart := isOrigin - lookbackN
-	if lookbackStart < 1 {
-		lookbackStart = 1
-	}
-	logx.Infof("  %s rolling-predicted (live): N=%d H=%d (models≤%d) · stops=%d · tps=%d · combos=%d · lev=%v (cap %.0f) · max_risk=%g%% · err_band=%.2f%% · min_peak=%.2f%% · exits=train_score · OOS %d..%d",
-		label, lookbackN, liveH, hMax, len(usable), len(targets), len(exitGrid), levs, liveMaxLev, maxRiskPct, errBand*100, minPeak, oosLo, oosHi)
+	// Expanding TRAIN start (grows as actuals append). N itself is re-found per entry.
+	trainStart := 1
+	// Re-find N after the first origin and after every closed trade (appended actuals).
+	needRediscoverN := true
+	nRediscover := 0
+
+	logx.Infof("  %s rolling-predicted (live): re-find N/H each entry · re-predict every origin · stops=%d · tps=%d · combos=%d · lev=%v (cap %.0f) · max_risk=%g%% · err_band=%.2f%% · min_peak=%.2f%% · exits=train_score · OOS %d..%d",
+		label, len(usable), len(targets), len(exitGrid), levs, liveMaxLev, maxRiskPct, errBand*100, minPeak, oosLo, oosHi)
 
 	balance := args.BalanceUSDT
 	running := 0.0
@@ -1189,7 +1183,6 @@ func runRollingPredicted(
 	skippedNoCombo := 0
 	skippedFlat := 0
 	skippedDisagree := 0
-	nWiden := 0
 	origins := 0
 	inBandN, inBandLoss := 0, 0
 
@@ -1199,45 +1192,60 @@ func runRollingPredicted(
 			continue
 		}
 
-		// Re-validate under-1% H on expanding lookback (past only; includes appended actuals).
-		// Rolling size = bars from lookbackStart..i; N class stays unless H collapses.
-		expandN := i - lookbackStart
-		if expandN < lookbackN {
-			expandN = lookbackN
-		}
-		hNow := under1PctHorizonLookback(models, bars, i, expandN, errBand)
-		if hNow < 1 {
-			hNow = liveH // keep last known good until data says otherwise
-		}
-		if hNow > hMax {
-			hNow = hMax
-		}
-		// H collapsed → widen N (option B: do not freeze first H; do not re-brute N every trade).
-		if hNow < PathMinHorizonH && i > isOrigin {
-			wider := widenLookbackN(lookbackN, i, i-1)
-			if wider > lookbackN {
-				lookbackN = wider
-				nWiden++
-				newStart := isOrigin - lookbackN
-				if newStart < 1 {
-					newStart = 1
-				}
-				lookbackStart = newStart
-				expandN = i - lookbackStart
-				if expandN < lookbackN {
-					expandN = lookbackN
-				}
-				h2 := under1PctHorizonLookback(models, bars, i, expandN, errBand)
-				if h2 > hNow {
-					hNow = h2
-				}
-				logx.Infof("  %s H collapsed → widen N=%d → H=%d @ bar %d", label, lookbackN, hNow, i)
+		// FIND N (past only). Always after a fill; also if H collapsed while scanning.
+		if needRediscoverN || lookbackN < 8 {
+			nNow, hNow := discoverLookbackNH(models, bars, i, errBand, liveH)
+			if nNow < 8 {
+				nNow = 8
 			}
+			if hNow < 1 {
+				hNow = liveH
+			}
+			if hNow > hMax {
+				hNow = hMax
+			}
+			// Keep H inside N so past-only train origins can place t+H before this origin.
+			if hNow > nNow/2 {
+				hNow = max(nNow/2, 1)
+			}
+			if hNow < 1 {
+				hNow = 1
+			}
+			if nNow != lookbackN || hNow != liveH || needRediscoverN {
+				nRediscover++
+				logx.Infof("  %s re-find N/H @ bar %d: N=%d H=%d (models≤%d)", label, i, nNow, hNow, hMax)
+			}
+			lookbackN, liveH = nNow, hNow
+			nStart := i - lookbackN
+			if nStart < 1 {
+				nStart = 1
+			}
+			// Expanding train window: never drop appended actuals; may grow when N widens.
+			if trainStart <= 1 || nStart < trainStart {
+				trainStart = nStart
+			}
+			needRediscoverN = false
+		} else {
+			// Same N class while scanning for the next entry — re-validate H on rolling N.
+			hNow := under1PctHorizonLookback(models, bars, i, lookbackN, errBand)
+			if hNow < 1 {
+				hNow = liveH
+			}
+			if hNow > hMax {
+				hNow = hMax
+			}
+			if hNow > lookbackN/2 {
+				hNow = max(lookbackN/2, 1)
+			}
+			if hNow < PathMinHorizonH {
+				needRediscoverN = true
+				continue // re-find N at this same origin
+			}
+			if hNow < 1 {
+				hNow = 1
+			}
+			liveH = hNow
 		}
-		if hNow < 1 {
-			hNow = 1
-		}
-		liveH = hNow
 
 		feat, ok := pricemodel.CandleFeatures(bars[i-1], bars[i-2].Close)
 		if !ok {
@@ -1252,13 +1260,12 @@ func runRollingPredicted(
 			continue
 		}
 
-		// Predict from older bar (ref = i-1); trade enters on bar i (after origin).
+		// PREDICT AGAIN from this origin (ref = i-1); enter on bar i open — never reuse prior path.
 		rawFull := predictedCloses(models, refPx, feat)
 		if len(rawFull) == 0 {
 			i++
 			continue
 		}
-		// Look-ahead = re-validated under-1% H (no future-actual truncation).
 		pickPath := truncatePath(rawFull, liveH)
 		origins++
 		if len(pickPath) == 0 {
@@ -1281,10 +1288,9 @@ func runRollingPredicted(
 		predOriginMs := bars[i-1].TimeMs
 		predOriginPx := refPx
 
-		// Score TP×SL×lev on expanding TRAIN lookback (actual paths) — most gain.
-		// Entry = predicted SIDE with fee-floor peak; exits are NOT static.
+		// Score TP×SL×lev on expanding TRAIN lookback (includes appended actuals).
 		best := pickExitsByTrainGain(
-			bars, models, lookbackStart, i, liveH,
+			bars, models, trainStart, i, liveH,
 			long, entry, pickPath,
 			usable, targets, levs,
 			balance, maxRiskPct, minPeak, taker, maker,
@@ -1338,8 +1344,8 @@ func runRollingPredicted(
 			})
 		}
 		note := fmt.Sprintf(
-			"N=%d H=%d predict@%s → peak=%.3f%% → train_score %s train_pnl=%+.2f n=%d mid=%+.2f → trade → append %d actuals; in_band=%v max_dev=%.3f%%",
-			lookbackN, liveH, utc(predOriginMs), peak, best.Exits.Label(), best.TrainPnL, best.TrainN, best.PathPnL, exitH, inBand, bandDev*100,
+			"re-find N=%d H=%d predict@%s → peak=%.3f%% → train_score %s train_pnl=%+.2f n=%d mid=%+.2f → entry=%.2f → append %d actuals; in_band=%v max_dev=%.3f%%",
+			lookbackN, liveH, utc(predOriginMs), peak, best.Exits.Label(), best.TrainPnL, best.TrainN, best.PathPnL, entry, exitH, inBand, bandDev*100,
 		)
 		tradesJSON = append(tradesJSON, map[string]any{
 			"side": side,
@@ -1368,9 +1374,9 @@ func runRollingPredicted(
 			"fills":        fills,
 		})
 
-		// APPEND actual entry→exit candles into the expanding lookback, then continue.
-		// A loss does not halt the bot; next origin re-validates H + re-picks combo.
+		// APPEND actual entry→exit candles into the lookback, then RE-FIND N and PREDICT again.
 		i = i + exitH
+		needRediscoverN = true
 	}
 
 	n := uint32(len(tradesJSON))
@@ -1378,16 +1384,16 @@ func runRollingPredicted(
 	if n > 0 {
 		winRate = round2(100 * float64(wins) / float64(n))
 	}
-	logx.Infof("  %s rolling-predicted done: %d trades · PnL %+.2f · origins=%d · win_rate=%.1f%% · N=%d H=%d · flat≈%d · no_combo≈%d · liquid≈%d · N_widen=%d · in_band=%d in_band_loss=%d",
-		label, n, running, origins, winRate, lookbackN, liveH, skippedFlat, skippedNoCombo, skippedLiquid, nWiden, inBandN, inBandLoss)
+	logx.Infof("  %s rolling-predicted done: %d trades · PnL %+.2f · origins=%d · win_rate=%.1f%% · N=%d H=%d · flat≈%d · no_combo≈%d · liquid≈%d · N_refind=%d · in_band=%d in_band_loss=%d",
+		label, n, running, origins, winRate, lookbackN, liveH, skippedFlat, skippedNoCombo, skippedLiquid, nRediscover, inBandN, inBandLoss)
 	if n == 0 {
 		logx.Warnf("  %s live predicted: 0 trades (flat_peak<%.2f%% → %d · no_combo=%d). Sitting out flat forecasts is correct for live.",
 			label, minPeak, skippedFlat, skippedNoCombo)
 	}
 
 	rule := fmt.Sprintf(
-		"IS origin → N=%d under-%.2f%% H → side from pred (peak≥%.2f%% fees); SCORE TP×SL×lev on TRAIN lookback (most train PnL) → append → re-score until trade_end",
-		lookbackN, errBand*100, minPeak,
+		"each entry: re-find N + under-%.2f%% H from past → re-predict → side (peak≥%.2f%% fees) → SCORE TP×SL×lev on TRAIN → append actuals → repeat (last N=%d H=%d)",
+		errBand*100, minPeak, lookbackN, liveH,
 	)
 	return map[string]any{
 		"selection_rule": rule,
@@ -1395,7 +1401,7 @@ func runRollingPredicted(
 			"exits_mode": "train_score", "pick_mode": modeName, "horizon": hMax,
 			"lookback_n": lookbackN, "path_window": liveH, "confirm_bars": 0, "max_leverage": liveMaxLev,
 			"err_band": errBand, "min_peak_pct": minPeak, "grid_stops": len(usable), "grid_tps": len(targets),
-			"grid_combos": len(exitGrid), "n_widen": nWiden,
+			"grid_combos": len(exitGrid), "n_rediscover": nRediscover,
 			"in_band_trades": inBandN, "in_band_losses": inBandLoss,
 			"taker_fee_bps": taker * 10_000, "maker_fee_bps": maker * 10_000,
 			"balance_start": args.BalanceUSDT, "balance_end": round2(balance),
@@ -1410,7 +1416,7 @@ func runRollingPredicted(
 		},
 		"skips": map[string]any{
 			"liquid": skippedLiquid, "tp_floor": 0, "robust": skippedNoCombo, "flat": skippedFlat,
-			"h1_disagree": skippedDisagree, "n_widen": nWiden,
+			"h1_disagree": skippedDisagree, "n_rediscover": nRediscover,
 		},
 		"trades": tradesJSON,
 	}, nil
