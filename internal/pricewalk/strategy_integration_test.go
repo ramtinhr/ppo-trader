@@ -1,6 +1,7 @@
 package pricewalk
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -341,9 +342,9 @@ func TestRollingGridFindsTinyTP(t *testing.T) {
 	}
 }
 
-func TestRejectsStopInsideErrBand(t *testing.T) {
-	// The screenshot bug: SL 0.1% × lev 10 wins absolute $ on a tiny pred move,
-	// then actual noise stops out (−9.99). With err_band=1%, stop < 1% must lose.
+func TestDynamicComboRejectsSuckerPayoff(t *testing.T) {
+	// SL is no longer frozen at err_band 1%. Combos must keep TP/SL ≥ PathMinTpSlRatio
+	// and risk≤5%; micro-TP vs fat SL is rejected (sit out), not forced to SL=1%.
 	const barMs = int64(15 * 60_000)
 	start := int64(1_700_000_000_000)
 	start = start - (start % barMs)
@@ -355,7 +356,7 @@ func TestRejectsStopInsideErrBand(t *testing.T) {
 	args := DefaultArgs()
 	args.PriceStrategyMode = 2
 	args.MaxRelErr = 0.01
-	args.PriceStops = []float64{0.1, 0.5, 1.0, 1.5} // includes illegal 0.1 under err band
+	args.PriceStops = []float64{0.1, 0.5, 1.0, 1.5, 2.0}
 	args.PriceTargets = []float64{0.1, 0.5, 1.0}
 	args.PriceLeverage = []uint32{1, 5, 10}
 	args.PriceRisk = []float64{5}
@@ -365,21 +366,13 @@ func TestRejectsStopInsideErrBand(t *testing.T) {
 		t.Fatal(err)
 	}
 	trades, _ := out["trades"].([]map[string]any)
-	if len(trades) == 0 {
-		t.Logf("no trades (filters); still OK if illegal stops never appear — skips=%v", out["skips"])
-		return
-	}
+	stopsSeen := map[float64]int{}
 	for _, tr := range trades {
 		sl, _ := tr["stop_pct"].(float64)
 		lev, _ := tr["leverage"].(float64)
-		if sl+1e-9 < 1.0 {
-			t.Fatalf("stop %.2f%% < err_band 1%% (lev=%v) — screenshot bug regress", sl, lev)
-		}
-		if lev > 5+1e-9 && sl >= 1.0-1e-9 {
-			risk := sl * lev
-			if risk > 5+1e-9 {
-				t.Fatalf("risk %.2f%% > 5%% with lev=%v sl=%v", risk, lev, sl)
-			}
+		stopsSeen[sl]++
+		if sl*lev > 5+1e-9 {
+			t.Fatalf("risk %.2f%% > 5%% with lev=%v sl=%v", sl*lev, lev, sl)
 		}
 		tp := 0.0
 		if ex, ok := tr["exits"].(map[string]any); ok {
@@ -387,8 +380,78 @@ func TestRejectsStopInsideErrBand(t *testing.T) {
 				tp = tgts[0][0]
 			}
 		}
-		if tp > 0 && sl > 0 && tp/sl+1e-12 < PathMinTpSlRatio && lev > PathSkewMaxLev+1e-9 {
-			t.Fatalf("skewed TP/SL %.3f at lev=%v > skew cap %.0f", tp/sl, lev, PathSkewMaxLev)
+		if tp > 0 && sl > 0 && tp/sl+1e-12 < PathMinTpSlRatio {
+			t.Fatalf("sucker TP/SL %.3f (tp=%.3f sl=%.3f) must be rejected", tp/sl, tp, sl)
 		}
 	}
+	t.Logf("trades=%d stop_pct histogram=%v skips=%v", len(trades), stopsSeen, out["skips"])
+}
+
+func TestPickPrefersHigherGainOverMinStop(t *testing.T) {
+	// On a strong predicted path, picker must not collapse every stop to the floor:
+	// higher TP with matching SL can win on mid PnL.
+	entry := 100.0
+	path := make([]float64, 20)
+	for i := range path {
+		path[i] = entry * 1.025 // +2.5% peak
+	}
+	long := true
+	peak := 2.5
+	errBand := 0.01
+	taker, maker := 0.0005, 0.0002
+	balance := 500.0
+	usable := []float64{0.5, 1.0, 1.5, 2.0}
+	levs := []uint32{1, 2, 3}
+	advShock := adversePath(path, long, errBand)
+	advPct := pathAdversePct(path, entry, long)
+	minStop := PathMinStopPct
+	if adv := advPct*1.25 + 0.05; adv > minStop {
+		minStop = adv
+	}
+	var best *pathPick
+	for _, tp := range []float64{round2(peak * PathTakeFrac), round2(peak * 0.95)} {
+		for _, stop := range usable {
+			if stop+1e-12 < minStop || tp/stop+1e-12 < PathMinTpSlRatio {
+				continue
+			}
+			ex := exits.Exits{StopPct: stop, Targets: [][2]float64{{tp, 1}}}
+			for _, levU := range levs {
+				lev := float64(levU)
+				risk := impliedRiskPct(stop, lev)
+				if risk > 5 {
+					continue
+				}
+				steps := sizeForLeverage(balance, lev, entry)
+				if steps <= 0 {
+					continue
+				}
+				mid := simulateExitsOnPath(long, entry, ex, steps, path, taker, maker)
+				if mid.PnL <= 0 || mid.Reason != "tp" {
+					continue
+				}
+				advSim := simulateExitsOnPath(long, entry, ex, steps, advShock, taker, maker)
+				cand := pathPick{
+					Exits: ex, RiskPct: risk, Steps: steps, Lev: lev,
+					PathPnL: mid.PnL, WorstPnL: advSim.PnL, PathR: mid.PnL / math.Max(balance*risk/100, 1e-9),
+					LiquidDist: liquidDistancePct(stop, lev), ExitH: mid.ExitH,
+				}
+				if best == nil || mid.PnL > best.PathPnL+1e-9 ||
+					(math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && advSim.PnL > best.WorstPnL+1e-9) {
+					cp := cand
+					best = &cp
+				}
+			}
+		}
+	}
+	if best == nil {
+		t.Fatal("expected a combo on +2.5% path")
+	}
+	tp := firstTargetPct(best.Exits)
+	if tp < 1.0 {
+		t.Fatalf("expected a meaningful TP on +2.5%% peak, got tp=%.2f sl=%.2f", tp, best.Exits.StopPct)
+	}
+	if best.Exits.StopPct < PathMinStopPct-1e-9 {
+		t.Fatalf("stop below floor: %v", best.Exits.StopPct)
+	}
+	t.Logf("picked %s lev=%.0f mid=%.2f adv=%.2f", best.Exits.Label(), best.Lev, best.PathPnL, best.WorstPnL)
 }

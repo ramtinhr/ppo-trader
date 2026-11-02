@@ -33,8 +33,8 @@ const (
 	PathTakeFrac      = 0.70
 	PathMinPeakPct    = 0.08 // fee-area floor; sit out only true dust
 	PathMinStopPct    = 0.25
-	PathSkewMaxLev    = 1.0 // micro-TP vs 1% SL: size small so one stop ≠ wipe month
-	PathMinTpSlRatio  = 0.25
+	PathSkewMaxLev    = 1.0 // leftover cap; bad TP/SL is hard-rejected now
+	PathMinTpSlRatio  = 0.50 // TP must be ≥ half SL — else sit out (no forced 1% SL)
 	PathLiveMaxLev    = 10.0
 	PathWinRateTarget = 0.80
 	PathMinHorizonH   = 4   // below this after append → try widen N
