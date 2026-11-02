@@ -206,8 +206,8 @@ Flags:
   --report PATH        default: DIR/nm_price_walk_forward_predicted.json
   --data DIR           OKX archives (default data/okx/BTC-USDT-SWAP/archives)
   --config PATH        fees config
-  --price-stops RANGE  default 0.25-2/0.25
-  --price-targets RANGE default 0.25-2/0.25
+  --price-stops RANGE  default 0.1-2/0.1
+  --price-targets RANGE default 0.1-2/0.1
   --price-leverage LIST default 1,2,3,4,5
   --balance-usdt N`)
 			return nil

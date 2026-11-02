@@ -29,8 +29,8 @@ type AnalyzeArgs struct {
 }
 
 func DefaultAnalyzeArgs() AnalyzeArgs {
-	stops, _ := ParseRange("0.25-2/0.25")
-	tgts, _ := ParseRange("0.25-2/0.25")
+	stops, _ := ParseRange("0.1-2/0.1")
+	tgts, _ := ParseRange("0.1-2/0.1")
 	return AnalyzeArgs{
 		Report:   "",
 		Data:     "data/okx/BTC-USDT-SWAP/archives",
@@ -52,6 +52,7 @@ type tradeRec struct {
 	Leverage   float64        `json:"leverage"`
 	ExitH      int            `json:"exit_h"`
 	PathWindow int            `json:"path_window"`
+	HorizonH   int            `json:"horizon_h"`
 	PnL        float64        `json:"pnl"`
 	Reason     string         `json:"reason"`
 	Exits      map[string]any `json:"exits"`
@@ -128,12 +129,22 @@ func RunAnalyze(a AnalyzeArgs) error {
 	logx.Infof("ANALYZE exits on report %s · %d trades · bar=%s (%dms) · grid stops=%d tps=%d lev=%v",
 		repPath, len(trades), barLabel, barMs, len(a.Stops), len(a.Targets), a.Leverage)
 
-	// Load tape covering TRADE (+ a bit of lookback for features unused here).
-	from := tradeStart - 7*86_400_000
-	if from < 0 {
-		from = 0
+	// Load the SAME tape window as price-walk (scan meta), so entry_bar indexes match.
+	// Also resolve each trade by entry_at time (robust if indexes drift).
+	meta, err := loadMeta(a.Scan)
+	if err != nil {
+		return err
 	}
-	minutes, err := candles.LoadMinutes(a.Data, a.Scan, from, tradeEnd)
+	startMs, err := dayMs(meta.Start)
+	if err != nil {
+		return fmt.Errorf("meta.start: %w", err)
+	}
+	endDayMs, err := dayMs(meta.End)
+	if err != nil {
+		return fmt.Errorf("meta.end: %w", err)
+	}
+	tapeFrom := startMs
+	minutes, err := candles.LoadMinutes(a.Data, a.Scan, tapeFrom, endDayMs)
 	if err != nil {
 		return err
 	}
@@ -141,6 +152,7 @@ func RunAnalyze(a AnalyzeArgs) error {
 	if len(bars) < 10 {
 		return fmt.Errorf("not enough aggregated bars")
 	}
+	logx.Infof("tape bars=%d · trade window %s → %s", len(bars), utc(tradeStart), utc(tradeEnd))
 
 	type comboKey struct {
 		Stop, TP float64
@@ -168,10 +180,13 @@ func RunAnalyze(a AnalyzeArgs) error {
 		liveWins, liveN int
 		livePnL         float64
 		mfeSum, maeSum  float64
+		mfeN            int
 		dirWrong        int // actual path never reached even a tiny favorable move
 		slTooTight      int // MFE ≥ some TP but MAE hit first under tight SL
 		oracleWins      int
 		oraclePnL       float64
+		oracleN         int
+		skippedNoPath   int
 	)
 
 	horizon := 40
@@ -196,19 +211,26 @@ func RunAnalyze(a AnalyzeArgs) error {
 		if tr.PnL > 0 {
 			liveWins++
 		}
-		long := tr.Side == "buy" || tr.Side == "long"
-		if tr.Side == "sell" || tr.Side == "short" {
+		long := true
+		switch tr.Side {
+		case "sell", "short":
 			long = false
+		case "buy", "long":
+			long = true
 		}
 		entry := tr.EntryPrice
-		if !(entry > 0) && tr.EntryBar >= 0 && tr.EntryBar < len(bars) {
-			entry = bars[tr.EntryBar].Open
-		}
-		i := tr.EntryBar
+		i := findBarIndex(bars, tr.EntryAt, tr.EntryBar)
 		if i < 0 || i >= len(bars) {
+			skippedNoPath++
 			continue
 		}
+		if !(entry > 0) {
+			entry = bars[i].Open
+		}
 		hMax := tr.PathWindow
+		if tr.HorizonH > hMax {
+			hMax = tr.HorizonH
+		}
 		if hMax < tr.ExitH {
 			hMax = tr.ExitH
 		}
@@ -218,14 +240,17 @@ func RunAnalyze(a AnalyzeArgs) error {
 		if hMax > horizon {
 			hMax = horizon
 		}
+		// Use enough actual bars after entry to evaluate exits (at least exit_h, up to horizon).
 		act := actualCloses(bars, i, hMax)
 		if len(act) == 0 {
+			skippedNoPath++
 			continue
 		}
 		mfe := rawPathFavorableSpanPct(act, entry, long)
 		mae := pathAdversePct(act, entry, long)
 		mfeSum += mfe
 		maeSum += mae
+		mfeN++
 		if mfe < 0.10 {
 			dirWrong++
 		}
@@ -274,6 +299,7 @@ func RunAnalyze(a AnalyzeArgs) error {
 				}
 			}
 		}
+		oracleN++
 		if bestOK {
 			oraclePnL += bestPnL
 			if bestPnL > 0 {
@@ -286,17 +312,21 @@ func RunAnalyze(a AnalyzeArgs) error {
 	}
 
 	liveWR := 100 * float64(liveWins) / math.Max(float64(liveN), 1)
-	oracleWR := 100 * float64(oracleWins) / math.Max(float64(liveN), 1)
-	avgMFE := mfeSum / math.Max(float64(liveN), 1)
-	avgMAE := maeSum / math.Max(float64(liveN), 1)
+	oracleWR := 100 * float64(oracleWins) / math.Max(float64(oracleN), 1)
+	avgMFE := mfeSum / math.Max(float64(mfeN), 1)
+	avgMAE := maeSum / math.Max(float64(mfeN), 1)
 
 	type ranked struct {
 		Agg *comboAgg
 		WR  float64
 	}
 	var list []ranked
+	minCover := oracleN / 2
+	if minCover < 1 {
+		minCover = 1
+	}
 	for _, c := range combos {
-		if c.N < liveN/2 { // must cover most trades
+		if c.N < minCover { // must cover most replayed trades
 			continue
 		}
 		wr := 100 * float64(c.Wins) / float64(c.N)
@@ -367,9 +397,10 @@ func RunAnalyze(a AnalyzeArgs) error {
 		"path_stats": map[string]any{
 			"avg_mfe_pct": round2(avgMFE*100) / 100, "avg_mae_pct": round2(avgMAE*100) / 100,
 			"dir_wrong_mfe_lt_0_10pct": dirWrong, "sl_too_tight_suspects": slTooTight,
+			"paths_ok": mfeN, "skipped_no_path": skippedNoPath, "tape_bars": len(bars),
 		},
 		"oracle_per_trade": map[string]any{
-			"win_rate": round2(oracleWR), "pnl": round2(oraclePnL), "wins": oracleWins,
+			"win_rate": round2(oracleWR), "pnl": round2(oraclePnL), "wins": oracleWins, "n": oracleN,
 			"note": "best TP×SL×lev on actual closes per entry (peek ceiling on THESE entries)",
 		},
 		"best_fixed_combo_by_pnl": nil,
@@ -437,4 +468,46 @@ func parseReportUTC(s string) (int64, error) {
 		}
 	}
 	return 0, fmt.Errorf("bad time %q", s)
+}
+
+// findBarIndex prefers entry_at timestamp (stable); falls back to report entry_bar.
+func findBarIndex(bars []candles.Candle, entryAt string, entryBar int) int {
+	if entryAt != "" {
+		if ms, err := parseReportUTC(entryAt); err == nil {
+			// First bar with TimeMs >= entryAt; prefer exact/open match.
+			lo, hi := 0, len(bars)
+			for lo < hi {
+				mid := (lo + hi) / 2
+				if bars[mid].TimeMs < ms {
+					lo = mid + 1
+				} else {
+					hi = mid
+				}
+			}
+			if lo < len(bars) {
+				if bars[lo].TimeMs == ms {
+					return lo
+				}
+				// Closest: lo or lo-1
+				if lo > 0 && abs64(bars[lo-1].TimeMs-ms) <= abs64(bars[lo].TimeMs-ms) {
+					return lo - 1
+				}
+				return lo
+			}
+			if len(bars) > 0 {
+				return len(bars) - 1
+			}
+		}
+	}
+	if entryBar >= 0 && entryBar < len(bars) {
+		return entryBar
+	}
+	return -1
+}
+
+func abs64(x int64) int64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
