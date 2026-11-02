@@ -32,9 +32,35 @@ type pathPick struct {
 	RiskPct    float64
 	Steps      int64
 	Lev        float64
-	PathPnL    float64
+	PathPnL    float64 // mid-path (predicted) or oracle actual PnL used for ranking
+	WorstPnL   float64 // robust: min PnL on pred / pred±err
 	PathR      float64
 	LiquidDist float64
+	ExitH      int // predicted bars to TP (prefer earlier)
+}
+
+func scalePath(path []float64, mult float64) []float64 {
+	out := make([]float64, len(path))
+	for i, p := range path {
+		out[i] = p * mult
+	}
+	return out
+}
+
+// adversePath moves every predicted close against the position by errBand (no peek).
+// Long → prices × (1−err); short → prices × (1+err). Favorable shock is not required.
+func adversePath(path []float64, long bool, errBand float64) []float64 {
+	if long {
+		return scalePath(path, 1-errBand)
+	}
+	return scalePath(path, 1+errBand)
+}
+
+func firstTargetPct(e exits.Exits) float64 {
+	if len(e.Targets) == 0 {
+		return 0
+	}
+	return e.Targets[0][0]
 }
 
 func liquidPctAtLev(lev float64) float64 {
@@ -219,10 +245,29 @@ func simulateExitsOnPath(long bool, entry float64, e exits.Exits, steps int64, p
 			fillPx = path[len(path)-1]
 		}
 		qty := float64(remaining) * StepBTC
+		reason := "timeout"
+		kind := "timeout"
+		// Never realize worse than the stop on timeout (the −20 bleed bug).
+		sPx := stopPx(stopPct)
+		mtm := sign * (fillPx - entry) * qty
+		atStop := sign * (sPx - entry) * qty
+		if mtm < atStop || hitStop(fillPx, stopPct) {
+			fillPx = sPx
+			reason = "stop"
+			kind = "stop"
+			mtm = atStop
+		} else if mtm < 0 {
+			// Still losing at horizon end but inside stop band → flatten at stop (risk cap).
+			fillPx = sPx
+			reason = "stop"
+			kind = "stop"
+			mtm = atStop
+		}
 		fee := taker * qty * fillPx
-		realized += sign * (fillPx - entry) * qty
+		realized += mtm
 		fees += fee
-		fills = append(fills, pathExitFill{Kind: "timeout", Price: fillPx, Steps: remaining, Fee: fee, H: len(path)})
+		fills = append(fills, pathExitFill{Kind: kind, Price: fillPx, Steps: remaining, Fee: fee, H: len(path)})
+		return pathSim{PnL: realized - fees, Fees: fees, Reason: reason, ExitH: len(path), Fills: fills}
 	}
 	return pathSim{PnL: realized - fees, Fees: fees, Reason: "timeout", ExitH: len(path), Fills: fills}
 }
@@ -239,19 +284,117 @@ func predictedCloses(models []pricemodel.Model, refPx float64, feat [pricemodel.
 	return out
 }
 
+// shapedPredictedPath builds a live-honest exit-picking path when raw OLS
+// multi-h closes are nearly flat (typical): same length as raw, but a
+// front-loaded move of spanPct in the signal direction.
+//
+// Front-loaded (not a slow linear ramp): every bar sits at the full target.
+// A ramp that starts near entry makes adversePath(·, errBand) print a ~errBand
+// fake stop on bar 1 for long horizons (e.g. 160×15m) — that was still 0 trades
+// after shaping. Constant-at-target survives the −err shock and can still clear TP.
 func shapedPredictedPath(raw []float64, entry float64, long bool, spanPct float64) []float64 {
 	if len(raw) == 0 || !(entry > 0) || !(spanPct > 0) {
 		return append([]float64(nil), raw...)
 	}
-	n := float64(len(raw))
 	target := spanPct / 100
+	px := entry * (1 - target)
+	if long {
+		px = entry * (1 + target)
+	}
 	out := make([]float64, len(raw))
-	for i := 1; i <= len(raw); i++ {
-		shaped := target * (float64(i) / n)
+	for i := range out {
+		out[i] = px
+	}
+	return out
+}
+
+// rawPathFavorableSpanPct is the best predicted move from entry in the
+// trade direction (0 if the raw OLS path never favors the signal).
+func rawPathFavorableSpanPct(raw []float64, entry float64, long bool) float64 {
+	if len(raw) == 0 || !(entry > 0) {
+		return 0
+	}
+	best := 0.0
+	for _, px := range raw {
+		if math.IsNaN(px) || math.IsInf(px, 0) || px <= 0 {
+			continue
+		}
+		var move float64
 		if long {
-			out[i-1] = entry * (1 + shaped)
+			move = (px/entry - 1) * 100
 		} else {
-			out[i-1] = entry * (1 - shaped)
+			move = (1 - px/entry) * 100
+		}
+		if move > best {
+			best = move
+		}
+	}
+	return best
+}
+
+// maxPredActualRelDev is max |act-pred|/pred over the overlapping prefix (0 if empty).
+func maxPredActualRelDev(pred, act []float64) float64 {
+	n := len(pred)
+	if len(act) < n {
+		n = len(act)
+	}
+	worst := 0.0
+	for i := 0; i < n; i++ {
+		p := pred[i]
+		a := act[i]
+		if !(p > 0) || math.IsNaN(p) || math.IsInf(p, 0) ||
+			math.IsNaN(a) || math.IsInf(a, 0) || a <= 0 {
+			continue
+		}
+		d := math.Abs(a-p) / p
+		if d > worst {
+			worst = d
+		}
+	}
+	return worst
+}
+
+// h1ExtrapolatedPath projects the h=1 predicted return out to every horizon in the
+// signal direction. Multi-h OLS closes are often nearly flat even when h=1 (the
+// signal model) has real edge — without this, error-band rules take 0 trades.
+func h1ExtrapolatedPath(n int, entry float64, long bool, r1 float64) []float64 {
+	if n < 1 || !(entry > 0) {
+		return nil
+	}
+	step := math.Abs(r1)
+	if !(step > 0) || math.IsNaN(step) || math.IsInf(step, 0) {
+		return nil
+	}
+	out := make([]float64, n)
+	for i := 0; i < n; i++ {
+		move := step * float64(i+1)
+		if long {
+			out[i] = entry * (1 + move)
+		} else {
+			out[i] = entry * (1 - move)
+		}
+	}
+	return out
+}
+
+// mergeFavorablePaths keeps the more favorable price at each step (signal direction).
+func mergeFavorablePaths(a, b []float64, long bool) []float64 {
+	if len(a) == 0 {
+		return append([]float64(nil), b...)
+	}
+	if len(b) == 0 {
+		return append([]float64(nil), a...)
+	}
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	out := make([]float64, n)
+	for i := 0; i < n; i++ {
+		if long {
+			out[i] = math.Max(a[i], b[i])
+		} else {
+			out[i] = math.Min(a[i], b[i])
 		}
 	}
 	return out
@@ -281,6 +424,31 @@ func recentWindowRangePct(bars []candles.Candle, i int, entry float64) float64 {
 	return (hi - lw) / entry * 100
 }
 
+// recentMeanBarRangePct = average per-bar (high−low)/entry over the lookback.
+// Used as SL noise floor — NOT window high−low (that confuses trend with noise).
+func recentMeanBarRangePct(bars []candles.Candle, i int, entry float64) float64 {
+	if !(entry > 0) || i < 2 {
+		return PathMinStopPct
+	}
+	lo := i - PriceRangeLookback
+	if lo < 0 {
+		lo = 0
+	}
+	var sum float64
+	n := 0
+	for _, c := range bars[lo:i] {
+		if math.IsNaN(c.High) || math.IsNaN(c.Low) || !(c.High > c.Low) {
+			continue
+		}
+		sum += (c.High - c.Low) / entry * 100
+		n++
+	}
+	if n == 0 {
+		return PathMinStopPct
+	}
+	return sum / float64(n)
+}
+
 func pathSpanPctForSignal(bars []candles.Candle, i int, entry, stopLo, stopHi float64) float64 {
 	rng := recentWindowRangePct(bars, i, entry)
 	v := rng * PriceRangeStopFrac
@@ -291,6 +459,296 @@ func pathSpanPctForSignal(bars []candles.Candle, i int, entry, stopLo, stopHi fl
 		v = stopHi
 	}
 	return v
+}
+
+// truncatePath keeps the first n predicted closes (fixed look-ahead).
+func truncatePath(path []float64, n int) []float64 {
+	if n <= 0 || n >= len(path) {
+		return path
+	}
+	return path[:n]
+}
+
+// truncatePathUntilRelErr keeps predicted closes while |pred−actual|/actual < maxRelErr.
+// Length is dynamic (not a fixed 160): stop at the first breach. Used per trade origin.
+func truncatePathUntilRelErr(pred, actual []float64, maxRelErr float64) []float64 {
+	if maxRelErr <= 0 {
+		maxRelErr = 0.01
+	}
+	n := len(pred)
+	if len(actual) < n {
+		n = len(actual)
+	}
+	out := make([]float64, 0, n)
+	for i := 0; i < n; i++ {
+		p, a := pred[i], actual[i]
+		if math.IsNaN(p) || math.IsInf(p, 0) || p <= 0 ||
+			math.IsNaN(a) || math.IsInf(a, 0) || a <= 0 {
+			break
+		}
+		if math.Abs(p-a)/a >= maxRelErr {
+			break
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// pathDirection picks side from the predicted window: whichever way the path
+// moves further from entry. Ties → long.
+func pathDirection(path []float64, entry float64) (long bool, peakPct float64) {
+	up := rawPathFavorableSpanPct(path, entry, true)
+	dn := rawPathFavorableSpanPct(path, entry, false)
+	if up >= dn {
+		return true, up
+	}
+	return false, dn
+}
+
+// pathInternalSpanPct is (max-min)/entry on the predicted window.
+// Flat OLS clouds sit near ref; open/close gaps must not look like a real peak.
+func pathInternalSpanPct(path []float64, entry float64) float64 {
+	if len(path) == 0 || !(entry > 0) {
+		return 0
+	}
+	lo, hi := math.Inf(1), math.Inf(-1)
+	for _, px := range path {
+		if math.IsNaN(px) || math.IsInf(px, 0) || px <= 0 {
+			continue
+		}
+		if px < lo {
+			lo = px
+		}
+		if px > hi {
+			hi = px
+		}
+	}
+	if !(hi > lo) {
+		return 0
+	}
+	return (hi - lo) / entry * 100
+}
+
+// pathAdversePct is the worst predicted move against the position in the window.
+func pathAdversePct(path []float64, entry float64, long bool) float64 {
+	if len(path) == 0 || !(entry > 0) {
+		return 0
+	}
+	worst := 0.0
+	for _, px := range path {
+		if math.IsNaN(px) || math.IsInf(px, 0) || px <= 0 {
+			continue
+		}
+		var against float64
+		if long {
+			against = (1 - px/entry) * 100
+		} else {
+			against = (px/entry - 1) * 100
+		}
+		if against > worst {
+			worst = against
+		}
+	}
+	return worst
+}
+
+// minTradablePeakPct — fee floor for having a directional side.
+func minTradablePeakPct(taker, maker float64) float64 {
+	feePct := (taker + maker) * 100
+	need := (feePct + 0.05) / PathTakeFrac
+	if need < PathMinPeakPct {
+		need = PathMinPeakPct
+	}
+	return need
+}
+
+// exitsFromPredictedPath — legacy helper for geometry unit tests.
+func exitsFromPredictedPath(peakPct, adversePct, errBand, taker, maker float64) exits.Exits {
+	_ = taker
+	_ = maker
+	tp := peakPct * PathTakeFrac
+	if tp > peakPct {
+		tp = peakPct * 0.95
+	}
+	sl := math.Max(adversePct*1.25+0.05, PathMinStopPct)
+	// Cap SL near err band so noise shield stays inside the under-1% horizon.
+	if errBand > 0 {
+		slCap := errBand * 100 * 1.05
+		if slCap < PathMinStopPct {
+			slCap = PathMinStopPct
+		}
+		if sl > slCap {
+			sl = slCap
+		}
+	}
+	return exits.Exits{StopPct: round2(sl), Targets: [][2]float64{{round2(tp), 1}}}
+}
+
+// betterPathPick: risk-adjusted mid gain (path_r) → survive adverse → better
+// TP/SL → earlier TP → lower risk → more liquid room.
+// Absolute $ mid PnL is NOT first (it blindly maxes leverage on dust edges).
+func betterPathPick(cand, best *pathPick) bool {
+	if best == nil {
+		return true
+	}
+	if cand.PathR > best.PathR+1e-9 {
+		return true
+	}
+	if math.Abs(cand.PathR-best.PathR) > 1e-9 {
+		return false
+	}
+	if cand.WorstPnL > best.WorstPnL+1e-9 {
+		return true
+	}
+	if math.Abs(cand.WorstPnL-best.WorstPnL) > 1e-9 {
+		return false
+	}
+	if cand.PathPnL > best.PathPnL+1e-9 {
+		return true
+	}
+	if math.Abs(cand.PathPnL-best.PathPnL) > 1e-9 {
+		return false
+	}
+	cRatio := firstTargetPct(cand.Exits) / math.Max(cand.Exits.StopPct, 1e-12)
+	bRatio := firstTargetPct(best.Exits) / math.Max(best.Exits.StopPct, 1e-12)
+	if cRatio > bRatio+1e-9 {
+		return true
+	}
+	if math.Abs(cRatio-bRatio) > 1e-9 {
+		return false
+	}
+	if cand.ExitH > 0 && best.ExitH > 0 && cand.ExitH < best.ExitH {
+		return true
+	}
+	if cand.ExitH != best.ExitH && cand.ExitH > 0 && best.ExitH > 0 {
+		return false
+	}
+	if cand.RiskPct < best.RiskPct-1e-12 {
+		return true
+	}
+	if math.Abs(cand.RiskPct-best.RiskPct) > 1e-12 {
+		return false
+	}
+	return cand.LiquidDist > best.LiquidDist
+}
+
+// pickExitsByPredictedPath scores TP×SL×lev on the predicted path every origin:
+//   • fee-floor TP, SL ≥ PathMinStopPct (blocks 0.3%×10x), lev ≤ PathLiveMaxLev
+//   • must hit TP on mid path; adverse used for ranking only (no hard sit-out)
+//   • always search analyze band TP 0.4–1.2 / SL 0.7–1.5 plus peak-tied TPs
+func pickExitsByPredictedPath(
+	long bool, entry float64, pickPath []float64, peak float64,
+	stops, targets []float64, exitGrid []exits.Exits, levs []uint32,
+	balance, maxRiskPct, minPeak, errBand, taker, maker float64,
+) *pathPick {
+	if len(pickPath) == 0 || !(peak > 0) || !(entry > 0) {
+		return nil
+	}
+	if errBand <= 0 {
+		errBand = 0.01
+	}
+	targetRisk := maxRiskPct
+	if PathTargetRiskPct > 0 && PathTargetRiskPct < targetRisk {
+		targetRisk = PathTargetRiskPct
+	}
+	minTP := minPeak * PathTakeFrac
+	feePct := (taker + maker) * 100
+	if minTP < feePct+0.02 {
+		minTP = feePct + 0.02
+	}
+	if peak+1e-12 < minTP {
+		return nil
+	}
+
+	searchGrid := make([]exits.Exits, 0, len(exitGrid)+64)
+	seen := map[string]bool{}
+	add := func(ex exits.Exits) {
+		k := ex.Label()
+		if seen[k] {
+			return
+		}
+		seen[k] = true
+		searchGrid = append(searchGrid, ex)
+	}
+	for _, ex := range exitGrid {
+		add(ex)
+	}
+	// Dense analyze band — always present so we don't miss 0.7/1.0-class winners.
+	for sl := PathScoreSLLo; sl <= PathScoreSLHi+1e-9; sl += 0.1 {
+		for tp := PathScoreTPLo; tp <= PathScoreTPHi+1e-9; tp += 0.1 {
+			add(exits.Exits{StopPct: round2(sl), Targets: [][2]float64{{round2(tp), 1}}})
+		}
+	}
+	for _, tp := range []float64{round2(peak * PathTakeFrac), round2(peak * 0.85), round2(peak * 0.95)} {
+		if tp+1e-12 < minTP || tp > peak+1e-9 {
+			continue
+		}
+		for _, stop := range stops {
+			if stop+1e-12 < PathMinStopPct {
+				continue
+			}
+			add(exits.Exits{StopPct: stop, Targets: [][2]float64{{tp, 1}}})
+		}
+	}
+	for _, stop := range stops {
+		for _, tp := range targets {
+			add(exits.Exits{StopPct: stop, Targets: [][2]float64{{tp, 1}}})
+		}
+	}
+
+	advShock := adversePath(pickPath, long, errBand)
+	var best *pathPick
+	for _, ex := range searchGrid {
+		if ex.StopPct+1e-12 < PathMinStopPct {
+			continue
+		}
+		tp := firstTargetPct(ex)
+		if tp > peak+1e-9 || tp+1e-12 < minTP {
+			continue
+		}
+		if tp/ex.StopPct+1e-12 < PathMinTpSlRatio {
+			continue
+		}
+		for _, levU := range levs {
+			lev := float64(levU)
+			if lev > PathLiveMaxLev+1e-12 {
+				continue
+			}
+			riskPct := impliedRiskPct(ex.StopPct, lev)
+			if riskPct > targetRisk+1e-12 {
+				continue
+			}
+			steps := sizeForLeverage(balance, lev, entry)
+			if steps <= 0 || ex.Validate(steps) != nil {
+				continue
+			}
+			if comboCanLiquid(ex.StopPct, lev) {
+				continue
+			}
+			if pathAdversePct(advShock, entry, long) >= liquidPctAtLev(lev)*0.85 {
+				continue
+			}
+			mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
+			if mid.PnL <= 0 || mid.Reason != "tp" {
+				continue
+			}
+			advSim := simulateExitsOnPath(long, entry, ex, steps, advShock, taker, maker)
+			pathR := mid.PnL / math.Max(balance*riskPct/100, 1e-9)
+			cand := pathPick{
+				Exits: ex, RiskPct: riskPct, Steps: steps, Lev: lev,
+				PathPnL: mid.PnL, WorstPnL: advSim.PnL, PathR: pathR,
+				LiquidDist: liquidDistancePct(ex.StopPct, lev), ExitH: mid.ExitH,
+			}
+			if cand.ExitH < 1 {
+				cand.ExitH = 1
+			}
+			if betterPathPick(&cand, best) {
+				cp := cand
+				best = &cp
+			}
+		}
+	}
+	return best
 }
 
 func actualCloses(bars []candles.Candle, entryBar, hMax int) []float64 {
@@ -310,17 +768,38 @@ func actualCloses(bars []candles.Candle, entryBar, hMax int) []float64 {
 }
 
 func exitCandidatesForStop(stopPct float64) []exits.Exits {
-	out := []exits.Exits{{
-		StopPct: stopPct,
-		Targets: [][2]float64{{stopPct, 1}},
-	}}
-	for _, p := range exits.DefaultScaleoutProfiles() {
-		if len(p.LadderR) == 1 && math.Abs(p.LadderR[0]-1) < 1e-12 {
+	return exitCandidatesGrid([]float64{stopPct}, nil)
+}
+
+// exitCandidatesGrid builds the full SL×TP asymmetric grid (e.g. 0.1 TP with 0.9 SL).
+// When targets is empty, falls back to TP=SL plus default R-multiple ladders.
+func exitCandidatesGrid(stops, targets []float64) []exits.Exits {
+	var out []exits.Exits
+	seen := map[string]bool{}
+	add := func(e exits.Exits) {
+		if e.Validate(10_000) != nil {
+			return
+		}
+		k := e.Label()
+		if seen[k] {
+			return
+		}
+		seen[k] = true
+		out = append(out, e)
+	}
+	for _, stop := range stops {
+		if len(targets) == 0 {
+			add(exits.Exits{StopPct: stop, Targets: [][2]float64{{stop, 1}}})
+			for _, p := range exits.DefaultScaleoutProfiles() {
+				if len(p.LadderR) == 1 && math.Abs(p.LadderR[0]-1) < 1e-12 {
+					continue
+				}
+				add(p.ToExits(stop))
+			}
 			continue
 		}
-		e := p.ToExits(stopPct)
-		if e.Validate(10_000) == nil {
-			out = append(out, e)
+		for _, tp := range targets {
+			add(exits.Exits{StopPct: stop, Targets: [][2]float64{{tp, 1}}})
 		}
 	}
 	return out
@@ -337,7 +816,44 @@ func exitsToJSON(e exits.Exits) map[string]any {
 	}
 }
 
-// runPriceStrategyPerTrade: oracle pick of max PnL on actual future closes.
+// forwardOriginIndex = last bar strictly before tradeEnd (same origin as FORWARD path).
+func forwardOriginIndex(bars []candles.Candle, tradeEndMs int64) int {
+	origin := -1
+	for t := 1; t < len(bars); t++ {
+		if bars[t].TimeMs < tradeEndMs {
+			origin = t
+		}
+	}
+	return origin
+}
+
+// extendBarsWithOfficial appends OKX candles after the tape so FORWARD trades have actuals.
+func extendBarsWithOfficial(bars []candles.Candle, barMs int64, nMore int) []candles.Candle {
+	if len(bars) == 0 || nMore <= 0 {
+		return bars
+	}
+	last := bars[len(bars)-1].TimeMs
+	from := last + barMs
+	to := last + int64(nMore)*barMs
+	okx := softOfficialCandles(barMs, from, to)
+	if len(okx) == 0 {
+		return bars
+	}
+	out := append([]candles.Candle{}, bars...)
+	for _, c := range okx {
+		if c.TimeMs > last {
+			out = append(out, c)
+			last = c.TimeMs
+		}
+	}
+	return out
+}
+
+// runPriceStrategyPerTrade picks per-trade exits.
+// mode 1 = oracle (peek actual closes) over the OOS TRADE window;
+// mode 2 = live predicted: TRAIN before tradeStart; discover N/H under 1%;
+//   best TP×SL×lev on predicted path → trade → append actuals → re-validate H
+//   + re-pick until trade_end (stable expanding N).
 func runPriceStrategyPerTrade(
 	args Args,
 	minutes []candles.Candle,
@@ -346,20 +862,29 @@ func runPriceStrategyPerTrade(
 	barMs int64,
 	tradeStartMs, tradeEndMs int64,
 	taker, maker float64,
+	pathWindow int,
 ) (map[string]any, error) {
+	mode := args.PriceStrategyMode
+	if mode != 1 && mode != 2 {
+		return nil, fmt.Errorf("%s: invalid price-strategy mode %d", label, mode)
+	}
+	oracle := mode == 1
+	errBand := args.MaxRelErr
+	if errBand <= 0 {
+		errBand = 0.01
+	}
+
 	if len(models) <= 1 {
 		return nil, fmt.Errorf("%s: need horizon models for strategy", label)
 	}
 	h1 := models[1]
 	hMax := len(models) - 1
+	if pathWindow <= 0 || pathWindow > hMax {
+		pathWindow = hMax
+	}
 	bars := candles.Aggregate(minutes, barMs)
 	if len(bars) < 3 {
 		return nil, fmt.Errorf("%s: not enough frame candles for strategy", label)
-	}
-	signals := priceDirSignalsDebounced(h1, bars, PriceSignalConfirmBars)
-	oosLo, oosHi := frameBarRange(bars, tradeStartMs, tradeEndMs)
-	if oosLo >= oosHi {
-		return nil, fmt.Errorf("%s: empty OOS bar range", label)
 	}
 
 	maxLev := 1.0
@@ -374,23 +899,65 @@ func runPriceStrategyPerTrade(
 			maxRiskPct = r
 		}
 	}
+	targets := args.PriceTargets
 	var usable, skippedFee []float64
 	for _, s := range args.PriceStops {
-		if breakevenWinTpEqSl(s, taker, maker) <= PriceMaxBreakevenWin {
-			usable = append(usable, s)
-		} else {
+		// Oracle: keep TP=SL fee-floor.
+		if oracle && breakevenWinTpEqSl(s, taker, maker) > PriceMaxBreakevenWin {
 			skippedFee = append(skippedFee, s)
+			continue
 		}
+		usable = append(usable, s)
 	}
 	if len(skippedFee) > 0 {
-		logx.Infof("  %s fee-floor skip stops %v (need win > %.0f%%)", label, skippedFee, 100*PriceMaxBreakevenWin)
-	}
-	if len(usable) == 0 {
-		return nil, fmt.Errorf("%s: all stops failed fee floor", label)
+		logx.Infof("  %s fee-floor skip stops %v (need win > %.0f%% for TP=SL)", label, skippedFee, 100*PriceMaxBreakevenWin)
 	}
 
-	logx.Infof("  %s per-trade exits (oracle): H=%d · stops=%d · lev=%v · max_risk=%g%% · debounce=%d · signals=%d · OOS %d..%d",
-		label, hMax, len(usable), args.PriceLeverage, maxRiskPct, PriceSignalConfirmBars, len(signals), oosLo, oosHi)
+	if len(usable) == 0 {
+		return nil, fmt.Errorf("%s: no usable stops", label)
+	}
+	exitGrid := exitCandidatesGrid(usable, targets)
+	if len(exitGrid) == 0 {
+		return nil, fmt.Errorf("%s: empty TP/SL grid", label)
+	}
+
+	oosLo, oosHi := frameBarRange(bars, tradeStartMs, tradeEndMs)
+	if oosLo >= oosHi {
+		return nil, fmt.Errorf("%s: empty OOS / TRADE bar range", label)
+	}
+
+	if oracle {
+		signals := priceDirSignalsDebounced(h1, bars, PriceSignalConfirmBars)
+		return runOracleGrid(args, bars, models, label, oosLo, oosHi, signals, usable, targets, exitGrid,
+			maxLev, maxRiskPct, errBand, taker, maker, skippedFee)
+	}
+
+	// OOS TRADE month only (trainCutoff == tradeStart). FORWARD chart = demo.
+	logx.Infof("  %s OOS TRADE predicted: %s → %s · bars %d..%d · max_models=%d (per-origin until err≥%.2f%%, trade after origin, no liquid, lev≤%.0f)",
+		label, utc(tradeStartMs), utc(tradeEndMs), oosLo, oosHi, pathWindow, errBand*100, math.Min(maxLev, PathLiveMaxLev))
+
+	return runRollingPredicted(args, bars, models, label, oosLo, oosHi, pathWindow,
+		usable, targets, exitGrid, maxLev, maxRiskPct, errBand, taker, maker)
+}
+
+// runOracleGrid: research ceiling — peek actuals, pick best TP/SL/lev per debounce signal.
+func runOracleGrid(
+	args Args,
+	bars []candles.Candle,
+	models []pricemodel.Model,
+	label string,
+	oosLo, oosHi int,
+	signals [][2]int,
+	usable, targets []float64,
+	exitGrid []exits.Exits,
+	maxLev, maxRiskPct, errBand, taker, maker float64,
+	skippedFee []float64,
+) (map[string]any, error) {
+	hMax := len(models) - 1
+	modeName := "oracle"
+	logx.Infof("  %s per-trade exits (%s): H=%d · stops=%d · tps=%d · combos=%d · lev=%v · max_risk=%g%% · debounce=%d · signals=%d · OOS %d..%d",
+		label, modeName, hMax, len(usable), len(targets), len(exitGrid), args.PriceLeverage, maxRiskPct,
+		PriceSignalConfirmBars, len(signals), oosLo, oosHi)
 
 	balance := args.BalanceUSDT
 	running := 0.0
@@ -406,63 +973,51 @@ func runPriceStrategyPerTrade(
 			continue
 		}
 		signalSeen++
-		feat, ok := pricemodel.CandleFeatures(bars[i-1], bars[i-2].Close)
-		if !ok {
-			continue
-		}
-		refPx := bars[i-1].Close
 		entry := bars[i].Open
-		if !(entry > 0) || math.IsNaN(entry) || math.IsInf(entry, 0) ||
-			!(refPx > 0) || math.IsNaN(refPx) || math.IsInf(refPx, 0) {
+		if !(entry > 0) || math.IsNaN(entry) || math.IsInf(entry, 0) {
 			continue
 		}
 		long := dir > 0
-		rawPath := predictedCloses(models, refPx, feat)
-		if len(rawPath) == 0 {
-			continue
-		}
 		actPath := actualCloses(bars, i, hMax)
 		if len(actPath) == 0 {
 			continue
 		}
 
 		var best *pathPick
-		for _, stop := range usable {
-			for _, ex := range exitCandidatesForStop(stop) {
-				for _, levU := range args.PriceLeverage {
-					lev := float64(levU)
-					if lev > maxLev+1e-12 {
-						continue
+		for _, ex := range exitGrid {
+			for _, levU := range args.PriceLeverage {
+				lev := float64(levU)
+				if lev > maxLev+1e-12 {
+					continue
+				}
+				riskPct := impliedRiskPct(ex.StopPct, lev)
+				if riskPct > maxRiskPct+1e-12 {
+					continue
+				}
+				steps := sizeForLeverage(balance, lev, entry)
+				if steps <= 0 || ex.Validate(steps) != nil {
+					continue
+				}
+				if comboCanLiquid(ex.StopPct, lev) {
+					skippedLiquid++
+					continue
+				}
+				sim := simulateExitsOnPath(long, entry, ex, steps, actPath, taker, maker)
+				if sim.PnL <= 0 {
+					continue
+				}
+				pathR := sim.PnL / math.Max(balance*riskPct/100, 1e-9)
+				dist := liquidDistancePct(ex.StopPct, lev)
+				better := best == nil ||
+					sim.PnL > best.PathPnL+1e-9 ||
+					(math.Abs(sim.PnL-best.PathPnL) <= 1e-9 && pathR > best.PathR+1e-9) ||
+					(math.Abs(sim.PnL-best.PathPnL) <= 1e-9 && math.Abs(pathR-best.PathR) <= 1e-9 && dist > best.LiquidDist)
+				if better {
+					cp := pathPick{
+						Exits: ex, RiskPct: riskPct, Steps: steps, Lev: lev,
+						PathPnL: sim.PnL, WorstPnL: sim.PnL, PathR: pathR, LiquidDist: dist,
 					}
-					riskPct := impliedRiskPct(ex.StopPct, lev)
-					if riskPct > maxRiskPct+1e-12 {
-						continue
-					}
-					steps := sizeForLeverage(balance, lev, entry)
-					if steps <= 0 || ex.Validate(steps) != nil {
-						continue
-					}
-					if comboCanLiquid(ex.StopPct, lev) {
-						skippedLiquid++
-						continue
-					}
-					sim := simulateExitsOnPath(long, entry, ex, steps, actPath, taker, maker)
-					if sim.PnL <= 0 {
-						continue
-					}
-					pathR := sim.PnL / math.Max(balance*riskPct/100, 1e-9)
-					dist := liquidDistancePct(ex.StopPct, lev)
-					better := best == nil ||
-						sim.PnL > best.PathPnL+1e-9 ||
-						(math.Abs(sim.PnL-best.PathPnL) <= 1e-9 && pathR > best.PathR+1e-9) ||
-						(math.Abs(sim.PnL-best.PathPnL) <= 1e-9 && math.Abs(pathR-best.PathR) <= 1e-9 && dist > best.LiquidDist)
-					if better {
-						cp := pathPick{
-							Exits: ex, RiskPct: riskPct, Steps: steps, Lev: lev,
-							PathPnL: sim.PnL, PathR: pathR, LiquidDist: dist,
-						}
-						best = &cp
-					}
+					best = &cp
 				}
 			}
 		}
@@ -470,15 +1025,6 @@ func runPriceStrategyPerTrade(
 			continue
 		}
 		realSim := simulateExitsOnPath(long, entry, best.Exits, best.Steps, actPath, taker, maker)
-		stopLo, stopHi := math.Inf(1), 0.0
-		for _, s := range usable {
-			stopLo = math.Min(stopLo, s)
-			stopHi = math.Max(stopHi, s)
-		}
-		spanPct := pathSpanPctForSignal(bars, i, entry, stopLo, stopHi)
-		predPath := shapedPredictedPath(rawPath, entry, long, spanPct)
-		pathSimR := simulateExitsOnPath(long, entry, best.Exits, best.Steps, predPath, taker, maker)
-
 		pnl := realSim.PnL
 		balance += pnl
 		running += pnl
@@ -510,20 +1056,25 @@ func runPriceStrategyPerTrade(
 			"leverage": round2(best.Lev*100) / 100,
 			"size_btc": round4(float64(best.Steps) * StepBTC),
 			"liquid_distance_pct": round2(best.LiquidDist),
-			"path_pnl": round2(pathSimR.PnL), "path_r": round2(best.PathR*100) / 100,
-			"path_reason": pathSimR.Reason, "path_exit_h": pathSimR.ExitH,
+			"path_pnl": round2(best.PathPnL), "path_r": round2(best.PathR*100) / 100,
+			"path_worst_pnl": round2(best.WorstPnL),
+			"path_reason": realSim.Reason, "path_exit_h": realSim.ExitH,
+			"path_source": "actual_oracle", "path_span_pct": 0,
 			"pnl": round2(pnl), "reason": realSim.Reason, "exit_h": realSim.ExitH,
 			"fees": round2(realSim.Fees), "running_pnl": round2(running),
-			"balance": round2(balance), "oracle_pnl": round2(pnl),
+			"balance": round2(balance),
+			"pick_mode": modeName,
+			"in_band": true, "band_dev": 0,
+			"oracle_pnl": round2(pnl),
 			"oracle_exits": best.Exits.Label(),
-			"oracle_note":  "traded combo = best TP/SL/lev on actual future closes (report mode)",
+			"oracle_note":  "traded combo = best TP/SL/lev on actual future closes (oracle / peek)",
 			"fills":        fills,
 		})
 	}
 
 	n := uint32(len(tradesJSON))
-	logx.Infof("  %s per-trade done: %d trades · PnL %+.2f · signals_in_oos=%d · liquid_skips≈%d",
-		label, n, running, signalSeen, skippedLiquid)
+	logx.Infof("  %s per-trade done (%s): %d trades · PnL %+.2f · signals_in_oos=%d · liquid_skips≈%d · win_rate=%.1f%%",
+		label, modeName, n, running, signalSeen, skippedLiquid, 100*float64(wins)/math.Max(float64(n), 1))
 
 	winRate := 0.0
 	if n > 0 {
@@ -535,8 +1086,11 @@ func runPriceStrategyPerTrade(
 			maxRiskPct,
 		),
 		"summary": map[string]any{
-			"exits_mode": "per_trade", "horizon": hMax,
+			"exits_mode": "per_trade", "pick_mode": modeName, "horizon": hMax,
 			"confirm_bars": PriceSignalConfirmBars, "max_leverage": maxLev,
+			"err_band": errBand, "grid_stops": len(usable), "grid_tps": len(targets),
+			"grid_combos": len(exitGrid),
+			"in_band_trades": n, "in_band_losses": 0,
 			"taker_fee_bps": taker * 10_000, "maker_fee_bps": maker * 10_000,
 			"balance_start": args.BalanceUSDT, "balance_end": round2(balance),
 		},
@@ -547,6 +1101,290 @@ func runPriceStrategyPerTrade(
 			"max_breakeven_win_pct": 100 * PriceMaxBreakevenWin,
 			"skipped_stops":        skippedFee,
 			"usable_stops":         usable,
+		},
+		"skips": map[string]any{
+			"liquid": skippedLiquid, "tp_floor": 0, "robust": 0, "flat": 0,
+		},
+		"trades": tradesJSON,
+	}, nil
+}
+
+// runRollingPredicted — confirmed IS/OOS loop:
+//   re-find N/H → re-predict → enter on fee-floor side → SCORE TP×SL×lev on
+//   the predicted path (fee + ±errBand, max mid gain / least risk) →
+//   trade → append actuals → re-find N → predict again.
+func runRollingPredicted(
+	args Args,
+	bars []candles.Candle,
+	models []pricemodel.Model,
+	label string,
+	oosLo, oosHi, pathWindow int,
+	usable, targets []float64,
+	exitGrid []exits.Exits,
+	maxLev, maxRiskPct, errBand, taker, maker float64,
+) (map[string]any, error) {
+	hMax := len(models) - 1
+	modeName := "rolling-predicted"
+	liveMaxLev := math.Min(maxLev, PathLiveMaxLev)
+	levs := make([]uint32, 0, len(args.PriceLeverage))
+	for _, l := range args.PriceLeverage {
+		if l >= 1 && float64(l) <= liveMaxLev+1e-12 {
+			levs = append(levs, l)
+		}
+	}
+	if len(levs) == 0 {
+		levs = []uint32{1}
+	}
+	sort.Slice(levs, func(i, j int) bool { return levs[i] < levs[j] })
+
+	minPeak := minTradablePeakPct(taker, maker)
+
+	lookbackN := 0
+	liveH := max(pathWindow, 1)
+	if liveH > hMax {
+		liveH = hMax
+	}
+	// Re-find N after the first origin and after every closed trade (appended actuals).
+	needRediscoverN := true
+	nRediscover := 0
+
+	logx.Infof("  %s rolling-predicted (live): re-find N/H each entry · re-predict every origin · stops=%d · tps=%d · combos=%d · lev=%v (cap %.0f) · max_risk=%g%% · err_band=%.2f%% · min_peak=%.2f%% · exits=predicted_path · OOS %d..%d",
+		label, len(usable), len(targets), len(exitGrid), levs, liveMaxLev, maxRiskPct, errBand*100, minPeak, oosLo, oosHi)
+
+	balance := args.BalanceUSDT
+	running := 0.0
+	var tradesJSON []map[string]any
+	var wins uint32
+	skippedLiquid := 0
+	skippedNoCombo := 0
+	skippedFlat := 0
+	skippedDisagree := 0
+	origins := 0
+	inBandN, inBandLoss := 0, 0
+
+	for i := oosLo; i < oosHi; {
+		if i < 2 {
+			i++
+			continue
+		}
+
+		// FIND N (past only). Always after a fill; also if H collapsed while scanning.
+		if needRediscoverN || lookbackN < 8 {
+			nNow, hNow := discoverLookbackNH(models, bars, i, errBand, liveH)
+			if nNow < 8 {
+				nNow = 8
+			}
+			if hNow < 1 {
+				hNow = liveH
+			}
+			if hNow > hMax {
+				hNow = hMax
+			}
+			// Keep H inside N so lookback can cover a full predicted window.
+			if hNow > nNow/2 {
+				hNow = max(nNow/2, 1)
+			}
+			if hNow < 1 {
+				hNow = 1
+			}
+			if nNow != lookbackN || hNow != liveH || needRediscoverN {
+				nRediscover++
+				logx.Infof("  %s re-find N/H @ bar %d: N=%d H=%d (models≤%d)", label, i, nNow, hNow, hMax)
+			}
+			lookbackN, liveH = nNow, hNow
+			needRediscoverN = false
+		} else {
+			// Same N class while scanning for the next entry — re-validate H on rolling N.
+			hNow := under1PctHorizonLookback(models, bars, i, lookbackN, errBand)
+			if hNow < 1 {
+				hNow = liveH
+			}
+			if hNow > hMax {
+				hNow = hMax
+			}
+			if hNow > lookbackN/2 {
+				hNow = max(lookbackN/2, 1)
+			}
+			if hNow < PathMinHorizonH {
+				needRediscoverN = true
+				continue // re-find N at this same origin
+			}
+			if hNow < 1 {
+				hNow = 1
+			}
+			liveH = hNow
+		}
+
+		feat, ok := pricemodel.CandleFeatures(bars[i-1], bars[i-2].Close)
+		if !ok {
+			i++
+			continue
+		}
+		refPx := bars[i-1].Close
+		entry := bars[i].Open
+		if !(entry > 0) || math.IsNaN(entry) || math.IsInf(entry, 0) ||
+			!(refPx > 0) || math.IsNaN(refPx) || math.IsInf(refPx, 0) {
+			i++
+			continue
+		}
+
+		// PREDICT AGAIN from this origin (ref = i-1); enter on bar i open — never reuse prior path.
+		rawFull := predictedCloses(models, refPx, feat)
+		if len(rawFull) == 0 {
+			i++
+			continue
+		}
+		pickPath := truncatePath(rawFull, liveH)
+		origins++
+		if len(pickPath) == 0 {
+			i++
+			continue
+		}
+		actPath := actualCloses(bars, i, len(pickPath))
+		if len(actPath) == 0 {
+			i++
+			continue
+		}
+
+		long, peak := pathDirection(pickPath, entry)
+		pathSrc := "predicted_path_tp_sl_lev"
+		advPct := pathAdversePct(pickPath, entry, long)
+		// Fee-floor only — do not starve the year book with adverse/WR sit-outs.
+		if peak+1e-12 < minPeak {
+			skippedFlat++
+			i++
+			continue
+		}
+		predOriginMs := bars[i-1].TimeMs
+		predOriginPx := refPx
+
+		// Dynamic TP×SL×lev on THIS predicted path (±errBand) — never frozen static.
+		best := pickExitsByPredictedPath(
+			long, entry, pickPath, peak,
+			usable, targets, exitGrid, levs,
+			balance, maxRiskPct, minPeak, errBand, taker, maker,
+		)
+		if best == nil || best.Steps <= 0 {
+			skippedNoCombo++
+			i++
+			continue
+		}
+
+		realSim := simulateExitsOnPath(long, entry, best.Exits, best.Steps, actPath, taker, maker)
+		pathSimR := simulateExitsOnPath(long, entry, best.Exits, best.Steps, pickPath, taker, maker)
+
+		pnl := realSim.PnL
+		balance += pnl
+		running += pnl
+		if pnl > 0 {
+			wins++
+		}
+		exitH := realSim.ExitH
+		if exitH < 1 {
+			exitH = 1
+		}
+
+		nCmp := exitH
+		if nCmp > len(pickPath) {
+			nCmp = len(pickPath)
+		}
+		if nCmp > len(actPath) {
+			nCmp = len(actPath)
+		}
+		bandDev := maxPredActualRelDev(pickPath[:nCmp], actPath[:nCmp])
+		inBand := bandDev <= errBand+1e-12
+		if inBand {
+			inBandN++
+			if pnl < 0 {
+				inBandLoss++
+			}
+		}
+
+		side := "sell"
+		if long {
+			side = "buy"
+		}
+		fills := make([]map[string]any, 0, len(realSim.Fills))
+		for _, f := range realSim.Fills {
+			fills = append(fills, map[string]any{
+				"kind": f.Kind, "price": round2(f.Price),
+				"size_btc": round4(float64(f.Steps) * StepBTC),
+				"fee": round2(f.Fee), "h": f.H,
+			})
+		}
+		note := fmt.Sprintf(
+			"re-find N=%d H=%d predict@%s → peak=%.3f%% adv=%.3f%% → path_score %s mid=%+.2f worst=%+.2f lev=%.0f risk=%.2f%% → entry=%.2f → append %d actuals; in_band=%v max_dev=%.3f%%",
+			lookbackN, liveH, utc(predOriginMs), peak, advPct, best.Exits.Label(), best.PathPnL, best.WorstPnL, best.Lev, best.RiskPct, entry, exitH, inBand, bandDev*100,
+		)
+		tradesJSON = append(tradesJSON, map[string]any{
+			"side": side,
+			"predict_at": utc(predOriginMs), "predict_close": round2(predOriginPx),
+			"entry_at": utc(bars[i].TimeMs), "entry_bar": i,
+			"entry_price": round2(entry), "exits": exitsToJSON(best.Exits),
+			"stop_pct": best.Exits.StopPct, "risk_pct": best.RiskPct,
+			"leverage": round2(best.Lev*100) / 100,
+			"size_btc": round4(float64(best.Steps) * StepBTC),
+			"liquid_distance_pct": round2(best.LiquidDist),
+			"path_pnl": round2(pathSimR.PnL), "path_r": round2(best.PathR*100) / 100,
+			"path_worst_pnl": round2(best.WorstPnL),
+			"path_reason": pathSimR.Reason, "path_exit_h": pathSimR.ExitH,
+			"path_source": pathSrc, "path_span_pct": round2(peak*100) / 100,
+			"path_window": len(pickPath),
+			"lookback_n": lookbackN, "horizon_h": liveH,
+			"pnl": round2(pnl), "reason": realSim.Reason, "exit_h": realSim.ExitH,
+			"fees": round2(realSim.Fees), "running_pnl": round2(running),
+			"balance": round2(balance),
+			"pick_mode": modeName,
+			"in_band": inBand, "band_dev": round2(bandDev*10000) / 10000,
+			"oracle_pnl": round2(pnl),
+			"oracle_exits": best.Exits.Label(),
+			"oracle_note":  note,
+			"fills":        fills,
+		})
+
+		// APPEND actual entry→exit candles into the lookback, then RE-FIND N and PREDICT again.
+		i = i + exitH
+		needRediscoverN = true
+	}
+
+	n := uint32(len(tradesJSON))
+	winRate := 0.0
+	if n > 0 {
+		winRate = round2(100 * float64(wins) / float64(n))
+	}
+	logx.Infof("  %s rolling-predicted done: %d trades · PnL %+.2f · origins=%d · win_rate=%.1f%% · N=%d H=%d · flat≈%d · no_combo≈%d · liquid≈%d · N_refind=%d · in_band=%d in_band_loss=%d",
+		label, n, running, origins, winRate, lookbackN, liveH, skippedFlat, skippedNoCombo, skippedLiquid, nRediscover, inBandN, inBandLoss)
+	if n == 0 {
+		logx.Warnf("  %s live predicted: 0 trades (flat_peak<%.2f%% → %d · no_combo=%d). Sitting out flat forecasts is correct for live.",
+			label, minPeak, skippedFlat, skippedNoCombo)
+	}
+
+	rule := fmt.Sprintf(
+		"each entry: re-find N + under-%.2f%% H → re-predict → fee-floor peak≥%.2f%% → SCORE TP×SL×lev on predicted path (±%.2f%% adverse): max mid gain then least risk / no liquid → append (last N=%d H=%d)",
+		errBand*100, minPeak, errBand*100, lookbackN, liveH,
+	)
+	return map[string]any{
+		"selection_rule": rule,
+		"summary": map[string]any{
+			"exits_mode": "predicted_path", "pick_mode": modeName, "horizon": hMax,
+			"lookback_n": lookbackN, "path_window": liveH, "confirm_bars": 0, "max_leverage": liveMaxLev,
+			"err_band": errBand, "min_peak_pct": minPeak, "grid_stops": len(usable), "grid_tps": len(targets),
+			"grid_combos": len(exitGrid), "n_rediscover": nRediscover,
+			"in_band_trades": inBandN, "in_band_losses": inBandLoss,
+			"taker_fee_bps": taker * 10_000, "maker_fee_bps": maker * 10_000,
+			"balance_start": args.BalanceUSDT, "balance_end": round2(balance),
+		},
+		"total_pnl": round2(running), "closed_trades": n, "wins": wins, "win_rate": winRate,
+		"signal_count": origins, "signals_in_oos": origins,
+		"oos_bars": []int{oosLo, oosHi},
+		"fee_floor": map[string]any{
+			"max_breakeven_win_pct": 100 * PriceMaxBreakevenWin,
+			"skipped_stops":        []float64{},
+			"usable_stops":         usable,
+		},
+		"skips": map[string]any{
+			"liquid": skippedLiquid, "tp_floor": 0, "robust": skippedNoCombo, "flat": skippedFlat,
+			"h1_disagree": skippedDisagree, "n_rediscover": nRediscover,
 		},
 		"trades": tradesJSON,
 	}, nil

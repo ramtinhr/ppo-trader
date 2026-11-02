@@ -106,10 +106,10 @@
     <div class="table-wrap"><table id="trades"><thead></thead><tbody></tbody></table></div>
   </section>
   <section class="tab" data-tab="horizons">
-    <p class="note">OOS mean miss by candles-ahead (h). Trading horizon = last h under the 1% gate when auto. Forward-until-1% path uses OKX/tape actuals from the last candle.</p>
+    <p class="note">Top table = OOS <b>mean</b> error by horizon h. <b>OOS n</b> = how many TRADE samples went into that mean (≈ year of 15m bars) — not “candles we can predict under 1%”. <b>Scroll down</b> for the IS path (N/H + OHLC + Err%). That bottom table is the real under-1% proof.</p>
     <div class="table-wrap" style="max-height:none"><table id="horizons"><thead></thead><tbody></tbody></table></div>
     <div class="chart-card" id="path-card" style="display:none;margin-top:14px">
-      <div class="chart-title" id="path-title">Forward-until-1% path</div>
+      <div class="chart-title" id="path-title">IS check: under-1% forward path</div>
       <p class="note" id="path-note"></p>
       <div class="table-wrap" style="max-height:none;margin-top:8px"><table id="path-ex"><thead></thead><tbody></tbody></table></div>
     </div>
@@ -128,7 +128,7 @@
     </div>
   </section>
   <section class="tab" data-tab="signals">
-    <p class="note">Each row is one forecast candle (h=1), not a trade. Trade count is usually much smaller because entries need a debounced direction change and an open slot.</p>
+    <p class="note" id="forecasts-note">Each row is one OOS <b>h=1</b> chart point (every TRADE bar) — NOT “we predicted this many candles under 1%”. For under-1% skill see Horizons → IS check.</p>
     <div class="table-wrap"><table id="signals"><thead></thead><tbody></tbody></table></div>
   </section>
 </div>
@@ -158,23 +158,35 @@ const barLabel = M.bar || (M.bar_ms ? `${Math.round(M.bar_ms/60000)}m` : '');
 $('#title').textContent = barLabel
   ? `Predicted price vs market (${barLabel}${M.is_selected ? ' · selected' : ''})`
   : 'Predicted price vs market';
-$('#sub').textContent = `${M.trade_start || ''} → ${M.trade_end || ''} · ${barLabel || 'candle'} · lock rel_err ${(100 * (M.price_model?.rel_err ?? 0)).toFixed(3)}% · ${S.length} forecast steps`;
+const PE0 = M.path_example || {};
+const isN = PE0.lookback_n ?? '—';
+const isH = PE0.horizon_h ?? PE0.path_under_1pct ?? M.path_under_1pct ?? '—';
+$('#sub').textContent = `IS→OOS · TRAIN until ${M.trade_start || '?'} · TRADE ${M.trade_start || '?'} → ${M.trade_end || '?'} · ${barLabel || 'candle'} · IS check N=${isN} H=${isH} under ${((M.max_rel_err ?? 0.01)*100).toFixed(0)}% · Forecasts rows (${S.length}) = OOS h=1 chart points only`;
 
 const ST = REPORT.strategy || {};
 const trades = ST.trades || [];
 const sum = ST.summary || M.strategy || {};
+const skips = ST.skips || {};
+const pickMode = sum.pick_mode || (M.price_strategy_mode === 2 ? 'predicted-robust' : (M.price_strategy_mode === 1 ? 'oracle' : 'off'));
+const predictedMode = pickMode === 'predicted-robust' || M.price_strategy_mode === 2;
 const feeNote = (sum.taker_fee_bps != null)
   ? `taker ${fmt(sum.taker_fee_bps,1)} / maker ${fmt(sum.maker_fee_bps,1)} bps`
   : '';
+const eyebrow = $('#eyebrow');
+if (eyebrow) eyebrow.textContent = predictedMode ? 'Predicted-robust (no peek)' : 'Oracle price path (peek)';
 
 $('#kpis').innerHTML = [
   ['Bar', barLabel || '—', ''],
+  ['Pick mode', pickMode, ''],
+  ['IS lookback N', String(isN), ''],
+  ['IS under-1% H', String(isH), ''],
+  ['IS origin', String(PE0.origin || '—'), ''],
   ['Total PnL', signed(ST.total_pnl ?? total), cls(ST.total_pnl ?? total)],
   ['Trades', String(ST.closed_trades ?? trades.length ?? 0), ''],
   ['Win rate', ST.closed_trades ? `${fmt(ST.win_rate ?? 0,1)}%` : '—', ''],
-  ['Trading horizon', String(M.price_horizon ?? sum.horizon ?? '—'), ''],
-  ['Path under 1%', String(M.path_under_1pct ?? (M.path_example && M.path_example.path_under_1pct) ?? '—'), ''],
-  ['Forecast steps', String(S.length), ''],
+  ['OOS h=1 chart pts', String(S.length), ''],
+  ['Flat skips', String(skips.flat ?? '—'), ''],
+  ['TRADE window', `${M.trade_start || '?'} → ${M.trade_end || '?'}`, ''],
   ['Fit samples', String(M.fit_pairs ?? 0), ''],
 ].map(([l,v,c]) => `<div class="kpi"><div class="l">${l}</div><div class="v ${c}">${v}</div></div>`).join('');
 
@@ -190,17 +202,22 @@ $('#eq').textContent = [
   ...eqBits,
 ].filter(Boolean).join(' · ');
 
-$('#trade-note').innerHTML = `Report mode: each direction signal picks the <b>best TP/SL/lev</b> on that bar’s <b>actual</b> future path (oracle / peek-ahead). Skip if no profitable combo. Forecast candles (${S.length}) are not trades.`;
+if (predictedMode) {
+  $('#trade-note').innerHTML = `<b>IS</b>: fit OLS before <code>${M.trade_start || 'trade_start'}</code>, then at last TRAIN candle discover lookback <b>N=${isN}</b> and forward <b>H=${isH}</b> under ${((M.max_rel_err ?? 0.01)*100).toFixed(0)}% (see Horizons). <b>OOS</b>: each entry re-finds N/H the same way → predict H → TP/SL/lev → trade → append → repeat. <b>Forecasts tab (${S.length} rows) ≠ under-1% skill</b> — those are every OOS bar’s h=1 chart point.`;
+} else {
+  $('#trade-note').innerHTML = `Oracle mode: each direction signal picks the <b>best TP/SL/lev</b> on that bar’s <b>actual</b> future path (peek-ahead). Skip if no profitable combo. Forecast candles (${S.length}) are OOS h=1 chart points, not trades.`;
+}
 
 $('#trades-intro').textContent = trades.length
-  ? `${trades.length} trades · PnL ${signed(ST.total_pnl ?? total)} · exits = max PnL on actuals`
-  : 'No strategy trades (no direction signals in OOS, or no profitable exit combo).';
+  ? `${trades.length} trades · PnL ${signed(ST.total_pnl ?? total)} · pick=${pickMode}`
+  : `No strategy trades (pick=${pickMode}; signals_in_oos=${ST.signals_in_oos ?? '—'}; robust_skips=${skips.robust ?? '—'}; tp_floor_skips=${skips.tp_floor ?? '—'}). Forecast steps ≠ trades.`;
 
 const th = $('#trades thead');
 const tb = $('#trades tbody');
 th.innerHTML = `<tr>
   <th>#</th>
   <th>Side</th>
+  <th>Predict from</th>
   <th>Entry time</th>
   <th>Entry</th>
   <th>TP / SL used</th>
@@ -209,11 +226,12 @@ th.innerHTML = `<tr>
   <th>Closed</th>
   <th>Profit</th>
   <th>Running</th>
-  <th class="oracle-col">Best on actuals <span class="pill">used</span></th>
+  <th class="oracle-col">${predictedMode ? 'Realized on actuals' : 'Best on actuals'} <span class="pill">${predictedMode ? 'accounted' : 'used'}</span></th>
 </tr>`;
 tb.innerHTML = trades.map((t, i) => `<tr>
   <td class="num">${i+1}</td>
   <td>${t.side || ''}</td>
+  <td class="num">${t.predict_at || t.entry_at || ''}</td>
   <td class="num">${t.entry_at || ''}</td>
   <td class="num">${fmt(t.entry_price, 2)}</td>
   <td>${t.exits?.label || ''}</td>
@@ -243,13 +261,19 @@ const PE = M.path_example;
 if (PE && PE.steps && PE.steps.length) {
   $('#path-card').style.display = '';
   const under = PE.path_under_1pct ?? M.path_under_1pct;
-  $('#path-title').textContent = `From last candle ${PE.origin || '?'} (close ${fmt(PE.origin_close, 2)}) · under-1% path = ${under ?? '—'} candles`;
-  $('#path-note').textContent = 'Actuals prefer tape, then OKX. Trading horizon is separate (OOS auto). Forecast step count ≠ trade count.';
-  $('#path-ex thead').innerHTML = `<tr><th>h</th><th>Time</th><th>Predicted</th><th>Actual</th><th>Source</th><th>Err%</th><th>In under-1% path</th></tr>`;
+  const nLab = PE.lookback_n != null ? PE.lookback_n : '—';
+  const hLab = PE.horizon_h != null ? PE.horizon_h : under;
+  $('#path-title').textContent = `IS check · origin ${PE.origin || '?'} O=${fmt(PE.origin_open,2)} H=${fmt(PE.origin_high,2)} L=${fmt(PE.origin_low,2)} C=${fmt(PE.origin_close, 2)} · lookback N=${nLab} → under-1% forward H≈${hLab} (path under 1%=${under ?? '—'})`;
+  $('#path-note').textContent = `Scroll here for the real under-1% proof (not the OOS mean table above). Origin = last TRAIN candle OHLC. Each row = one forward candle: predicted close vs actual OHLC + Err%. Last “yes” before breach = how many candles under 1%. TRADE ${M.trade_start || '?'} → ${M.trade_end || '?'}.`;
+  $('#path-ex thead').innerHTML = `<tr><th>h</th><th>Time</th><th>Predicted</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Source</th><th>Err%</th><th>Under 1%?</th></tr>`;
   $('#path-ex tbody').innerHTML = PE.steps.map((s) => {
-    const spot = s.spot == null ? 'n/a' : fmt(s.spot, 2);
+    const close = s.close != null ? s.close : s.spot;
     return `<tr style="${s.in_under_1pct_path ? '' : (s.over_1pct ? 'opacity:.7' : '')}">
-      <td>+${s.h}</td><td>${s.at||''}</td><td>${fmt(s.predicted,2)}</td><td>${spot}</td>
+      <td>+${s.h}</td><td>${s.at||''}</td><td>${fmt(s.predicted,2)}</td>
+      <td>${s.open == null ? '—' : fmt(s.open,2)}</td>
+      <td>${s.high == null ? '—' : fmt(s.high,2)}</td>
+      <td>${s.low == null ? '—' : fmt(s.low,2)}</td>
+      <td>${close == null ? 'n/a' : fmt(close,2)}</td>
       <td>${s.actual_source || (s.beyond_tape ? '—' : 'tape')}</td>
       <td>${s.err_pct == null ? '—' : fmt(s.err_pct,3)}</td>
       <td>${s.in_under_1pct_path ? 'yes' : (s.over_1pct ? 'breach' : '—')}</td>

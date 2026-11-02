@@ -15,7 +15,7 @@ Archives go to data/okx/BTC-USDT-SWAP/archives by default.
 When OKX is blocked on your network, route traffic through a local SOCKS5 (or HTTP) proxy:
   --proxy socks5://127.0.0.1:1080
   # or: export OKX_PROXY=socks5://127.0.0.1:1080
-  # or: export ALL_PROXY=socks5://127.0.0.1:1080";
+  # Use socks5:// (not socks://) — empty JSON/EOF usually means a bad proxy scheme/port.";
 
 fn main() -> Result<()> {
     let mut days = Vec::new();

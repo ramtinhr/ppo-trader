@@ -112,16 +112,34 @@ func evalPriceHorizons(
 	}
 	fitN := len(models) - 1
 
-	pathExample, pathUnder := buildForwardPath(bars, models, barMs, tradeEndMs, fitN, oosHorizon, maxRelErr)
-
-	tradeModels := models
-	if auto && oosHorizon > 0 && len(tradeModels) > oosHorizon+1 {
-		tradeModels = tradeModels[:oosHorizon+1]
+	// IS check: last candle BEFORE trade_start (end of TRAIN). Discover lookback N
+	// and how many forward candles H stay under maxRelErr — this is the skill proof,
+	// not the OOS Forecasts dump (those are every TRADE bar's h=1 chart point).
+	pathExample, pathUnder := buildForwardPath(bars, models, barMs, tradeStartMs, fitN, oosHorizon, maxRelErr)
+	if pathExample != nil {
+		originIdx := -1
+		for t := 1; t < len(bars); t++ {
+			if bars[t].TimeMs < tradeStartMs {
+				originIdx = t
+			}
+		}
+		lookbackN, horizonH := 0, pathUnder
+		if originIdx >= 2 {
+			lookbackN, horizonH = discoverLookbackNH(models, bars, originIdx, maxRelErr, oosHorizon)
+		}
+		pathExample["kind"] = "is_end_under_1pct_check"
+		pathExample["phase"] = "IS"
+		pathExample["lookback_n"] = lookbackN
+		pathExample["horizon_h"] = horizonH
+		pathExample["max_rel_err"] = maxRelErr
+		pathExample["note"] = "IS end: from last TRAIN candle, lookback N → forward H while |pred−actual|/actual < max_rel_err. OOS trades re-find N/H the same way. Forecasts tab ≠ this path."
+		logx.Infof("    IS check @%s: lookback N=%d → under-%.2f%% forward H=%d (path_under_1pct steps=%d)",
+			pathExample["origin"], lookbackN, maxRelErr*100, horizonH, pathUnder)
 	}
 
 	return horizonEval{
 		Table: table, PathExample: pathExample, Horizon: oosHorizon,
-		PathUnder1Pct: pathUnder, Models: tradeModels,
+		PathUnder1Pct: pathUnder, Models: models,
 		OOSH1PriceErr: oosH1Price, OOSH1BaseErr: oosH1Base,
 		OOSHMaxPriceErr: oosHMaxPrice, OOSHMaxBaseErr: oosHMaxBase,
 	}, nil
@@ -157,23 +175,25 @@ func buildForwardPath(
 		okxAt[c.TimeMs] = c.Close
 	}
 
-	spotAt := func(h int, futureMs int64) (float64, string, bool) {
+	spotAt := func(h int, futureMs int64) (float64, string, bool, candles.Candle) {
 		if originT+h < len(bars) {
-			return bars[originT+h].Close, "tape", true
+			c := bars[originT+h]
+			return c.Close, "tape", true, c
 		}
 		if px, ok := okxAt[futureMs]; ok {
-			return px, "okx", true
+			return px, "okx", true, candles.Candle{}
 		}
-		return 0, "none", false
+		return 0, "none", false, candles.Candle{}
 	}
 
+	originBar := bars[originT]
 	var steps []map[string]any
 	under := 0
 	breached := false
 	for h := 1; h <= fitN; h++ {
 		pred := models[h].PredictClose(refPx, feat)
 		futureMs := originMs + int64(h)*barMs
-		spot, source, has := spotAt(h, futureMs)
+		spot, source, has, bar := spotAt(h, futureMs)
 		var errPct, baseErrPct any
 		over := false
 		if has {
@@ -195,15 +215,25 @@ func buildForwardPath(
 			}
 		}
 		var spotJSON any
-		if has {
-			spotJSON = round2(spot)
-		}
-		steps = append(steps, map[string]any{
-			"h": h, "at": utc(futureMs), "spot": spotJSON, "predicted": round2(pred),
+		step := map[string]any{
+			"h": h, "at": utc(futureMs), "predicted": round2(pred),
 			"ref": round2(refPx), "err_pct": errPct, "base_err_pct": baseErrPct,
 			"beyond_tape": source != "tape", "actual_source": source,
 			"over_1pct": over, "in_under_1pct_path": h <= under,
-		})
+		}
+		if has {
+			spotJSON = round2(spot)
+			step["spot"] = spotJSON
+			if source == "tape" && bar.Open > 0 {
+				step["open"] = round2(bar.Open)
+				step["high"] = round2(bar.High)
+				step["low"] = round2(bar.Low)
+				step["close"] = round2(bar.Close)
+			} else {
+				step["close"] = spotJSON
+			}
+		}
+		steps = append(steps, step)
 		if breached && h >= under+3 {
 			break
 		}
@@ -214,6 +244,8 @@ func buildForwardPath(
 	}
 	return map[string]any{
 		"origin": utc(originMs), "origin_close": round2(refPx),
+		"origin_open": round2(originBar.Open), "origin_high": round2(originBar.High),
+		"origin_low": round2(originBar.Low),
 		"kind": "forward_from_last_candle", "path_under_1pct": under,
 		"oos_trading_horizon": oosHorizon, "steps": steps,
 	}, under
@@ -243,4 +275,161 @@ func oosHorizonErrors(model pricemodel.Model, oos []pricemodel.Sample) (ret, pri
 	}
 	nf := float64(n)
 	return retSum / nf, priceSum / nf, baseSum / nf
+}
+
+// under1PctHorizonLookback is the longest h whose mean |pred−spot|/spot on the
+// lookback window [originIdx−lookbackN, originIdx) stays under maxRelErr.
+// Uses only past bars (no future peek). lookbackN/H come from data, not fixed constants.
+func under1PctHorizonLookback(
+	models []pricemodel.Model,
+	bars []candles.Candle,
+	originIdx, lookbackN int,
+	maxRelErr float64,
+) int {
+	if maxRelErr <= 0 {
+		maxRelErr = 0.01
+	}
+	hMax := len(models) - 1
+	if hMax < 1 || originIdx < 3 || lookbackN < 8 {
+		return 0
+	}
+	lo := originIdx - lookbackN
+	if lo < 1 {
+		lo = 1
+	}
+	// Target must also lie inside the lookback (past-only validation).
+	best := 0
+	for h := 1; h <= hMax; h++ {
+		m := models[h]
+		if m.ColdStart {
+			break
+		}
+		var sum float64
+		n := 0
+		// origin t with t+h < originIdx and t >= lo
+		hi := originIdx - h
+		if hi <= lo {
+			break
+		}
+		for t := lo; t < hi; t++ {
+			if t < 1 || t+h >= len(bars) {
+				continue
+			}
+			feat, ok := pricemodel.CandleFeatures(bars[t], bars[t-1].Close)
+			if !ok {
+				continue
+			}
+			ref := bars[t].Close
+			spot := bars[t+h].Close
+			if !(ref > 0) || math.IsNaN(ref) || math.IsInf(ref, 0) ||
+				!(spot > 0) || math.IsNaN(spot) || math.IsInf(spot, 0) {
+				continue
+			}
+			pred := m.PredictClose(ref, feat)
+			if !(pred > 0) || math.IsNaN(pred) || math.IsInf(pred, 0) {
+				continue
+			}
+			sum += math.Abs(pred-spot) / spot
+			n++
+		}
+		if n < 4 {
+			break
+		}
+		if sum/float64(n) >= maxRelErr {
+			break
+		}
+		best = h
+	}
+	return best
+}
+
+// discoverLookbackNH walks lookback size classes ending at originIdx until
+// under-1% H is found. Called at the first origin and again after every closed
+// trade (appended actuals change the past) so the next entry re-finds N then
+// re-predicts. Numbers come from past data only.
+func discoverLookbackNH(
+	models []pricemodel.Model,
+	bars []candles.Candle,
+	originIdx int,
+	maxRelErr float64,
+	hintH int,
+) (lookbackN, horizonH int) {
+	available := originIdx - 2
+	if available < 16 {
+		h := under1PctHorizonLookback(models, bars, originIdx, available, maxRelErr)
+		if h < 1 && hintH > 0 {
+			h = hintH
+		}
+		if h > available {
+			h = max(available, 1)
+		}
+		return max(available, 8), max(h, 1)
+	}
+	// Expanding size classes; pick the smallest N that yields a usable H,
+	// else the N with the best H (stable class — do not re-search every trade).
+	candidates := []int{64, 128, 256, 512, 1024, 2048, 4096, available}
+	bestN, bestH := 0, 0
+	minUsable := 4
+	if hintH > 0 && hintH < minUsable {
+		minUsable = max(hintH, 1)
+	}
+	for _, n := range candidates {
+		if n > available {
+			n = available
+		}
+		if n < 16 {
+			continue
+		}
+		h := under1PctHorizonLookback(models, bars, originIdx, n, maxRelErr)
+		if h > bestH {
+			bestH, bestN = h, n
+		}
+		if h >= minUsable {
+			logx.Infof("    discover N/H @%d: lookback N=%d → under-%.2f%% H=%d (first working class)",
+				originIdx, n, maxRelErr*100, h)
+			return n, h
+		}
+		if n == available {
+			break
+		}
+	}
+	if bestH < 1 {
+		bestN = max(available, 16)
+		// Cap fallback H so train samples (t+H < origin inside N) can exist.
+		capH := max(bestN/2, 1)
+		if hintH > 0 && hintH < capH {
+			bestH = hintH
+		} else {
+			bestH = capH
+		}
+		if bestH < 1 {
+			bestH = 1
+		}
+		logx.Warnf("    discover N/H: no under-%.2f%% H on lookback — fall back N=%d H=%d",
+			maxRelErr*100, bestN, bestH)
+		return bestN, bestH
+	}
+	logx.Infof("    discover N/H: lookback N=%d → under-%.2f%% H=%d (best available)",
+		bestN, maxRelErr*100, bestH)
+	return bestN, bestH
+}
+
+// widenLookbackN grows the lookback size-class when under-1% H collapsed.
+func widenLookbackN(currentN, originIdx, availableExtra int) int {
+	available := originIdx - 2
+	if availableExtra > 0 && available > availableExtra {
+		// Cap at how far back the expanding window can reach.
+		available = availableExtra
+	}
+	next := currentN * 2
+	if next < currentN+64 {
+		next = currentN + 64
+	}
+	if next > available {
+		next = available
+	}
+	if next <= currentN {
+		return currentN
+	}
+	return next
 }

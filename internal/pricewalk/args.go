@@ -20,6 +20,25 @@ const (
 	PriceRangeStopFrac       = 0.5
 	StepBTC                  = 0.0001
 	ReplayBalance            = 1e9
+
+	// Live predicted bot (mode 2) — trade the full OOS year:
+	//  fee-floor entries (don't starve) + exits that cannot collapse to 0.3%×10x.
+	//  Rank path_r / adverse soft; do NOT hard-sit-out on adverse (that left ~4 trades).
+	PathTakeFrac      = 0.70
+	PathMinPeakPct    = 0.08 // fee-area floor — fill the year book
+	PathMinStopPct    = 0.70 // hard floor: forbids the 0.3% sucker cluster
+	PathSkewMaxLev    = 1.0
+	PathMinTpSlRatio  = 0.50
+	PathLiveMaxLev    = 5.0
+	PathWinRateTarget = 0.80
+	PathMinHorizonH   = 4
+	PathTargetRiskPct = 5.0
+	// Preferred score band (always searched — analyze winners live here).
+	PathScoreTPLo     = 0.40
+	PathScoreTPHi     = 1.20
+	PathScoreSLLo     = 0.70
+	PathScoreSLHi     = 1.50
+	DefaultTradeDays  = 30
 )
 
 var errHelp = errors.New("help")
@@ -47,8 +66,10 @@ type Args struct {
 	PriceBars         []BarSize
 	PriceHorizon      int
 	PriceHorizonAuto  bool
-	PriceStrategy     bool
+	// PriceStrategyMode: 0=off, 1=oracle (peek actuals), 2=predicted robust (±max_rel_err).
+	PriceStrategyMode int
 	PriceStops        []float64
+	PriceTargets      []float64 // asymmetric TP grid (paired with every stop)
 	PriceRisk         []float64
 	PriceLeverage     []uint32
 }
@@ -60,7 +81,9 @@ type BarSize struct {
 
 func DefaultArgs() Args {
 	bars, _ := ParsePriceBars("5m,15m,1h,4h")
-	stops, _ := ParseRange("0.5-5/0.5")
+	// Full live grid: TP and SL 0.1..10, lev 1..10 (re-tested every trade).
+	stops, _ := ParseRange("0.1-10/0.1")
+	targets, _ := ParseRange("0.1-10/0.1")
 	tt := make([]int, 0, 10)
 	for k := 10; k >= 1; k-- {
 		tt = append(tt, k*10)
@@ -70,7 +93,8 @@ func DefaultArgs() Args {
 		LookbackDays:     30,
 		TrainTrades:      tt,
 		MinFitPairs:      2000,
-		ReserveTradeDays: 30,
+		ReserveTradeDays: DefaultTradeDays,
+		TradeDays:        DefaultTradeDays,
 		RequireFit:       true,
 		MaxRelErr:        score.MaxScoreRelErr,
 		BalanceUSDT:      500,
@@ -80,8 +104,10 @@ func DefaultArgs() Args {
 		PriceHorizon:     PriceHorizonAutoCap,
 		PriceHorizonAuto: true,
 		PriceStops:       stops,
+		PriceTargets:     targets,
 		PriceRisk:        []float64{0.25, 0.5, 1, 2, 3, 5},
-		PriceLeverage:    []uint32{1, 2, 3, 5, 8, 10},
+		// Leverage 1..10 re-tested every trade (0x is not a position).
+		PriceLeverage: []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
 		Verify:           1,
 	}
 }
@@ -283,11 +309,16 @@ func ParseArgs(argv []string) (Args, error) {
 			if err != nil {
 				return args, err
 			}
-			n, err := strconv.Atoi(v)
-			if err != nil || n > 1 || n < 0 {
-				return args, fmt.Errorf("--price-strategy must be 0 or 1")
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "0", "off", "none":
+				args.PriceStrategyMode = 0
+			case "1", "oracle":
+				args.PriceStrategyMode = 1
+			case "2", "predicted", "robust":
+				args.PriceStrategyMode = 2
+			default:
+				return args, fmt.Errorf("--price-strategy must be 0|1|2 (off|oracle|predicted)")
 			}
-			args.PriceStrategy = n == 1
 		case "--price-stops":
 			v, err := need()
 			if err != nil {
@@ -298,6 +329,21 @@ func ParseArgs(argv []string) (Args, error) {
 				return args, err
 			}
 			args.PriceStops = stops
+		case "--price-targets", "--price-tps":
+			v, err := need()
+			if err != nil {
+				return args, err
+			}
+			tgts, err := parseStopsList(v)
+			if err != nil {
+				return args, fmt.Errorf("bad --price-targets: %w", err)
+			}
+			for _, t := range tgts {
+				if t <= 0 || t >= 50 {
+					return args, fmt.Errorf("--price-targets must be in (0, 50)")
+				}
+			}
+			args.PriceTargets = tgts
 		case "--price-risk":
 			v, err := need()
 			if err != nil {

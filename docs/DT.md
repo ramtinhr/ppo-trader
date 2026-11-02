@@ -56,16 +56,74 @@ runs the N/M pick loop with a learned `ScoreModel` (near→far TRAIN → LOCK �
 ## Price walk-forward
 
 Pure Go (`internal/pricewalk`). Aggregates 1m candles (M1C1 cache under `scan/.cache/`), fits
-OLS return features per bar size, optionally runs the oracle per-trade TP/SL grid
-(`--price-strategy 1`). Soft-fails OKX official candles when the network is blocked.
+OLS return features per bar size, optionally runs per-trade TP/SL:
+
+- `--price-strategy 1` / `oracle` — peek actual future closes (research ceiling → `nm_price_walk_forward.html`)
+- `--price-strategy 2` / `predicted` — **confirmed IS/OOS loop**:
+  each entry origin → **re-find** lookback **N** + under-1% **H** from past → **re-predict** H closes →
+  **score** TP×SL×lev on that predicted path (fee floor + ±errBand adverse; max mid gain / least risk / no liquid) →
+  trade after origin at bar open → **append actuals** → next entry **re-finds N** and **predicts again** until `trade_end`.
+  (`nm_price_walk_forward_predicted.html`)
+
+### Master loop: find N → predict → trade → append → re-find N → predict again
+
+| Phase | Rule |
+|-------|------|
+| **IS (TRAIN)** | All dates **before** `trade_start` (fit OLS). Report **IS check**: last TRAIN candle → discover lookback **N** → forward **H** while err &lt; `--max-rel-err` (Horizons tab). Forecasts tab rows are OOS h=1 chart points, **not** that under-1% path |
+| **N / H** | At **each OOS entry** origin: same discover — walk back **N** + forward **H** with mean err &lt; `--max-rel-err` (past only, includes appended actuals). Not frozen after trade 1 |
+| **Predict** | Fresh every origin from `bars[i-1]` features; enter at `bars[i].Open` (never reuse the prior path) |
+| **Combo** | **Entry:** fee-floor peak only (trade the year — no sit-out starve). **Exits:** score TP×SL×lev on the **predicted path** with fee floor + ±errBand (1%) adverse — must hit TP on mid; pick max mid gain then least risk / no liquid |
+| **OOS trade** | Predict **H** → enter **after** → realize on actuals |
+| **After exit** | **Append** entry→exit actual candles → **re-find N/H** → **re-predict** → re-score exits; continue until `trade_end` |
+
+Defaults for a **1-month** smoke test: `--reserve-trade-days 30 --trade-days 30`.
+Year run: `--reserve-trade-days 365 --trade-days 365`. Short scan → shrink TRAIN, keep TRADE.
+
+### TRAIN 2024→2025, TRADE 2025→2026 (one OOS year)
+
+| Phase | From | Until |
+|-------|------|-------|
+| **IS / TRAIN** | 2024-01-01 | 2025-01-01 |
+| **OOS / TRADE** | 2025-01-01 | 2026-01-01 |
+
+Need archives + a windowscan spanning both years, then reserve the last 365 days:
 
 ```bash
-./scripts/price_iter.sh
-# or:
-./dt price-walk --scan data/windowscan/<dir> --price-bars 15m --price-strategy 1 --verify 0
+# 0) build
+./scripts/build_dt.sh
+cargo build --profile relfast --no-default-features --bin download --bin scan
+
+# 1) archives (END exclusive). Skips days already verified.
+#    use --proxy socks5://127.0.0.1:PORT if OKX is blocked
+./dt download 2024-01-01 2026-01-01 --proxy socks5://127.0.0.1:12334
+
+# 2) windowscan → data/windowscan/2024-01-01_2026-01-01_24h_staged/
+./dt scan --bucket window --start 2024-01-01 --end 2026-01-01 --hours 24
+
+# 3) IS = 2024→2025, OOS trade year = 2025→2026, under-1% H
+./dt price-walk \
+  --scan data/windowscan/2024-01-01_2026-01-01_24h_staged \
+  --data data/okx/BTC-USDT-SWAP/archives \
+  --price-bars 15m \
+  --price-strategy 2 \
+  --reserve-trade-days 365 \
+  --trade-days 365 \
+  --max-rel-err 0.01 \
+  --verify 0
+
+# 4) browse
+./dt browse --scan data/windowscan/2024-01-01_2026-01-01_24h_staged --port 8091
+# → http://127.0.0.1:8091/report/nm_price_walk_forward_predicted.html
 ```
 
-Writes `nm_price_walk_forward.json` / `.html` (selected bar) plus per-bar grid reports.
+Or helper:
+
+```bash
+STRATEGY=2 SCAN=data/windowscan/2024-01-01_2026-01-01_24h_staged \
+  RESERVE=365 TRADE_DAYS=365 ./scripts/price_iter.sh
+```
+
+Writes `nm_price_walk_forward_predicted.json` / `.html`. Soft-fails OKX when blocked.
 
 ## Tests
 

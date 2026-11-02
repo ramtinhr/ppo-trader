@@ -9,6 +9,7 @@
 //! (and TradingView's).
 //!
 //! A few archives are known to be incomplete and are accepted anyway, see [`KNOWN_INCOMPLETE`]:
+//! - 2024-02-20: one ID gap 751214804→751214809 (4 missing); volume short 65 contracts.
 //! - 2024-12-01: two ID gaps around 2024-12-01 02:10 UTC (1,317 + 13,870 missing IDs); volume
 //!   short 122,843.7 contracts vs OKX's 1D candle.
 //! - 2026-01-14: two ID gaps in the minute from 2026-01-13 22:10 UTC; volume short 44,527.47.
@@ -29,23 +30,35 @@ use ureq::Proxy;
 /// Optional override for [`http`], set once from the download CLI (`--proxy`).
 static PROXY_OVERRIDE: OnceLock<String> = OnceLock::new();
 
+/// Normalize common proxy URL mistakes (`socks://` → `socks5://`).
+pub fn normalize_proxy_url(url: &str) -> String {
+    let u = url.trim();
+    if let Some(rest) = u.strip_prefix("socks://") {
+        return format!("socks5://{rest}");
+    }
+    if let Some(rest) = u.strip_prefix("SOCKS://") {
+        return format!("socks5://{rest}");
+    }
+    u.to_string()
+}
+
 /// Force every OKX HTTP call through this proxy URL (e.g. `socks5://127.0.0.1:1080`).
 /// Call before the first request. Ignored if already set.
 pub fn set_proxy(url: impl Into<String>) {
-    let url = url.into();
+    let url = normalize_proxy_url(&url.into());
     let _ = PROXY_OVERRIDE.set(url);
 }
 
 /// Proxy URL from CLI override or env (`OKX_PROXY`, `ALL_PROXY`, `all_proxy`, `SOCKS5_PROXY`).
 pub fn proxy_url() -> Option<String> {
     if let Some(url) = PROXY_OVERRIDE.get() {
-        return Some(url.clone());
+        return Some(normalize_proxy_url(url));
     }
     for key in ["OKX_PROXY", "ALL_PROXY", "all_proxy", "SOCKS5_PROXY"] {
         if let Ok(v) = std::env::var(key) {
             let v = v.trim().to_string();
             if !v.is_empty() {
-                return Some(v);
+                return Some(normalize_proxy_url(&v));
             }
         }
     }
@@ -79,6 +92,12 @@ struct KnownIncomplete {
 
 /// Published archives that fail a strict ID/volume check but are accepted with a fixed shortfall.
 const KNOWN_INCOMPLETE: &[KnownIncomplete] = &[
+    // 2024-02-20 15:29 UTC: IDs 751214804→751214809 (4 missing); archive short 65 vs 1D candle.
+    KnownIncomplete {
+        day: (2024, 2, 20),
+        gaps: &[(751_214_804, 751_214_809)],
+        shortfall_hundredths: 6_500, // 65.00 contracts
+    },
     // 2024-12-01 02:10 UTC: two bursts of missing IDs; archive 7,944,393.30 vs candle 8,067,237.
     KnownIncomplete {
         day: (2024, 12, 1),
@@ -165,12 +184,13 @@ pub fn fetch_day(dir: &Path, day: NaiveDate, previous: Option<&DaySummary>) -> R
     let path = archive_path(dir, day);
     let summary_file = summary_path(dir, day);
     let summary = match fs::read_to_string(&summary_file) {
-        Ok(text) if path.exists() => serde_json::from_str(&text)?,
+        Ok(text) if path.exists() && !text.trim().is_empty() => serde_json::from_str(&text)
+            .with_context(|| format!("corrupt verified summary {}", summary_file.display()))?,
         _ => {
-            if !path.exists() {
-                download(day, &path)?;
+            if summary_file.exists() {
+                let _ = fs::remove_file(&summary_file);
             }
-            let summary = verify(day, &path)?;
+            let summary = ensure_verified_archive(dir, day)?;
             fs::write(&summary_file, serde_json::to_string(&summary)?)?;
             summary
         }
@@ -201,6 +221,66 @@ fn http() -> ureq::Agent {
     builder.build().new_agent()
 }
 
+/// Download + verify, deleting truncated/corrupt zips (common via flaky proxies).
+fn ensure_verified_archive(dir: &Path, day: NaiveDate) -> Result<DaySummary> {
+    let path = archive_path(dir, day);
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 1..=5 {
+        if !path.exists() || !zip_looks_valid(&path) {
+            if path.exists() {
+                println!(
+                    "{day}: removing corrupt/truncated zip ({} bytes)",
+                    fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+                );
+                let _ = fs::remove_file(&path);
+            }
+            if let Err(e) = download(day, &path) {
+                last_err = Some(e);
+                println!("  download attempt {attempt} failed, retrying");
+                std::thread::sleep(std::time::Duration::from_secs(5 * attempt as u64));
+                continue;
+            }
+        }
+        match verify(day, &path) {
+            Ok(summary) => return Ok(summary),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                let corrupt = msg.contains("EOCD")
+                    || msg.contains("invalid Zip")
+                    || msg.contains("zip")
+                    || msg.contains("Unexpected length");
+                last_err = Some(e);
+                if corrupt {
+                    println!("{day}: corrupt zip after verify ({msg}); re-download attempt {attempt}");
+                    let _ = fs::remove_file(&path);
+                    std::thread::sleep(std::time::Duration::from_secs(3 * attempt as u64));
+                    continue;
+                }
+                return Err(last_err.unwrap());
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("{day}: failed to download a valid zip")))
+}
+
+fn zip_looks_valid(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    // Real OKX day zips are many MB; tiny files are HTML/error/truncation.
+    if meta.len() < 10_000 {
+        return false;
+    }
+    let Ok(mut f) = File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    if f.read_exact(&mut magic).is_err() || &magic != b"PK\x03\x04" {
+        return false;
+    }
+    zip::ZipArchive::new(f).is_ok()
+}
+
 fn download(day: NaiveDate, path: &Path) -> Result<()> {
     let url = format!(
         "{ARCHIVE_URL}/{:04}{:02}{:02}/{}",
@@ -212,18 +292,39 @@ fn download(day: NaiveDate, path: &Path) -> Result<()> {
     println!("Downloading {url}");
     let fetch = || -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
-        http()
+        let mut resp = http()
             .get(&url)
             .call()
             .with_context(|| {
                 format!("download {url} (OKX publishes a day's archive the next day)")
-            })?
-            .into_body()
-            .into_reader()
-            .read_to_end(&mut bytes)?;
+            })?;
+        let status = resp.status();
+        ensure!(
+            status.is_success(),
+            "download {url}: HTTP {status}"
+        );
+        resp.body_mut().as_reader().read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() >= 10_000,
+            "download {url}: got only {} bytes (proxy truncated or HTML error page)",
+            bytes.len()
+        );
+        ensure!(
+            bytes.starts_with(b"PK\x03\x04"),
+            "download {url}: not a zip (starts with {:?})",
+            bytes.iter().take(16).map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+        );
+        // EOCD must be present or ZipArchive will fail later with "Could not find EOCD".
+        let cursor = std::io::Cursor::new(&bytes);
+        zip::ZipArchive::new(cursor).with_context(|| {
+            format!(
+                "download {url}: invalid/truncated zip ({} bytes) — retry or check proxy",
+                bytes.len()
+            )
+        })?;
         Ok(bytes)
     };
-    // OKX's CDN drops long downloads now and then.
+    // OKX's CDN / proxies drop long downloads now and then.
     let mut attempt = 0;
     let bytes = loop {
         attempt += 1;
@@ -237,8 +338,9 @@ fn download(day: NaiveDate, path: &Path) -> Result<()> {
         }
     };
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, bytes)?;
+    fs::write(&tmp, &bytes)?;
     fs::rename(&tmp, path)?;
+    println!("{day}: saved {} bytes", bytes.len());
     Ok(())
 }
 
@@ -312,15 +414,47 @@ fn verify(day: NaiveDate, path: &Path) -> Result<DaySummary> {
 /// Volume of OKX's official 1D candle for archive `day`, in hundredths of a contract.
 fn official_volume_hundredths(day: NaiveDate) -> Result<u64> {
     let (start, _) = archive_window_ms(day);
-    let reply: serde_json::Value = http()
-        .get(CANDLE_URL)
-        .query("instId", INSTRUMENT)
-        .query("bar", "1D")
-        .query("after", (start + 1).to_string())
-        .query("limit", "1")
-        .call()?
-        .body_mut()
-        .read_json()?;
+    let fetch = || -> Result<serde_json::Value> {
+        let mut resp = http()
+            .get(CANDLE_URL)
+            .query("instId", INSTRUMENT)
+            .query("bar", "1D")
+            .query("after", (start + 1).to_string())
+            .query("limit", "1")
+            .call()
+            .with_context(|| {
+                format!(
+                    "OKX 1D candle for {day} (empty/EOF usually means proxy blocked OKX — use socks5://host:port, not socks://)"
+                )
+            })?;
+        let text = resp.body_mut().read_to_string().with_context(|| {
+            format!("reading OKX 1D candle body for {day}")
+        })?;
+        ensure!(
+            !text.trim().is_empty(),
+            "OKX 1D candle for {day}: empty body via proxy {:?} — try --proxy socks5://127.0.0.1:PORT or fix OKX_PROXY",
+            proxy_url()
+        );
+        serde_json::from_str(&text).with_context(|| {
+            format!(
+                "OKX 1D candle JSON for {day} (first 120 chars): {}",
+                text.chars().take(120).collect::<String>()
+            )
+        })
+    };
+    let mut attempt = 0;
+    let reply = loop {
+        attempt += 1;
+        match fetch() {
+            Ok(reply) if reply["code"] == "0" => break reply,
+            Ok(reply) if attempt >= 5 => bail!("OKX 1D candle request failed for {day}: {reply}"),
+            Err(e) if attempt >= 5 => return Err(e),
+            Ok(_) | Err(_) => {
+                println!("  OKX 1D candle for {day}: attempt {attempt} failed, retrying");
+                std::thread::sleep(std::time::Duration::from_secs(attempt));
+            }
+        }
+    };
     let candle = &reply["data"][0];
     ensure!(
         candle[0].as_str() == Some(start.to_string().as_str()),
@@ -567,6 +701,18 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_socks_scheme() {
+        assert_eq!(
+            normalize_proxy_url("socks://127.0.0.1:12334"),
+            "socks5://127.0.0.1:12334"
+        );
+        assert_eq!(
+            normalize_proxy_url("socks5://127.0.0.1:1080"),
+            "socks5://127.0.0.1:1080"
+        );
+    }
+
+    #[test]
     fn parses_archive_line() {
         let t = parse_line("BTC-USDT-SWAP,2916314144,buy,78536.7,19.73,1789401600155,0").unwrap();
         assert_eq!(t.trade_id, 2_916_314_144);
@@ -593,6 +739,9 @@ mod tests {
         assert!(known_gap(d2024, 1_159_405_059, 1_159_418_930));
         assert_eq!(known_gap_shortfall(d2024), 12_284_370);
         assert!(!known_gap(d2024.succ_opt().unwrap(), 1_159_375_039, 1_159_376_357));
+        let d_feb = NaiveDate::from_ymd_opt(2024, 2, 20).unwrap();
+        assert!(known_gap(d_feb, 751_214_804, 751_214_809));
+        assert_eq!(known_gap_shortfall(d_feb), 6_500);
     }
 
     #[test]

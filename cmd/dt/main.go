@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/ramtin/dynamic-trader/internal/browse"
 	"github.com/ramtin/dynamic-trader/internal/engine"
@@ -28,6 +29,7 @@ Product (pure Go):
   dt browse --scan DIR [--port N] [--layout window|month|auto] [--min-drop USDT]
   dt walk-forward --scan DIR [window_nm score-path flags…]
   dt price-walk --scan DIR [price-path flags…]   # candle OLS + oracle exits
+  dt price-analyze --scan DIR [--report PATH]    # replay report trades vs TP×SL×lev grid
   dt report --json PATH
 
 Build:  go build -o dt ./cmd/dt
@@ -61,6 +63,8 @@ func main() {
 		err = runWalkForward(args)
 	case "price-walk":
 		err = runPriceWalk(args)
+	case "price-analyze":
+		err = runPriceAnalyze(args)
 	case "report":
 		err = runReport(args)
 	default:
@@ -165,13 +169,15 @@ func runPriceWalk(argv []string) error {
 	if pricewalk.IsHelp(err) {
 		fmt.Println(`Usage: dt price-walk --scan DIR [flags]
 
-Candle OLS price path (Go). Fits return features on OHLC bars, optional oracle
-per-trade TP/SL on actual future closes (--price-strategy 1).
+Candle OLS price path (Go). Fits return features on OHLC bars; optional per-trade exits:
+  --price-strategy 0          off
+  --price-strategy 1|oracle   peek actual future closes (research ceiling)
+  --price-strategy 2|predicted  rolling: predict → re-test TP×SL×lev → one trade → refresh+re-test
 
 Common flags (see scripts/price_iter.sh):
   --scan DIR  --data DIR  --config PATH  --balance-usdt N
-  --price-bars 15m,1h  --price-strategy 0|1  --price-horizon auto|N
-  --price-stops 0.5-5/0.5  --price-leverage 1,2,3,5,8,10
+  --price-bars 15m,1h  --price-strategy 0|1|2  --price-horizon auto|N
+  --price-stops 0.1-5/0.1  --price-targets 0.1-3/0.1  --price-leverage 1,2,3,5,8,10
   --reserve-trade-days N  --min-fit-pairs N  --max-rel-err 0.01
   --require-fit 0|1  --html-only  --verify 0`)
 		return nil
@@ -179,8 +185,148 @@ Common flags (see scripts/price_iter.sh):
 	if err != nil {
 		return err
 	}
-	logx.Infof("price-walk scan=%s bars=%d strategy=%v", args.Scan, len(args.PriceBars), args.PriceStrategy)
+	logx.Infof("price-walk scan=%s bars=%d strategy_mode=%d", args.Scan, len(args.PriceBars), args.PriceStrategyMode)
 	return pricewalk.Run(args)
+}
+
+func runPriceAnalyze(argv []string) error {
+	a := pricewalk.DefaultAnalyzeArgs()
+	for i := 0; i < len(argv); i++ {
+		flag := argv[i]
+		if flag == "-h" || flag == "--help" {
+			fmt.Println(`Usage: dt price-analyze --scan DIR [flags]
+
+Replay each trade in nm_price_walk_forward_predicted.json on actual candle paths
+across a TP×SL×lev grid. Verdict:
+  ENTRY/DIRECTION  — even oracle exits can't reach ~90% WR on these entries
+  TP/SL/LEV PICK   — a better fixed combo on the same entries would win
+
+Flags:
+  --scan DIR           windowscan dir (required)
+  --report PATH        default: DIR/nm_price_walk_forward_predicted.json
+  --data DIR           OKX archives (default data/okx/BTC-USDT-SWAP/archives)
+  --config PATH        fees config
+  --price-stops RANGE  default 0.1-2/0.1
+  --price-targets RANGE default 0.1-2/0.1
+  --price-leverage LIST default 1,2,3,4,5
+  --balance-usdt N`)
+			return nil
+		}
+		need := func() (string, error) {
+			if i+1 >= len(argv) {
+				return "", fmt.Errorf("%s needs a value", flag)
+			}
+			i++
+			return argv[i], nil
+		}
+		switch flag {
+		case "--scan":
+			v, err := need()
+			if err != nil {
+				return err
+			}
+			a.Scan = v
+		case "--report":
+			v, err := need()
+			if err != nil {
+				return err
+			}
+			a.Report = v
+		case "--data":
+			v, err := need()
+			if err != nil {
+				return err
+			}
+			a.Data = v
+		case "--config":
+			v, err := need()
+			if err != nil {
+				return err
+			}
+			a.Config = v
+		case "--balance-usdt":
+			v, err := need()
+			if err != nil {
+				return err
+			}
+			x, err := strconv.ParseFloat(v, 64)
+			if err != nil {
+				return err
+			}
+			a.Balance = x
+		case "--price-stops":
+			v, err := need()
+			if err != nil {
+				return err
+			}
+			stops, err := pricewalk.ParseRange(v)
+			if err != nil {
+				stops, err = parseFloatList(v)
+			}
+			if err != nil {
+				return err
+			}
+			a.Stops = stops
+		case "--price-targets", "--price-tps":
+			v, err := need()
+			if err != nil {
+				return err
+			}
+			tgts, err := pricewalk.ParseRange(v)
+			if err != nil {
+				tgts, err = parseFloatList(v)
+			}
+			if err != nil {
+				return err
+			}
+			a.Targets = tgts
+		case "--price-leverage":
+			v, err := need()
+			if err != nil {
+				return err
+			}
+			a.Leverage = a.Leverage[:0]
+			for _, p := range splitCSV(v) {
+				n, err := strconv.ParseUint(p, 10, 32)
+				if err != nil || n < 1 {
+					return fmt.Errorf("bad leverage %q", p)
+				}
+				a.Leverage = append(a.Leverage, uint32(n))
+			}
+		default:
+			return fmt.Errorf("unknown option %s", flag)
+		}
+	}
+	if a.Scan == "" {
+		return fmt.Errorf("--scan is required")
+	}
+	return pricewalk.RunAnalyze(a)
+}
+
+func splitCSV(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func parseFloatList(v string) ([]float64, error) {
+	var out []float64
+	for _, p := range splitCSV(v) {
+		x, err := strconv.ParseFloat(p, 64)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("empty list")
+	}
+	return out, nil
 }
 
 func runReport(argv []string) error {

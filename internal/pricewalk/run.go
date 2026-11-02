@@ -138,7 +138,30 @@ func runPriceOnly(args Args, cfg *config.App, meta Meta) error {
 		tapeFrom = startMs
 	}
 	scanEndMs := endDayMs
-	trainCutoff := scanEndMs - int64(args.ReserveTradeDays)*86_400_000
+	reserveDays := args.ReserveTradeDays
+	if reserveDays == 0 {
+		reserveDays = DefaultTradeDays
+	}
+	tradeDays := args.TradeDays
+	if tradeDays == 0 {
+		tradeDays = DefaultTradeDays
+	}
+	// Strict OOS: last tradeDays are TRADE; everything before is TRAIN only.
+	// If the scan is shorter than train+trade, shrink TRAIN (keep TRADE month).
+	spanDays := (scanEndMs - startMs) / 86_400_000
+	if spanDays > 0 && int64(reserveDays) > spanDays-1 {
+		old := reserveDays
+		reserveDays = uint64(spanDays - 1)
+		if reserveDays < tradeDays {
+			reserveDays = tradeDays
+		}
+		if reserveDays >= uint64(spanDays) {
+			return fmt.Errorf("scan span %dd too short for OOS TRADE (%d d); need more archives/scan", spanDays, tradeDays)
+		}
+		logx.Warnf("scan span %dd < requested reserve %dd — shrink TRAIN, keep TRADE reserve=%dd",
+			spanDays, old, reserveDays)
+	}
+	trainCutoff := scanEndMs - int64(reserveDays)*86_400_000
 	if len(meta.Windows) < 2 {
 		return fmt.Errorf("need at least 2 windows in meta.json")
 	}
@@ -173,15 +196,21 @@ func runPriceOnly(args Args, cfg *config.App, meta Meta) error {
 			priceTradeStart = floor
 		}
 	}
-	priceTradeEnd := scanEndMs
-	if args.TradeDays > 0 {
-		priceTradeEnd = priceTradeStart + int64(args.TradeDays)*86_400_000
-		if priceTradeEnd > scanEndMs {
-			priceTradeEnd = scanEndMs
-		}
+	// TRADE never overlaps TRAIN dates (OOS only).
+	if priceTradeStart < trainCutoff {
+		priceTradeStart = trainCutoff
+	}
+	priceTradeEnd := priceTradeStart + int64(tradeDays)*86_400_000
+	if priceTradeEnd > scanEndMs {
+		priceTradeEnd = scanEndMs
+	}
+	if priceTradeEnd <= priceTradeStart {
+		return fmt.Errorf("empty OOS TRADE window after TRAIN cutoff %s", utc(trainCutoff))
 	}
 
 	logx.Infof("PRICE-ONLY fast path (no tick tape / no finalists). Cache under %s/.cache/", args.Scan)
+	logx.Infof("Strict OOS: TRAIN … → %s  |  TRADE %s → %s (%d d reserved, %d d traded)",
+		utc(trainCutoff), utc(priceTradeStart), utc(priceTradeEnd), reserveDays, tradeDays)
 	// Rust: load_minutes_cached(data, scan, tape_from_ms, ms(meta.end)).
 	minutes, err := candles.LoadMinutes(args.Data, args.Scan, tapeFrom, endDayMs)
 	if err != nil {
@@ -274,9 +303,13 @@ func runPricePath(
 		runs[i].Report["meta"].(map[string]any)["bar_grid"] = gridSummary
 		runs[i].Report["meta"].(map[string]any)["selected_bar"] = selected
 		runs[i].Report["meta"].(map[string]any)["is_selected"] = i == bestIdx
-		stem := "nm_price_walk_forward"
+		stemBase := "nm_price_walk_forward"
+		if args.PriceStrategyMode == 2 {
+			stemBase = "nm_price_walk_forward_predicted"
+		}
+		stem := stemBase
 		if i != bestIdx {
-			stem = "nm_price_walk_forward_" + runs[i].Label
+			stem = stemBase + "_" + runs[i].Label
 		}
 		payload, err := json.MarshalIndent(runs[i].Report, "", "  ")
 		if err != nil {
@@ -423,9 +456,10 @@ func runOnePriceBar(
 	if horizons.PathExample != nil {
 		if steps, ok := horizons.PathExample["steps"].([]map[string]any); ok && len(steps) > 0 {
 			fwdN := len(steps)
-			logx.Infof("  %s FORWARD from last candle %v (close %v) → %d steps (under-1%% path %d)",
+			logx.Infof("  %s IS check from last TRAIN %v (close %v) · N=%v H=%v → %d forward steps (under-1%%=%d). OOS TRADE %s→%s re-finds N/H per entry. Forecasts tab = every OOS h=1 chart point (not under-1%% paths).",
 				label, horizons.PathExample["origin"], horizons.PathExample["origin_close"],
-				fwdN, horizons.PathUnder1Pct)
+				horizons.PathExample["lookback_n"], horizons.PathExample["horizon_h"],
+				fwdN, horizons.PathUnder1Pct, utc(tradeStart), utc(tradeEnd))
 			show := func(s map[string]any) {
 				spot := "n/a (future)"
 				if s["spot"] != nil {
@@ -460,8 +494,17 @@ func runOnePriceBar(
 
 	var strategy map[string]any
 	balancePnL := 0.0
-	if args.PriceStrategy {
-		strategy, err = runPriceStrategyPerTrade(args, minutes, horizons.Models, label, barMs, tradeStart, tradeEnd, taker, maker)
+	if args.PriceStrategyMode == 1 || args.PriceStrategyMode == 2 {
+		// Hint H from IS/OOS horizon eval; live loop discovers N and re-validates H
+		// on expanding lookback after each append (no future-actual path truncation).
+		pathWin := horizons.Horizon
+		if pathWin < 1 {
+			pathWin = horizons.PathUnder1Pct
+		}
+		if pathWin < 1 {
+			pathWin = len(horizons.Models) - 1
+		}
+		strategy, err = runPriceStrategyPerTrade(args, minutes, horizons.Models, label, barMs, tradeStart, tradeEnd, taker, maker, pathWin)
 		if err != nil {
 			return priceBarRun{}, err
 		}
@@ -486,6 +529,22 @@ func runOnePriceBar(
 	if strategy == nil {
 		stratBody = nil
 	}
+	signalRule := fmt.Sprintf(
+		"debounced dir from h=1 return (%d bars); no per-trade exits",
+		PriceSignalConfirmBars,
+	)
+	switch args.PriceStrategyMode {
+	case 1:
+		signalRule = fmt.Sprintf(
+			"debounced dir from h=1 return (%d bars); per-trade TP/SL/lev = max PnL on actual closes t+1..t+%d (oracle / peek)",
+			PriceSignalConfirmBars, horizonN,
+		)
+	case 2:
+		signalRule = fmt.Sprintf(
+			"IS origin before %s → discover N + under-%.2f%% H → predict → best TP×SL×lev → trade AFTER → append actuals → re-validate H + re-pick (stable expanding N) through %s→%s (H hint=%d)",
+			utc(tradeStart), args.MaxRelErr*100, utc(tradeStart), utc(tradeEnd), horizons.Horizon,
+		)
+	}
 
 	rep := map[string]any{
 		"meta": map[string]any{
@@ -496,10 +555,8 @@ func runOnePriceBar(
 			"price_horizon_auto": args.PriceHorizonAuto,
 			"path_under_1pct":    horizons.PathUnder1Pct,
 			"horizon_rule":       horizonRule,
-			"signal_rule": fmt.Sprintf(
-				"debounced dir from h=1 return (%d bars); per-trade TP/SL/lev = max PnL on actual closes t+1..t+%d (report/oracle pick)",
-				PriceSignalConfirmBars, horizonN,
-			),
+			"price_strategy_mode": args.PriceStrategyMode,
+			"signal_rule":        signalRule,
 			"lookback_days": lookbackDays, "max_rel_err": args.MaxRelErr,
 			"min_fit_pairs": args.MinFitPairs, "require_fit": args.RequireFit,
 			"fit_pairs": len(fitPairs), "locked": locked, "locked_at": utc(lockMs),
