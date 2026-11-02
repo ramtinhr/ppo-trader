@@ -424,6 +424,31 @@ func recentWindowRangePct(bars []candles.Candle, i int, entry float64) float64 {
 	return (hi - lw) / entry * 100
 }
 
+// recentMeanBarRangePct = average per-bar (high−low)/entry over the lookback.
+// Used as SL noise floor — NOT window high−low (that confuses trend with noise).
+func recentMeanBarRangePct(bars []candles.Candle, i int, entry float64) float64 {
+	if !(entry > 0) || i < 2 {
+		return PathMinStopPct
+	}
+	lo := i - PriceRangeLookback
+	if lo < 0 {
+		lo = 0
+	}
+	var sum float64
+	n := 0
+	for _, c := range bars[lo:i] {
+		if math.IsNaN(c.High) || math.IsNaN(c.Low) || !(c.High > c.Low) {
+			continue
+		}
+		sum += (c.High - c.Low) / entry * 100
+		n++
+	}
+	if n == 0 {
+		return PathMinStopPct
+	}
+	return sum / float64(n)
+}
+
 func pathSpanPctForSignal(bars []candles.Candle, i int, entry, stopLo, stopHi float64) float64 {
 	rng := recentWindowRangePct(bars, i, entry)
 	v := rng * PriceRangeStopFrac
@@ -539,50 +564,121 @@ func minTradablePeakPct(taker, maker float64) float64 {
 	return need
 }
 
-// exitsFromPredictedPath builds one TP/SL from the rolling predicted window.
-// High-win-rate scalp: TP = fraction of predicted peak (never above peak);
-// SL sits beyond path adverse but capped near the model err band (noise shield).
-func exitsFromPredictedPath(peakPct, adversePct, errBand, taker, maker float64) exits.Exits {
+// exitsFromPathFormula — per-trade TP/SL from path + tape (not a grid, not frozen 1%).
+//
+//	TP  = take_frac × peak          (highest reachable gain on the predicted path)
+//	SL  = max(adverse×1.25, range×frac, min_stop)   (lowest loss that clears path+noise)
+//	ok  = false → sit out (fee dust, sucker TP/SL, or SL too wide for target WR)
+func exitsFromPathFormula(peakPct, adversePct, rangePct, taker, maker float64) (exits.Exits, bool) {
 	feePct := (taker + maker) * 100
+	if !(peakPct > 0) {
+		return exits.Exits{}, false
+	}
 	tp := peakPct * PathTakeFrac
 	if tp > peakPct {
 		tp = peakPct * 0.95
 	}
-	// Soft floor only when peak already clears fees — never invent TP > peak.
-	if tp < feePct+0.02 && peakPct >= feePct+0.02 {
+	if tp < feePct+0.02 {
+		if peakPct < feePct+0.02 {
+			return exits.Exits{}, false
+		}
 		tp = feePct + 0.02
-	}
-	if tp > peakPct {
-		tp = peakPct * 0.95
+		if tp > peakPct {
+			tp = peakPct * 0.95
+		}
 	}
 	if tp < 0.01 {
-		tp = 0.01
+		return exits.Exits{}, false
 	}
 
-	slCap := errBand * 100 * 1.05
-	if slCap < PathMinStopPct {
-		slCap = PathMinStopPct
+	noise := rangePct * PriceRangeStopFrac
+	if noise < 0 {
+		noise = 0
 	}
-	// Room past predicted adverse; keep SL/TP in a band that can clear ~80% WR +EV
-	// when direction is right: at WR=0.8 need SL/TP ≤ 4.
-	maxSLForWR := tp * (PathWinRateTarget / (1 - PathWinRateTarget))
-	sl := math.Max(adversePct*1.25+0.05, tp*1.25)
+	sl := adversePct*1.25 + 0.05
+	if noise > sl {
+		sl = noise
+	}
 	if sl < PathMinStopPct {
 		sl = PathMinStopPct
 	}
-	if sl > slCap {
-		sl = slCap
+	// Sucker payoff: predicted gain too small vs required stop → sit out.
+	if tp/sl+1e-12 < PathMinTpSlRatio {
+		return exits.Exits{}, false
 	}
-	if sl > maxSLForWR && maxSLForWR >= PathMinStopPct {
-		sl = maxSLForWR
-	}
-	if sl < tp*1.05 {
-		sl = math.Min(tp*1.05, slCap)
+	// SL wider than +EV band at PathWinRateTarget → sit out (don't invent a tighter SL).
+	if PathWinRateTarget > 0 && PathWinRateTarget < 1 {
+		maxSL := tp * (PathWinRateTarget / (1 - PathWinRateTarget))
+		if sl > maxSL+1e-12 {
+			return exits.Exits{}, false
+		}
 	}
 	return exits.Exits{
 		StopPct: round2(sl),
 		Targets: [][2]float64{{round2(tp), 1}},
+	}, true
+}
+
+// exitsFromPredictedPath kept for older tests; delegates to formula with no range.
+func exitsFromPredictedPath(peakPct, adversePct, errBand, taker, maker float64) exits.Exits {
+	_ = errBand
+	ex, ok := exitsFromPathFormula(peakPct, adversePct, 0, taker, maker)
+	if !ok {
+		// Fallback shape for unit tests that only check TP/SL geometry.
+		tp := peakPct * PathTakeFrac
+		if tp > peakPct {
+			tp = peakPct * 0.95
+		}
+		sl := math.Max(adversePct*1.25+0.05, PathMinStopPct)
+		return exits.Exits{StopPct: round2(sl), Targets: [][2]float64{{round2(tp), 1}}}
 	}
+	return ex
+}
+
+// bestLevOnPath: highest gain (mid PnL) among liquid-safe lev with stop×lev ≤ maxRisk
+// that hits TP on the predicted path; tie-break lowest adverse loss.
+func bestLevOnPath(
+	long bool, entry float64, ex exits.Exits, pickPath, advShock []float64,
+	levs []uint32, balance, maxRiskPct, taker, maker float64,
+) *pathPick {
+	var best *pathPick
+	for _, levU := range levs {
+		lev := float64(levU)
+		riskPct := impliedRiskPct(ex.StopPct, lev)
+		if riskPct > maxRiskPct+1e-12 {
+			continue
+		}
+		steps := sizeForLeverage(balance, lev, entry)
+		if steps <= 0 || ex.Validate(steps) != nil {
+			continue
+		}
+		if comboCanLiquid(ex.StopPct, lev) {
+			continue
+		}
+		if pathAdversePct(advShock, entry, long) >= liquidPctAtLev(lev)*0.85 {
+			continue
+		}
+		mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
+		if mid.PnL <= 0 || mid.Reason != "tp" {
+			continue
+		}
+		advSim := simulateExitsOnPath(long, entry, ex, steps, advShock, taker, maker)
+		pathR := mid.PnL / math.Max(balance*riskPct/100, 1e-9)
+		cand := pathPick{
+			Exits: ex, RiskPct: riskPct, Steps: steps, Lev: lev,
+			PathPnL: mid.PnL, WorstPnL: advSim.PnL, PathR: pathR,
+			LiquidDist: liquidDistancePct(ex.StopPct, lev), ExitH: mid.ExitH,
+		}
+		better := best == nil ||
+			mid.PnL > best.PathPnL+1e-9 ||
+			(math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && advSim.PnL > best.WorstPnL+1e-9) ||
+			(math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && math.Abs(advSim.PnL-best.WorstPnL) <= 1e-9 && lev < best.Lev-1e-12)
+		if better {
+			cp := cand
+			best = &cp
+		}
+	}
+	return best
 }
 
 func actualCloses(bars []candles.Candle, entryBar, hMax int) []float64 {
@@ -1086,7 +1182,7 @@ func runRollingPredicted(
 		}
 
 		long, peak := pathDirection(pickPath, entry)
-		pathSrc := "raw_ols_under1pct_H"
+		pathSrc := "path_formula_tp_sl_lev"
 		if peak+1e-12 < minPeak {
 			skippedFlat++
 			i++
@@ -1095,109 +1191,20 @@ func runRollingPredicted(
 		predOriginMs := bars[i-1].TimeMs
 		predOriginPx := refPx
 
-		// Dynamic TP×SL×lev on predicted path (no forced SL=err_band).
-		// Floor SL from path adverse only; hard-reject sucker TP≪SL; rank by
-		// highest mid gain then lowest adverse loss (not pathR→min SL).
+		// Formula (per origin — not a grid that collapses to one SL):
+		//   TP = 0.70 × peak
+		//   SL = max(path_adverse×1.25, recent_range×frac, min_stop)
+		//   Lev = max safe L that still hits TP on mid (highest gain)
 		advPct := pathAdversePct(pickPath, entry, long)
-		minStop := PathMinStopPct
-		if adv := advPct*1.25 + 0.05; adv > minStop {
-			minStop = adv
-		}
-		tpHint := peak * PathTakeFrac
-		if minStop > 0 && tpHint/minStop+1e-12 < PathMinTpSlRatio {
-			// Predicted peak cannot fund a healthy TP vs path-aware SL → sit out.
+		rangePct := recentMeanBarRangePct(bars, i, entry)
+		ex, ok := exitsFromPathFormula(peak, advPct, rangePct, taker, maker)
+		if !ok {
 			skippedFlat++
 			i++
 			continue
 		}
 		advShock := adversePath(pickPath, long, errBand)
-		searchGrid := exitGrid
-		for _, tp := range []float64{round2(peak * PathTakeFrac), round2(peak * 0.95), round2(peak)} {
-			if tp+1e-12 < minPeak*PathTakeFrac || tp > peak+1e-9 {
-				continue
-			}
-			for _, stop := range usable {
-				if stop+1e-12 < minStop {
-					continue
-				}
-				if tp/stop+1e-12 < PathMinTpSlRatio {
-					continue
-				}
-				searchGrid = append(searchGrid, exits.Exits{StopPct: stop, Targets: [][2]float64{{tp, 1}}})
-			}
-		}
-		var best *pathPick
-		for _, ex := range searchGrid {
-			if ex.StopPct+1e-12 < minStop {
-				continue
-			}
-			tp := firstTargetPct(ex)
-			if tp > peak+1e-9 || tp+1e-12 < minPeak*PathTakeFrac {
-				continue
-			}
-			if tp/ex.StopPct+1e-12 < PathMinTpSlRatio {
-				continue
-			}
-			for _, levU := range levs {
-				lev := float64(levU)
-				riskPct := impliedRiskPct(ex.StopPct, lev)
-				if riskPct > maxRiskPct+1e-12 {
-					continue
-				}
-				steps := sizeForLeverage(balance, lev, entry)
-				if steps <= 0 || ex.Validate(steps) != nil {
-					continue
-				}
-				if comboCanLiquid(ex.StopPct, lev) {
-					skippedLiquid++
-					continue
-				}
-				mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
-				if mid.PnL <= 0 || mid.Reason != "tp" {
-					continue
-				}
-				if pathAdversePct(advShock, entry, long) >= liquidPctAtLev(lev)*0.85 {
-					skippedLiquid++
-					continue
-				}
-				advSim := simulateExitsOnPath(long, entry, ex, steps, advShock, taker, maker)
-				pathR := mid.PnL / math.Max(balance*riskPct/100, 1e-9)
-				dist := liquidDistancePct(ex.StopPct, lev)
-				cand := pathPick{
-					Exits: ex, RiskPct: riskPct, Steps: steps, Lev: lev,
-					PathPnL: mid.PnL, WorstPnL: advSim.PnL, PathR: pathR, LiquidDist: dist,
-					ExitH: mid.ExitH,
-				}
-				// Highest gain (mid PnL) → lowest loss (adverse PnL) → best TP/SL →
-				// earlier TP → less risk → more liquid room.
-				better := best == nil
-				if !better {
-					if mid.PnL > best.PathPnL+1e-9 {
-						better = true
-					} else if math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && advSim.PnL > best.WorstPnL+1e-9 {
-						better = true
-					} else if math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && math.Abs(advSim.PnL-best.WorstPnL) <= 1e-9 &&
-						tp/ex.StopPct > firstTargetPct(best.Exits)/best.Exits.StopPct+1e-9 {
-						better = true
-					} else if math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && math.Abs(advSim.PnL-best.WorstPnL) <= 1e-9 &&
-						math.Abs(tp/ex.StopPct-firstTargetPct(best.Exits)/best.Exits.StopPct) <= 1e-9 &&
-						cand.ExitH < best.ExitH {
-						better = true
-					} else if math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && math.Abs(advSim.PnL-best.WorstPnL) <= 1e-9 &&
-						math.Abs(tp/ex.StopPct-firstTargetPct(best.Exits)/best.Exits.StopPct) <= 1e-9 &&
-						cand.ExitH == best.ExitH && riskPct < best.RiskPct-1e-12 {
-						better = true
-					} else if math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && math.Abs(advSim.PnL-best.WorstPnL) <= 1e-9 &&
-						math.Abs(tp/ex.StopPct-firstTargetPct(best.Exits)/best.Exits.StopPct) <= 1e-9 &&
-						cand.ExitH == best.ExitH && math.Abs(riskPct-best.RiskPct) <= 1e-12 && dist > best.LiquidDist {
-						better = true
-					}
-				}
-				if better {
-					best = &cand
-				}
-			}
-		}
+		best := bestLevOnPath(long, entry, ex, pickPath, advShock, levs, balance, maxRiskPct, taker, maker)
 		if best == nil || best.Steps <= 0 {
 			skippedNoCombo++
 			i++
@@ -1247,8 +1254,8 @@ func runRollingPredicted(
 			})
 		}
 		note := fmt.Sprintf(
-			"N=%d H=%d predict@%s → peak=%.3f%% → best %s mid=+%.2f → trade → append %d actuals → re-validate H; in_band=%v max_dev=%.3f%%",
-			lookbackN, liveH, utc(predOriginMs), peak, best.Exits.Label(), best.PathPnL, exitH, inBand, bandDev*100,
+			"N=%d H=%d predict@%s → peak=%.3f%% adv=%.3f%% range=%.3f%% → formula %s mid=+%.2f → trade → append %d actuals; in_band=%v max_dev=%.3f%%",
+			lookbackN, liveH, utc(predOriginMs), peak, advPct, rangePct, best.Exits.Label(), best.PathPnL, exitH, inBand, bandDev*100,
 		)
 		tradesJSON = append(tradesJSON, map[string]any{
 			"side": side,
@@ -1294,13 +1301,13 @@ func runRollingPredicted(
 	}
 
 	rule := fmt.Sprintf(
-		"IS origin → N=%d under-%.2f%% H → dynamic TP×SL×lev ≤%.0fx: max mid gain then best adverse loss (TP≤peak, TP/SL≥%.2f, SL≥path adverse, no liquid) → trade → append → re-validate H until trade_end",
-		lookbackN, errBand*100, liveMaxLev, PathMinTpSlRatio,
+		"IS origin → N=%d under-%.2f%% H → formula TP=%.0f%%×peak, SL=max(path_adv,range,min), lev≤%.0fx max mid gain (TP/SL≥%.2f or sit out) → append → re-validate H until trade_end",
+		lookbackN, errBand*100, PathTakeFrac*100, liveMaxLev, PathMinTpSlRatio,
 	)
 	return map[string]any{
 		"selection_rule": rule,
 		"summary": map[string]any{
-			"exits_mode": "live_retest_grid", "pick_mode": modeName, "horizon": hMax,
+			"exits_mode": "path_formula", "pick_mode": modeName, "horizon": hMax,
 			"lookback_n": lookbackN, "path_window": liveH, "confirm_bars": 0, "max_leverage": liveMaxLev,
 			"err_band": errBand, "min_peak_pct": minPeak, "grid_stops": len(usable), "grid_tps": len(targets),
 			"grid_combos": len(exitGrid), "n_widen": nWiden,

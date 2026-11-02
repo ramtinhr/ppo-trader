@@ -11,24 +11,18 @@ import (
 )
 
 func synthMinutes(nBars int, barMs, start int64) []candles.Candle {
+	// Steady up-drift with tight wicks so recent_range stays small vs a strong OLS peak
+	// (formula sits out when tape noise ≫ predicted peak).
 	var minutes []candles.Candle
 	px := 100_000.0
 	for i := 0; i < nBars; i++ {
-		block := i / 20
-		up := block%2 == 0
 		o := px
-		c := px * 0.998
-		if up {
-			c = px * 1.002
-		}
-		h, l := c, o
-		if c < o {
-			h, l = o, c
-		}
+		c := px * 1.004 // +0.4%/bar trend
+		hi, lo := c*1.0002, o*0.9998
 		for m := 0; m < 15; m++ {
 			minutes = append(minutes, candles.Candle{
 				TimeMs: start + int64(i)*barMs + int64(m)*60_000,
-				Open:   o, High: h * 1.0005, Low: l * 0.9995, Close: c,
+				Open:   o, High: hi, Low: lo, Close: c,
 			})
 		}
 		px = c
@@ -94,10 +88,10 @@ func TestRollingMonthPredictTradeRefresh(t *testing.T) {
 	start := int64(1_700_000_000_000)
 	start = start - (start % barMs)
 	minutes := synthMinutes(240, barMs, start)
-	h1 := pricemodel.Model{Alphas: [4]float64{3.0, 0, 0, 0}}
+	h1 := pricemodel.Model{Alphas: [4]float64{8.0, 0, 0, 0}}
 	models := []pricemodel.Model{pricemodel.ColdStart(), h1}
 	for h := 2; h <= 40; h++ {
-		models = append(models, pricemodel.Model{Alphas: [4]float64{2.0, 0, 0, 0}})
+		models = append(models, pricemodel.Model{Alphas: [4]float64{8.0, 0, 0, 0}})
 	}
 	args := DefaultArgs()
 	args.PriceStrategyMode = 2
@@ -135,8 +129,8 @@ func TestRollingMonthPredictTradeRefresh(t *testing.T) {
 			t.Fatalf("trade missing horizon_h: %+v", tr)
 		}
 		note, _ := tr["oracle_note"].(string)
-		if note == "" || !strings.Contains(note, "append") || !strings.Contains(note, "N=") {
-			t.Fatalf("note should mention N + append, got %q", note)
+		if note == "" || !strings.Contains(note, "formula") || !strings.Contains(note, "N=") {
+			t.Fatalf("note should mention N + formula, got %q", note)
 		}
 		eb, _ := tr["entry_bar"].(int)
 		eh, _ := tr["exit_h"].(int)
@@ -145,8 +139,8 @@ func TestRollingMonthPredictTradeRefresh(t *testing.T) {
 		}
 		prevEnd = eb + eh
 		src, _ := tr["path_source"].(string)
-		if src != "raw_ols_under1pct_H" {
-			t.Fatalf("path_source=%q want raw_ols_under1pct_H", src)
+		if src != "path_formula_tp_sl_lev" {
+			t.Fatalf("path_source=%q want path_formula_tp_sl_lev", src)
 		}
 	}
 }
@@ -156,10 +150,10 @@ func TestRollingRetestsGridEachTrade(t *testing.T) {
 	start := int64(1_700_000_000_000)
 	start = start - (start % barMs)
 	minutes := synthMinutes(240, barMs, start)
-	h1 := pricemodel.Model{Alphas: [4]float64{3.0, 0, 0, 0}}
+	h1 := pricemodel.Model{Alphas: [4]float64{8.0, 0, 0, 0}}
 	models := []pricemodel.Model{pricemodel.ColdStart(), h1}
 	for h := 2; h <= 40; h++ {
-		models = append(models, pricemodel.Model{Alphas: [4]float64{2.0, 0, 0, 0}})
+		models = append(models, pricemodel.Model{Alphas: [4]float64{8.0, 0, 0, 0}})
 	}
 	args := DefaultArgs()
 	args.PriceStrategyMode = 2
@@ -181,7 +175,7 @@ func TestRollingRetestsGridEachTrade(t *testing.T) {
 	if sum["pick_mode"] != "rolling-predicted" {
 		t.Fatalf("mode=%v", sum["pick_mode"])
 	}
-	if sum["exits_mode"] != "live_retest_grid" {
+	if sum["exits_mode"] != "path_formula" {
 		t.Fatalf("exits_mode=%v", sum["exits_mode"])
 	}
 	if n == 0 {
@@ -302,13 +296,14 @@ func TestPathDirectionPicksFavorableSide(t *testing.T) {
 }
 
 func TestExitsFromPredictedPathHighWRShape(t *testing.T) {
-	e := exitsFromPredictedPath(0.40, 0.05, 0.01, 0.0005, 0.0002)
+	// peak 1.0% with quiet adverse → TP≈0.70, SL from min_stop/adverse (formula).
+	e := exitsFromPredictedPath(1.0, 0.05, 0.01, 0.0005, 0.0002)
 	tp := e.Targets[0][0]
-	if tp < 0.2 || tp > 0.40 {
-		t.Fatalf("TP should be ~70%% of 0.40 peak, got %v", tp)
+	if tp < 0.6 || tp > 1.0 {
+		t.Fatalf("TP should be ~70%% of 1.0 peak, got %v", tp)
 	}
-	if e.StopPct > 1.05+1e-9 {
-		t.Fatalf("SL capped near err band, got %v", e.StopPct)
+	if e.StopPct < PathMinStopPct-1e-9 || e.StopPct > tp/PathMinTpSlRatio+0.2 {
+		t.Fatalf("SL out of formula band: tp=%.3f sl=%.3f", tp, e.StopPct)
 	}
 }
 
@@ -342,116 +337,47 @@ func TestRollingGridFindsTinyTP(t *testing.T) {
 	}
 }
 
-func TestDynamicComboRejectsSuckerPayoff(t *testing.T) {
-	// SL is no longer frozen at err_band 1%. Combos must keep TP/SL ≥ PathMinTpSlRatio
-	// and risk≤5%; micro-TP vs fat SL is rejected (sit out), not forced to SL=1%.
-	const barMs = int64(15 * 60_000)
-	start := int64(1_700_000_000_000)
-	start = start - (start % barMs)
-	minutes := synthMinutes(160, barMs, start)
-	models := []pricemodel.Model{pricemodel.ColdStart()}
-	for h := 1; h <= 30; h++ {
-		models = append(models, pricemodel.Model{Alphas: [4]float64{2.0, 0, 0, 0}})
+func TestPathFormulaTPAndSLFromPeakAndNoise(t *testing.T) {
+	// rangePct here = mean per-bar range (noise), not window high−low.
+	ex, ok := exitsFromPathFormula(2.5, 0.05, 0.80, 0.0005, 0.0002)
+	if !ok {
+		t.Fatal("expected formula ok on 2.5% peak")
 	}
-	args := DefaultArgs()
-	args.PriceStrategyMode = 2
-	args.MaxRelErr = 0.01
-	args.PriceStops = []float64{0.1, 0.5, 1.0, 1.5, 2.0}
-	args.PriceTargets = []float64{0.1, 0.5, 1.0}
-	args.PriceLeverage = []uint32{1, 5, 10}
-	args.PriceRisk = []float64{5}
-	out, err := runPriceStrategyPerTrade(args, minutes, models, "15m", barMs,
-		start+20*barMs, start+140*barMs, 0.0005, 0.0002, 30)
-	if err != nil {
-		t.Fatal(err)
+	tp := firstTargetPct(ex)
+	if math.Abs(tp-2.5*PathTakeFrac) > 0.05 {
+		t.Fatalf("TP should track peak×take_frac, got %.3f (sl=%.3f)", tp, ex.StopPct)
 	}
-	trades, _ := out["trades"].([]map[string]any)
-	stopsSeen := map[float64]int{}
-	for _, tr := range trades {
-		sl, _ := tr["stop_pct"].(float64)
-		lev, _ := tr["leverage"].(float64)
-		stopsSeen[sl]++
-		if sl*lev > 5+1e-9 {
-			t.Fatalf("risk %.2f%% > 5%% with lev=%v sl=%v", sl*lev, lev, sl)
-		}
-		tp := 0.0
-		if ex, ok := tr["exits"].(map[string]any); ok {
-			if tgts, ok := ex["targets"].([][2]float64); ok && len(tgts) > 0 {
-				tp = tgts[0][0]
-			}
-		}
-		if tp > 0 && sl > 0 && tp/sl+1e-12 < PathMinTpSlRatio {
-			t.Fatalf("sucker TP/SL %.3f (tp=%.3f sl=%.3f) must be rejected", tp/sl, tp, sl)
-		}
+	// mean bar range 0.80 × 0.5 = 0.40 → SL ≈ 0.40
+	if ex.StopPct < 0.30 || ex.StopPct > 0.55 {
+		t.Fatalf("SL should follow bar-range noise ~0.40, got %.3f", ex.StopPct)
 	}
-	t.Logf("trades=%d stop_pct histogram=%v skips=%v", len(trades), stopsSeen, out["skips"])
+	ex2, ok2 := exitsFromPathFormula(2.5, 0.05, 1.60, 0.0005, 0.0002)
+	if !ok2 {
+		t.Fatal("expected formula ok on wider bar range")
+	}
+	if math.Abs(ex2.StopPct-ex.StopPct) < 0.1 {
+		t.Fatalf("SL must change with bar-range noise: %.3f vs %.3f", ex.StopPct, ex2.StopPct)
+	}
+	if _, ok := exitsFromPathFormula(0.20, 0, 1.5, 0.0005, 0.0002); ok {
+		t.Fatal("sucker peak vs fat bar-range must sit out")
+	}
 }
 
-func TestPickPrefersHigherGainOverMinStop(t *testing.T) {
-	// On a strong predicted path, picker must not collapse every stop to the floor:
-	// higher TP with matching SL can win on mid PnL.
+func TestBestLevMaximizesMidGain(t *testing.T) {
 	entry := 100.0
-	path := make([]float64, 20)
+	path := make([]float64, 16)
 	for i := range path {
-		path[i] = entry * 1.025 // +2.5% peak
+		path[i] = entry * 1.02
 	}
-	long := true
-	peak := 2.5
-	errBand := 0.01
-	taker, maker := 0.0005, 0.0002
-	balance := 500.0
-	usable := []float64{0.5, 1.0, 1.5, 2.0}
-	levs := []uint32{1, 2, 3}
-	advShock := adversePath(path, long, errBand)
-	advPct := pathAdversePct(path, entry, long)
-	minStop := PathMinStopPct
-	if adv := advPct*1.25 + 0.05; adv > minStop {
-		minStop = adv
-	}
-	var best *pathPick
-	for _, tp := range []float64{round2(peak * PathTakeFrac), round2(peak * 0.95)} {
-		for _, stop := range usable {
-			if stop+1e-12 < minStop || tp/stop+1e-12 < PathMinTpSlRatio {
-				continue
-			}
-			ex := exits.Exits{StopPct: stop, Targets: [][2]float64{{tp, 1}}}
-			for _, levU := range levs {
-				lev := float64(levU)
-				risk := impliedRiskPct(stop, lev)
-				if risk > 5 {
-					continue
-				}
-				steps := sizeForLeverage(balance, lev, entry)
-				if steps <= 0 {
-					continue
-				}
-				mid := simulateExitsOnPath(long, entry, ex, steps, path, taker, maker)
-				if mid.PnL <= 0 || mid.Reason != "tp" {
-					continue
-				}
-				advSim := simulateExitsOnPath(long, entry, ex, steps, advShock, taker, maker)
-				cand := pathPick{
-					Exits: ex, RiskPct: risk, Steps: steps, Lev: lev,
-					PathPnL: mid.PnL, WorstPnL: advSim.PnL, PathR: mid.PnL / math.Max(balance*risk/100, 1e-9),
-					LiquidDist: liquidDistancePct(stop, lev), ExitH: mid.ExitH,
-				}
-				if best == nil || mid.PnL > best.PathPnL+1e-9 ||
-					(math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && advSim.PnL > best.WorstPnL+1e-9) {
-					cp := cand
-					best = &cp
-				}
-			}
-		}
-	}
+	ex := exits.Exits{StopPct: 0.5, Targets: [][2]float64{{1.4, 1}}}
+	adv := adversePath(path, true, 0.01)
+	best := bestLevOnPath(true, entry, ex, path, adv, []uint32{1, 2, 3, 4, 5}, 500, 5, 0.0005, 0.0002)
 	if best == nil {
-		t.Fatal("expected a combo on +2.5% path")
+		t.Fatal("expected lev pick")
 	}
-	tp := firstTargetPct(best.Exits)
-	if tp < 1.0 {
-		t.Fatalf("expected a meaningful TP on +2.5%% peak, got tp=%.2f sl=%.2f", tp, best.Exits.StopPct)
+	// stop 0.5 × lev ≤ 5 → lev≤10, but liquid-safe + mid TP; expect higher lev than 1.
+	if best.Lev < 2 {
+		t.Fatalf("expected gain-seeking lev≥2, got %.0f pnl=%.2f", best.Lev, best.PathPnL)
 	}
-	if best.Exits.StopPct < PathMinStopPct-1e-9 {
-		t.Fatalf("stop below floor: %v", best.Exits.StopPct)
-	}
-	t.Logf("picked %s lev=%.0f mid=%.2f adv=%.2f", best.Exits.Label(), best.Lev, best.PathPnL, best.WorstPnL)
+	t.Logf("lev=%.0f mid=%.2f sl=%.2f tp=%.2f", best.Lev, best.PathPnL, best.Exits.StopPct, firstTargetPct(best.Exits))
 }

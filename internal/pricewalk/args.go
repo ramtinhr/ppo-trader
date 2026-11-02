@@ -30,15 +30,20 @@ const (
 	//  - sit out only when peak cannot clear fees
 	//  - no invented / h1-extrapolated / span-floor paths
 	//  - losing timeout capped at SL; skewed TP≪SL → lev ≤ PathSkewMaxLev
+	// Per-trade formula (not a collapsing grid):
+	//   TP = take_frac × predicted peak (≤ peak)
+	//   SL = max(path_adverse×1.25, recent_range×frac, min_stop)  — lowest loss that clears noise
+	//   sit out if TP/SL < PathMinTpSlRatio or SL too wide for target WR
+	//   Lev = max liquid-safe L with stop×L ≤ max_risk that still hits TP on mid path
 	PathTakeFrac      = 0.70
 	PathMinPeakPct    = 0.08 // fee-area floor; sit out only true dust
 	PathMinStopPct    = 0.25
-	PathSkewMaxLev    = 1.0 // leftover cap; bad TP/SL is hard-rejected now
-	PathMinTpSlRatio  = 0.50 // TP must be ≥ half SL — else sit out (no forced 1% SL)
+	PathSkewMaxLev    = 1.0
+	PathMinTpSlRatio  = 0.50 // TP ≥ half SL or sit out
 	PathLiveMaxLev    = 10.0
 	PathWinRateTarget = 0.80
-	PathMinHorizonH   = 4   // below this after append → try widen N
-	DefaultTradeDays  = 30 // OOS TRADE month smoke; year runs pass 365
+	PathMinHorizonH   = 4
+	DefaultTradeDays  = 30
 )
 
 var errHelp = errors.New("help")
