@@ -1,6 +1,7 @@
 package pricewalk
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ramtin/dynamic-trader/internal/candles"
@@ -87,7 +88,7 @@ func TestTruncatePathUntilRelErr(t *testing.T) {
 }
 
 func TestRollingMonthPredictTradeRefresh(t *testing.T) {
-	// Same edge as retest grid; assert multi-trade refresh + predict_at + under-1% path source.
+	// Confirmed loop: multi-trade append/refresh + N/H fields + under-1% path source.
 	const barMs = int64(15 * 60_000)
 	start := int64(1_700_000_000_000)
 	start = start - (start % barMs)
@@ -113,7 +114,11 @@ func TestRollingMonthPredictTradeRefresh(t *testing.T) {
 	}
 	n, _ := out["closed_trades"].(uint32)
 	if n < 3 {
-		t.Fatalf("month loop must refresh after each exit, got %d trades skips=%v", n, out["skips"])
+		t.Fatalf("append/re-validate loop must refresh after each exit, got %d trades skips=%v", n, out["skips"])
+	}
+	sum, _ := out["summary"].(map[string]any)
+	if _, ok := sum["lookback_n"]; !ok {
+		t.Fatalf("summary missing lookback_n: %v", sum)
 	}
 	trades, _ := out["trades"].([]map[string]any)
 	prevEnd := 0
@@ -121,6 +126,16 @@ func TestRollingMonthPredictTradeRefresh(t *testing.T) {
 		predAt, _ := tr["predict_at"].(string)
 		if predAt == "" {
 			t.Fatalf("missing predict_at on trade %+v", tr)
+		}
+		if _, ok := tr["lookback_n"]; !ok {
+			t.Fatalf("trade missing lookback_n: %+v", tr)
+		}
+		if _, ok := tr["horizon_h"]; !ok {
+			t.Fatalf("trade missing horizon_h: %+v", tr)
+		}
+		note, _ := tr["oracle_note"].(string)
+		if note == "" || !strings.Contains(note, "append") || !strings.Contains(note, "N=") {
+			t.Fatalf("note should mention N + append, got %q", note)
 		}
 		eb, _ := tr["entry_bar"].(int)
 		eh, _ := tr["exit_h"].(int)

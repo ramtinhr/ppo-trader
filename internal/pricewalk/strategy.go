@@ -685,9 +685,9 @@ func extendBarsWithOfficial(bars []candles.Candle, barMs int64, nMore int) []can
 
 // runPriceStrategyPerTrade picks per-trade exits.
 // mode 1 = oracle (peek actual closes) over the OOS TRADE window;
-// mode 2 = live predicted: TRAIN is before tradeStart (strict OOS); walk TRADE
-//   month only; look_ahead ≈ under-1% path (~160); best TP×SL×lev on raw OLS
-//   (mid hits TP with PnL>0, SL≥err_band, never liquidatable) → one trade → refresh.
+// mode 2 = live predicted: TRAIN before tradeStart; discover N/H under 1%;
+//   best TP×SL×lev on predicted path → trade → append actuals → re-validate H
+//   + re-pick until trade_end (stable expanding N).
 func runPriceStrategyPerTrade(
 	args Args,
 	minutes []candles.Candle,
@@ -943,10 +943,12 @@ func runOracleGrid(
 	}, nil
 }
 
-// runRollingPredicted — live OOS TRADE month:
-//   raw OLS predict (~under-1% look_ahead) → skip if peak too small →
-//   best TP×SL×lev (SL≥err_band, mid hits TP with PnL>0, never liquid) →
-//   one trade → refresh. No invented paths. Flat forecast = sit out.
+// runRollingPredicted — confirmed IS/OOS loop:
+//   Origin at latest IS → discover lookback N + under-1% H from data →
+//   predict H → best TP×SL×lev on that path (TP≤peak, SL≥err_band, no liquid) →
+//   trade AFTER origin → APPEND actual entry→exit candles into lookback →
+//   re-validate H + re-pick combo (stable expanding/rolling N; widen N only if
+//   H collapses) → repeat until trade_end. Flat forecast = sit out.
 func runRollingPredicted(
 	args Args,
 	bars []candles.Candle,
@@ -972,8 +974,26 @@ func runRollingPredicted(
 	sort.Slice(levs, func(i, j int) bool { return levs[i] < levs[j] })
 
 	minPeak := minTradablePeakPct(taker, maker)
-	logx.Infof("  %s rolling-predicted (live): look_ahead=%d (H=%d) · stops=%d · tps=%d · combos=%d · lev=%v (cap %.0f) · max_risk=%g%% · err_band=%.2f%% · min_peak=%.2f%% · min_stop=%.2f%% · OOS %d..%d",
-		label, pathWindow, hMax, len(usable), len(targets), len(exitGrid), levs, liveMaxLev, maxRiskPct, errBand*100, minPeak, errBand*100, oosLo, oosHi)
+
+	// Origin = latest IS bar (just before TRADE). Discover N/H from past data only.
+	isOrigin := oosLo
+	if isOrigin < 2 {
+		isOrigin = 2
+	}
+	lookbackN, liveH := discoverLookbackNH(models, bars, isOrigin, errBand, pathWindow)
+	if liveH < 1 {
+		liveH = max(pathWindow, 1)
+	}
+	if liveH > hMax {
+		liveH = hMax
+	}
+	// Expanding window start: keep size-class N behind the first IS origin.
+	lookbackStart := isOrigin - lookbackN
+	if lookbackStart < 1 {
+		lookbackStart = 1
+	}
+	logx.Infof("  %s rolling-predicted (live): N=%d H=%d (models≤%d) · stops=%d · tps=%d · combos=%d · lev=%v (cap %.0f) · max_risk=%g%% · err_band=%.2f%% · min_peak=%.2f%% · OOS %d..%d",
+		label, lookbackN, liveH, hMax, len(usable), len(targets), len(exitGrid), levs, liveMaxLev, maxRiskPct, errBand*100, minPeak, oosLo, oosHi)
 
 	balance := args.BalanceUSDT
 	running := 0.0
@@ -983,6 +1003,7 @@ func runRollingPredicted(
 	skippedNoCombo := 0
 	skippedFlat := 0
 	skippedDisagree := 0
+	nWiden := 0
 	origins := 0
 	inBandN, inBandLoss := 0, 0
 
@@ -991,6 +1012,47 @@ func runRollingPredicted(
 			i++
 			continue
 		}
+
+		// Re-validate under-1% H on expanding lookback (past only; includes appended actuals).
+		// Rolling size = bars from lookbackStart..i; N class stays unless H collapses.
+		expandN := i - lookbackStart
+		if expandN < lookbackN {
+			expandN = lookbackN
+		}
+		hNow := under1PctHorizonLookback(models, bars, i, expandN, errBand)
+		if hNow < 1 {
+			hNow = liveH // keep last known good until data says otherwise
+		}
+		if hNow > hMax {
+			hNow = hMax
+		}
+		// H collapsed → widen N (option B: do not freeze first H; do not re-brute N every trade).
+		if hNow < PathMinHorizonH && i > isOrigin {
+			wider := widenLookbackN(lookbackN, i, i-1)
+			if wider > lookbackN {
+				lookbackN = wider
+				nWiden++
+				newStart := isOrigin - lookbackN
+				if newStart < 1 {
+					newStart = 1
+				}
+				lookbackStart = newStart
+				expandN = i - lookbackStart
+				if expandN < lookbackN {
+					expandN = lookbackN
+				}
+				h2 := under1PctHorizonLookback(models, bars, i, expandN, errBand)
+				if h2 > hNow {
+					hNow = h2
+				}
+				logx.Infof("  %s H collapsed → widen N=%d → H=%d @ bar %d", label, lookbackN, hNow, i)
+			}
+		}
+		if hNow < 1 {
+			hNow = 1
+		}
+		liveH = hNow
+
 		feat, ok := pricemodel.CandleFeatures(bars[i-1], bars[i-2].Close)
 		if !ok {
 			i++
@@ -1004,14 +1066,14 @@ func runRollingPredicted(
 			continue
 		}
 
-		// Predict from this older bar (ref = i-1); trade enters on bar i (after origin).
+		// Predict from older bar (ref = i-1); trade enters on bar i (after origin).
 		rawFull := predictedCloses(models, refPx, feat)
 		if len(rawFull) == 0 {
 			i++
 			continue
 		}
-		// Look-ahead = IS/OOS under-1% horizon H (pathWindow), not per-bar cut vs future actuals.
-		pickPath := truncatePath(rawFull, pathWindow)
+		// Look-ahead = re-validated under-1% H (no future-actual truncation).
+		pickPath := truncatePath(rawFull, liveH)
 		origins++
 		if len(pickPath) == 0 {
 			i++
@@ -1023,7 +1085,6 @@ func runRollingPredicted(
 			continue
 		}
 
-		// Side + peak from predicted path FROM this bar; entry is the next bar.
 		long, peak := pathDirection(pickPath, entry)
 		pathSrc := "raw_ols_under1pct_H"
 		if peak+1e-12 < minPeak {
@@ -1034,7 +1095,7 @@ func runRollingPredicted(
 		predOriginMs := bars[i-1].TimeMs
 		predOriginPx := refPx
 
-		// Re-test grid on raw path. Prefer TP near PathTakeFrac of peak.
+		// Combo on under-1% predicted path only; TP≤peak, SL≥err_band, lev liquid-safe.
 		minStop := errBand * 100
 		searchGrid := exitGrid
 		for _, tp := range []float64{round2(peak * PathTakeFrac), round2(peak * 0.95)} {
@@ -1053,7 +1114,6 @@ func runRollingPredicted(
 			if ex.StopPct+1e-12 < minStop {
 				continue
 			}
-			// TP must not exceed predicted peak (unreachable on mid path).
 			tp := firstTargetPct(ex)
 			if tp > peak+1e-9 {
 				continue
@@ -1061,7 +1121,6 @@ func runRollingPredicted(
 			skewed := ex.StopPct > 0 && tp/ex.StopPct+1e-12 < PathMinTpSlRatio
 			for _, levU := range levs {
 				lev := float64(levU)
-				// Micro-TP vs fat SL: keep the trade, but don't size it at 5–10x.
 				if skewed && lev > PathSkewMaxLev+1e-12 {
 					continue
 				}
@@ -1078,11 +1137,9 @@ func runRollingPredicted(
 					continue
 				}
 				mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
-				// Must win on the predicted path (hit TP, PnL>0). Losing timeouts are capped at SL.
 				if mid.PnL <= 0 || mid.Reason != "tp" {
 					continue
 				}
-				// −err shock on the path must stay clear of liquidation (stop already liquid-safe).
 				if pathAdversePct(adversePath(pickPath, long, errBand), entry, long) >= liquidPctAtLev(lev)*0.85 {
 					skippedLiquid++
 					continue
@@ -1164,8 +1221,8 @@ func runRollingPredicted(
 			})
 		}
 		note := fmt.Sprintf(
-			"predict@%s → peak=%.3f%% over %d bars → best %s mid=+%.2f → trade → refresh; in_band=%v max_dev=%.3f%%",
-			utc(predOriginMs), peak, len(pickPath), best.Exits.Label(), best.PathPnL, inBand, bandDev*100,
+			"N=%d H=%d predict@%s → peak=%.3f%% → best %s mid=+%.2f → trade → append %d actuals → re-validate H; in_band=%v max_dev=%.3f%%",
+			lookbackN, liveH, utc(predOriginMs), peak, best.Exits.Label(), best.PathPnL, exitH, inBand, bandDev*100,
 		)
 		tradesJSON = append(tradesJSON, map[string]any{
 			"side": side,
@@ -1181,6 +1238,7 @@ func runRollingPredicted(
 			"path_reason": pathSimR.Reason, "path_exit_h": pathSimR.ExitH,
 			"path_source": pathSrc, "path_span_pct": round2(peak*100) / 100,
 			"path_window": len(pickPath),
+			"lookback_n": lookbackN, "horizon_h": liveH,
 			"pnl": round2(pnl), "reason": realSim.Reason, "exit_h": realSim.ExitH,
 			"fees": round2(realSim.Fees), "running_pnl": round2(running),
 			"balance": round2(balance),
@@ -1192,8 +1250,8 @@ func runRollingPredicted(
 			"fills":        fills,
 		})
 
-		// After ANY exit (tp or stop): next free bar → predict again → trade again until month ends.
-		// A loss does not halt the bot; sparse later dates mean flat/no_combo, not "stopped".
+		// APPEND actual entry→exit candles into the expanding lookback, then continue.
+		// A loss does not halt the bot; next origin re-validates H + re-picks combo.
 		i = i + exitH
 	}
 
@@ -1202,24 +1260,24 @@ func runRollingPredicted(
 	if n > 0 {
 		winRate = round2(100 * float64(wins) / float64(n))
 	}
-	logx.Infof("  %s rolling-predicted done: %d trades · PnL %+.2f · origins=%d · win_rate=%.1f%% · flat_skips≈%d · h1_disagree≈%d · no_combo≈%d · liquid≈%d · in_band=%d in_band_loss=%d",
-		label, n, running, origins, winRate, skippedFlat, skippedDisagree, skippedNoCombo, skippedLiquid, inBandN, inBandLoss)
+	logx.Infof("  %s rolling-predicted done: %d trades · PnL %+.2f · origins=%d · win_rate=%.1f%% · N=%d H=%d · flat≈%d · no_combo≈%d · liquid≈%d · N_widen=%d · in_band=%d in_band_loss=%d",
+		label, n, running, origins, winRate, lookbackN, liveH, skippedFlat, skippedNoCombo, skippedLiquid, nWiden, inBandN, inBandLoss)
 	if n == 0 {
-		logx.Warnf("  %s live predicted: 0 trades (flat_peak<%.2f%% → %d · h1_disagree=%d · no_combo=%d). Sitting out flat forecasts is correct for live.",
-			label, minPeak, skippedFlat, skippedDisagree, skippedNoCombo)
+		logx.Warnf("  %s live predicted: 0 trades (flat_peak<%.2f%% → %d · no_combo=%d). Sitting out flat forecasts is correct for live.",
+			label, minPeak, skippedFlat, skippedNoCombo)
 	}
 
 	rule := fmt.Sprintf(
-		"IS/OOS month: predict H=%d (under-%.2f%% horizon) from older bar → trade AFTER with best TP×SL×lev ≤%.0fx (peak≥%.2f%%, mid hits TP, no liquid; skewed TP≪SL lev≤%.0f) → after tp/stop re-predict until trade_end (full month)",
-		pathWindow, errBand*100, liveMaxLev, minPeak, PathSkewMaxLev,
+		"IS origin → discover N=%d + under-%.2f%% H → predict → best TP×SL×lev ≤%.0fx (peak≥%.2f%%, TP≤peak, SL≥err, no liquid; skewed lev≤%.0f) → trade → append actuals → re-validate H + re-pick (widen N if H collapses) until trade_end",
+		lookbackN, errBand*100, liveMaxLev, minPeak, PathSkewMaxLev,
 	)
 	return map[string]any{
 		"selection_rule": rule,
 		"summary": map[string]any{
 			"exits_mode": "live_retest_grid", "pick_mode": modeName, "horizon": hMax,
-			"path_window": pathWindow, "confirm_bars": 0, "max_leverage": liveMaxLev,
+			"lookback_n": lookbackN, "path_window": liveH, "confirm_bars": 0, "max_leverage": liveMaxLev,
 			"err_band": errBand, "min_peak_pct": minPeak, "grid_stops": len(usable), "grid_tps": len(targets),
-			"grid_combos": len(exitGrid),
+			"grid_combos": len(exitGrid), "n_widen": nWiden,
 			"in_band_trades": inBandN, "in_band_losses": inBandLoss,
 			"taker_fee_bps": taker * 10_000, "maker_fee_bps": maker * 10_000,
 			"balance_start": args.BalanceUSDT, "balance_end": round2(balance),
@@ -1234,7 +1292,7 @@ func runRollingPredicted(
 		},
 		"skips": map[string]any{
 			"liquid": skippedLiquid, "tp_floor": 0, "robust": skippedNoCombo, "flat": skippedFlat,
-			"h1_disagree": skippedDisagree,
+			"h1_disagree": skippedDisagree, "n_widen": nWiden,
 		},
 		"trades": tradesJSON,
 	}, nil

@@ -8,6 +8,41 @@ import (
 	"github.com/ramtin/dynamic-trader/internal/pricemodel"
 )
 
+func TestUnder1PctHorizonLookbackPastOnly(t *testing.T) {
+	const barMs = int64(15 * 60_000)
+	start := int64(1_700_000_000_000)
+	start = start - (start % barMs)
+	n := 300
+	var bars []candles.Candle
+	px := 100_000.0
+	for i := 0; i < n; i++ {
+		c := px * (1 + 0.0001)
+		bars = append(bars, candles.Candle{
+			TimeMs: start + int64(i)*barMs,
+			Open: px, High: math.Max(px, c) * 1.0001, Low: math.Min(px, c) * 0.9999, Close: c,
+		})
+		px = c
+	}
+	// Near-zero alphas → predictions ≈ ref → under-1% for many horizons on calm path.
+	models := []pricemodel.Model{pricemodel.ColdStart()}
+	for h := 1; h <= 40; h++ {
+		models = append(models, pricemodel.Model{Alphas: [4]float64{0.01, 0, 0, 0}})
+	}
+	origin := 200
+	h := under1PctHorizonLookback(models, bars, origin, 128, 0.01)
+	if h < 1 {
+		t.Fatalf("expected under-1%% H≥1 on calm lookback, got %d", h)
+	}
+	nDisc, hDisc := discoverLookbackNH(models, bars, origin, 0.01, 20)
+	if nDisc < 16 || hDisc < 1 {
+		t.Fatalf("discover N/H got N=%d H=%d", nDisc, hDisc)
+	}
+	wider := widenLookbackN(nDisc, origin, origin-1)
+	if wider < nDisc {
+		t.Fatalf("widen must not shrink: %d → %d", nDisc, wider)
+	}
+}
+
 func TestTradeModelsKeepPathUnder1Pct(t *testing.T) {
 	const barMs = int64(15 * 60_000)
 	start := int64(1_700_000_000_000)

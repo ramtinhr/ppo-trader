@@ -21,12 +21,12 @@ const (
 	StepBTC                  = 0.0001
 	ReplayBalance            = 1e9
 
-	// Live predicted bot (mode 2) — IS / OOS month loop:
-	//  IS: fit OLS only before trade_start.
-	//  Look-ahead H = under-1% trading horizon from horizon eval (not re-truncated
-	//  each bar vs future actuals — that emptied paths and skipped half the month).
-	//  At each free OOS bar: predict H → best TP×SL×lev → trade AFTER origin →
-	//  after ANY exit (tp/stop) re-predict until trade_end (full month).
+	// Live predicted bot (mode 2) — confirmed IS/OOS loop:
+	//  Origin at latest IS → discover lookback N + under-1% H from data →
+	//  best TP×SL×lev on that predicted path (TP≤peak, SL≥err_band, no liquid) →
+	//  trade AFTER origin → APPEND actual entry→exit candles →
+	//  re-validate H + re-pick combo (stable expanding/rolling N; widen N only
+	//  if H collapses) → repeat until trade_end (~1y with --trade-days 365).
 	//  - sit out only when peak cannot clear fees
 	//  - no invented / h1-extrapolated / span-floor paths
 	//  - losing timeout capped at SL; skewed TP≪SL → lev ≤ PathSkewMaxLev
@@ -37,7 +37,8 @@ const (
 	PathMinTpSlRatio  = 0.25
 	PathLiveMaxLev    = 10.0
 	PathWinRateTarget = 0.80
-	DefaultTradeDays  = 30 // OOS TRADE month
+	PathMinHorizonH   = 4   // below this after append → try widen N
+	DefaultTradeDays  = 30 // OOS TRADE month smoke; year runs pass 365
 )
 
 var errHelp = errors.New("help")

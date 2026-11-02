@@ -59,23 +59,24 @@ Pure Go (`internal/pricewalk`). Aggregates 1m candles (M1C1 cache under `scan/.c
 OLS return features per bar size, optionally runs per-trade TP/SL:
 
 - `--price-strategy 1` / `oracle` — peek actual future closes (research ceiling → `nm_price_walk_forward.html`)
-- `--price-strategy 2` / `predicted` — **IS/OOS month loop**:
-  fit on **IS** (before `trade_start`); look-ahead **H** = under-1% horizon from
-  horizon eval; each OOS bar **predict H → best TP×SL×lev → trade after origin**;
-  after **tp or stop** re-predict until `trade_end` (a loss does not halt trading).
-  (`nm_price_walk_forward_predicted.html`)
+- `--price-strategy 2` / `predicted` — **confirmed IS/OOS loop**:
+  origin at latest IS → discover lookback **N** + under-1% **H** from data →
+  best TP×SL×lev on that predicted path → trade after origin → **append actuals** →
+  re-validate **H** + re-pick combo (stable expanding/rolling **N**; widen N only if
+  H collapses) until `trade_end`. (`nm_price_walk_forward_predicted.html`)
 
-### Master loop: IS fit → under-1% H → OOS month trade → refresh
+### Master loop: IS origin → N/H under 1% → trade → append → re-validate
 
 | Phase | Rule |
 |-------|------|
-| **IS (TRAIN)** | All dates **before** `trade_start` (fit OLS only) |
-| **H** | Under-1% trading horizon from horizon eval (`--max-rel-err 0.01`) |
-| **OOS trade** | Predict **H** from older bar → enter **after** → TP/SL/lev from that path |
-| **After exit** | Re-predict after **tp or stop** until `trade_end` (full month; no stop-after-loss) |
+| **IS (TRAIN)** | All dates **before** `trade_start` (fit OLS); origin = latest IS bar |
+| **N / H** | Walk back from origin: lookback **N** + forward **H** with mean err &lt; `--max-rel-err` (from data, not fixed) |
+| **Combo** | TP ≤ predicted peak, SL ≥ ~1% err band, lev liquid-safe on that path only |
+| **OOS trade** | Predict **H** from older bar → enter **after** → realize on actuals |
+| **After exit** | **Append** entry→exit actual candles → re-validate **H** + re-pick TP/SL/lev; widen **N** only if H collapses; continue until `trade_end` (loss does not halt) |
 
 Defaults for a **1-month** smoke test: `--reserve-trade-days 30 --trade-days 30`.
-Short scan → shrink TRAIN, keep TRADE.
+Year run: `--reserve-trade-days 365 --trade-days 365`. Short scan → shrink TRAIN, keep TRADE.
 
 ### TRAIN 2024→2025, TRADE 2025→2026 (one OOS year)
 

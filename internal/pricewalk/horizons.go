@@ -245,3 +245,155 @@ func oosHorizonErrors(model pricemodel.Model, oos []pricemodel.Sample) (ret, pri
 	nf := float64(n)
 	return retSum / nf, priceSum / nf, baseSum / nf
 }
+
+// under1PctHorizonLookback is the longest h whose mean |pred−spot|/spot on the
+// lookback window [originIdx−lookbackN, originIdx) stays under maxRelErr.
+// Uses only past bars (no future peek). lookbackN/H come from data, not fixed constants.
+func under1PctHorizonLookback(
+	models []pricemodel.Model,
+	bars []candles.Candle,
+	originIdx, lookbackN int,
+	maxRelErr float64,
+) int {
+	if maxRelErr <= 0 {
+		maxRelErr = 0.01
+	}
+	hMax := len(models) - 1
+	if hMax < 1 || originIdx < 3 || lookbackN < 8 {
+		return 0
+	}
+	lo := originIdx - lookbackN
+	if lo < 1 {
+		lo = 1
+	}
+	// Target must also lie inside the lookback (past-only validation).
+	best := 0
+	for h := 1; h <= hMax; h++ {
+		m := models[h]
+		if m.ColdStart {
+			break
+		}
+		var sum float64
+		n := 0
+		// origin t with t+h < originIdx and t >= lo
+		hi := originIdx - h
+		if hi <= lo {
+			break
+		}
+		for t := lo; t < hi; t++ {
+			if t < 1 || t+h >= len(bars) {
+				continue
+			}
+			feat, ok := pricemodel.CandleFeatures(bars[t], bars[t-1].Close)
+			if !ok {
+				continue
+			}
+			ref := bars[t].Close
+			spot := bars[t+h].Close
+			if !(ref > 0) || math.IsNaN(ref) || math.IsInf(ref, 0) ||
+				!(spot > 0) || math.IsNaN(spot) || math.IsInf(spot, 0) {
+				continue
+			}
+			pred := m.PredictClose(ref, feat)
+			if !(pred > 0) || math.IsNaN(pred) || math.IsInf(pred, 0) {
+				continue
+			}
+			sum += math.Abs(pred-spot) / spot
+			n++
+		}
+		if n < 4 {
+			break
+		}
+		if sum/float64(n) >= maxRelErr {
+			break
+		}
+		best = h
+	}
+	return best
+}
+
+// discoverLookbackNH walks expanding lookback sizes from the IS origin until
+// under-1% H is found. Returns the stable N size-class (not re-bruteforced every
+// trade) and the matching H. Numbers come from data.
+func discoverLookbackNH(
+	models []pricemodel.Model,
+	bars []candles.Candle,
+	originIdx int,
+	maxRelErr float64,
+	hintH int,
+) (lookbackN, horizonH int) {
+	available := originIdx - 2
+	if available < 16 {
+		h := under1PctHorizonLookback(models, bars, originIdx, available, maxRelErr)
+		if h < 1 && hintH > 0 {
+			h = hintH
+		}
+		if h > available {
+			h = max(available, 1)
+		}
+		return max(available, 8), max(h, 1)
+	}
+	// Expanding size classes; pick the smallest N that yields a usable H,
+	// else the N with the best H (stable class — do not re-search every trade).
+	candidates := []int{64, 128, 256, 512, 1024, 2048, 4096, available}
+	bestN, bestH := 0, 0
+	minUsable := 4
+	if hintH > 0 && hintH < minUsable {
+		minUsable = max(hintH, 1)
+	}
+	for _, n := range candidates {
+		if n > available {
+			n = available
+		}
+		if n < 16 {
+			continue
+		}
+		h := under1PctHorizonLookback(models, bars, originIdx, n, maxRelErr)
+		if h > bestH {
+			bestH, bestN = h, n
+		}
+		if h >= minUsable {
+			// First working size class = stable N.
+			logx.Infof("    discover N/H: lookback N=%d → under-%.2f%% H=%d (first working class)",
+				n, maxRelErr*100, h)
+			return n, h
+		}
+		if n == available {
+			break
+		}
+	}
+	if bestH < 1 {
+		if hintH > 0 {
+			bestH = hintH
+		} else {
+			bestH = 1
+		}
+		bestN = max(available, 16)
+		logx.Warnf("    discover N/H: no under-%.2f%% H on lookback — fall back N=%d H=%d",
+			maxRelErr*100, bestN, bestH)
+		return bestN, bestH
+	}
+	logx.Infof("    discover N/H: lookback N=%d → under-%.2f%% H=%d (best available)",
+		bestN, maxRelErr*100, bestH)
+	return bestN, bestH
+}
+
+// widenLookbackN grows the lookback size-class when under-1% H collapsed.
+func widenLookbackN(currentN, originIdx, availableExtra int) int {
+	available := originIdx - 2
+	if availableExtra > 0 && available > availableExtra {
+		// Cap at how far back the expanding window can reach.
+		available = availableExtra
+	}
+	next := currentN * 2
+	if next < currentN+64 {
+		next = currentN + 64
+	}
+	if next > available {
+		next = available
+	}
+	if next <= currentN {
+		return currentN
+	}
+	return next
+}

@@ -494,8 +494,8 @@ func runOnePriceBar(
 	var strategy map[string]any
 	balancePnL := 0.0
 	if args.PriceStrategyMode == 1 || args.PriceStrategyMode == 2 {
-		// Under-1% look-ahead from IS/OOS horizon eval (mean err < max_rel_err).
-		// Do NOT re-cut each bar vs future actuals — that sat out most of the month.
+		// Hint H from IS/OOS horizon eval; live loop discovers N and re-validates H
+		// on expanding lookback after each append (no future-actual path truncation).
 		pathWin := horizons.Horizon
 		if pathWin < 1 {
 			pathWin = horizons.PathUnder1Pct
@@ -540,8 +540,8 @@ func runOnePriceBar(
 		)
 	case 2:
 		signalRule = fmt.Sprintf(
-			"IS fit before %s; OOS %s→%s: each free bar predict H=%d (under-%.2f%% horizon) → best TP×SL×lev → trade AFTER origin → after tp/stop re-predict until month ends (no stop-after-loss)",
-			utc(tradeStart), utc(tradeStart), utc(tradeEnd), horizons.Horizon, args.MaxRelErr*100,
+			"IS origin before %s → discover N + under-%.2f%% H → predict → best TP×SL×lev → trade AFTER → append actuals → re-validate H + re-pick (stable expanding N) through %s→%s (H hint=%d)",
+			utc(tradeStart), args.MaxRelErr*100, utc(tradeStart), utc(tradeEnd), horizons.Horizon,
 		)
 	}
 
