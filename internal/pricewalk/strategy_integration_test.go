@@ -337,10 +337,10 @@ func TestRollingGridFindsTinyTP(t *testing.T) {
 }
 
 func TestPathFormulaAnalyzeBackedShape(t *testing.T) {
-	// Peak ≥ 0.8% → TP 0.8%, SL clamped into 1.0–1.2%.
-	ex, ok := exitsFromPathFormula(1.5, 0.05, 0.40, 0.0005, 0.0002)
+	// Tiny predicted peak still gets TP 0.8% (analyze used actuals, not pred peak).
+	ex, ok := exitsFromPathFormula(0.20, 0.05, 0.40, 0.0005, 0.0002)
 	if !ok {
-		t.Fatal("expected formula ok on 1.5% peak")
+		t.Fatal("expected formula ok even with tiny predicted peak")
 	}
 	tp := firstTargetPct(ex)
 	if math.Abs(tp-PathTargetTPPct) > 0.05 {
@@ -349,12 +349,8 @@ func TestPathFormulaAnalyzeBackedShape(t *testing.T) {
 	if ex.StopPct < PathSLLoPct-1e-9 || ex.StopPct > PathSLHiPct+1e-9 {
 		t.Fatalf("SL want %.2f–%.2f got %.3f", PathSLLoPct, PathSLHiPct, ex.StopPct)
 	}
-	// Peak below target TP → sit out (entry filter).
-	if _, ok := exitsFromPathFormula(0.50, 0, 0.40, 0.0005, 0.0002); ok {
-		t.Fatal("peak < 0.8% must sit out")
-	}
 	// Noise needing SL > 1.2% → sit out.
-	if _, ok := exitsFromPathFormula(1.5, 0.05, 4.0, 0.0005, 0.0002); ok {
+	if _, ok := exitsFromPathFormula(0.20, 0.05, 4.0, 0.0005, 0.0002); ok {
 		t.Fatal("fat noise above SL hi must sit out")
 	}
 }

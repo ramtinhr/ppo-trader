@@ -552,39 +552,26 @@ func pathAdversePct(path []float64, entry float64, long bool) float64 {
 	return worst
 }
 
-// minTradablePeakPct — entry gate: peak must be able to reach PathTargetTPPct (0.8%).
+// minTradablePeakPct — fee floor only (enough to have a directional side).
+// Do NOT require peak ≥ 0.8%: OLS peaks are tiny; analyze TP 0.8% was on ACTUALS.
 func minTradablePeakPct(taker, maker float64) float64 {
 	feePct := (taker + maker) * 100
-	need := PathTargetTPPct
-	if feeNeed := (feePct + 0.05) / PathTakeFrac; feeNeed > need {
-		need = feeNeed
-	}
+	need := (feePct + 0.05) / PathTakeFrac
 	if need < PathMinPeakPct {
 		need = PathMinPeakPct
 	}
 	return need
 }
 
-// exitsFromPathFormula — analyze-backed shape (not micro-SL, not frozen grid collapse).
+// exitsFromPathFormula — analyze-backed TP/SL (empirical OOS winners).
 //
-//	Entry: peak ≥ PathTargetTPPct (caller sits out otherwise)
-//	TP  = PathTargetTPPct (0.8%), must be ≤ peak
-//	SL  = clamp(max(path_adverse, bar_noise), PathSLLoPct..PathSLHiPct) → ~1.0–1.2%
-//	ok  = false if noise needs SL > PathSLHiPct or TP/SL sucker
+//	TP = 0.8% always (not capped to predicted peak — pred paths are flat)
+//	SL = clamp(path/noise, 1.0..1.2%); sit out only if noise needs SL > 1.2%
 func exitsFromPathFormula(peakPct, adversePct, rangePct, taker, maker float64) (exits.Exits, bool) {
+	_ = peakPct
 	_ = taker
 	_ = maker
-	if !(peakPct > 0) || peakPct+1e-12 < PathTargetTPPct {
-		return exits.Exits{}, false
-	}
 	tp := PathTargetTPPct
-	if tp > peakPct {
-		tp = peakPct * 0.95
-	}
-	if tp+1e-12 < PathTargetTPPct*0.95 {
-		return exits.Exits{}, false
-	}
-
 	noise := rangePct * PriceRangeStopFrac
 	if noise < 0 {
 		noise = 0
@@ -597,7 +584,6 @@ func exitsFromPathFormula(peakPct, adversePct, rangePct, taker, maker float64) (
 		sl = PathSLLoPct
 	}
 	if sl > PathSLHiPct {
-		// Path/tape needs a wider stop than the +EV band we validated → sit out.
 		return exits.Exits{}, false
 	}
 	if tp/sl+1e-12 < PathMinTpSlRatio {
@@ -625,8 +611,8 @@ func exitsFromPredictedPath(peakPct, adversePct, errBand, taker, maker float64) 
 	return ex
 }
 
-// bestLevOnPath: stop×lev ≤ min(maxRisk, PathTargetRiskPct); prefer lev in 4–5
-// (analyze winners), then highest pathR / mid PnL among those that hit TP on mid.
+// bestLevOnPath: prefer lev 4–5 under risk cap. Do NOT require predicted path to
+// hit TP 0.8% (OLS paths are flat — that gate left ~13 trades/year).
 func bestLevOnPath(
 	long bool, entry float64, ex exits.Exits, pickPath, advShock []float64,
 	levs []uint32, balance, maxRiskPct, taker, maker float64,
@@ -656,9 +642,6 @@ func bestLevOnPath(
 			continue
 		}
 		mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
-		if mid.PnL <= 0 || mid.Reason != "tp" {
-			continue
-		}
 		advSim := simulateExitsOnPath(long, entry, ex, steps, advShock, taker, maker)
 		pathR := mid.PnL / math.Max(balance*riskPct/100, 1e-9)
 		cand := pathPick{
@@ -666,18 +649,19 @@ func bestLevOnPath(
 			PathPnL: mid.PnL, WorstPnL: advSim.PnL, PathR: pathR,
 			LiquidDist: liquidDistancePct(ex.StopPct, lev), ExitH: mid.ExitH,
 		}
+		if cand.ExitH < 1 {
+			cand.ExitH = 1
+		}
 		better := best == nil
 		if !better {
 			bp, cp := prefer(best.Lev), prefer(lev)
 			if cp && !bp {
 				better = true
 			} else if cp == bp {
-				if mid.PnL > best.PathPnL+1e-9 {
+				// Prefer higher lev in the band (5 over 4) for more gain when right.
+				if lev > best.Lev+1e-12 {
 					better = true
-				} else if math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && pathR > best.PathR+1e-9 {
-					better = true
-				} else if math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && math.Abs(pathR-best.PathR) <= 1e-9 &&
-					advSim.PnL > best.WorstPnL+1e-9 {
+				} else if math.Abs(lev-best.Lev) <= 1e-12 && mid.PnL > best.PathPnL+1e-9 {
 					better = true
 				}
 			}
@@ -1200,13 +1184,13 @@ func runRollingPredicted(
 		predOriginMs := bars[i-1].TimeMs
 		predOriginPx := refPx
 
-		// Formula from analyze winners:
-		//   sit out if peak < 0.8%; TP=0.8%; SL in 1.0–1.2%; prefer lev 4–5
+		// Analyze exits on predicted SIDE (fee-floor peak). TP 0.8% is empirical
+		// on actuals — not gated on predicted peak (that left ~13 trades/year).
 		advPct := pathAdversePct(pickPath, entry, long)
 		rangePct := recentMeanBarRangePct(bars, i, entry)
 		ex, ok := exitsFromPathFormula(peak, advPct, rangePct, taker, maker)
 		if !ok {
-			skippedFlat++
+			skippedNoCombo++
 			i++
 			continue
 		}
@@ -1308,9 +1292,9 @@ func runRollingPredicted(
 	}
 
 	rule := fmt.Sprintf(
-		"IS origin → N=%d under-%.2f%% H → sit out peak<%.2f%%; TP=%.2f%% SL=%.2f–%.2f%% lev prefer %d–%d (risk≤%.1f%%) → append → re-validate H until trade_end",
-		lookbackN, errBand*100, PathTargetTPPct, PathTargetTPPct, PathSLLoPct, PathSLHiPct,
-		PathPreferLevLo, PathPreferLevHi, PathTargetRiskPct,
+		"IS origin → N=%d under-%.2f%% H → side from pred (peak≥%.2f%% fees); fixed TP=%.2f%% SL=%.2f–%.2f%% lev prefer %d–%d → append → re-validate H until trade_end",
+		lookbackN, errBand*100, minPeak, PathTargetTPPct, PathSLLoPct, PathSLHiPct,
+		PathPreferLevLo, PathPreferLevHi,
 	)
 	return map[string]any{
 		"selection_rule": rule,

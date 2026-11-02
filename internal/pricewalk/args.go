@@ -31,21 +31,21 @@ const (
 	//  - no invented / h1-extrapolated / span-floor paths
 	//  - losing timeout capped at SL; skewed TP≪SL → lev ≤ PathSkewMaxLev
 	// Live exits from price-analyze winners on 2025 OOS report:
-	//   fixed-ish TP≈0.8% / SL≈1.0–1.2% / lev 4–5 → ~90% WR on reachable paths.
-	//   Sit out when predicted peak < TP (entry filter).
-	//   Lev risk cap ~5% so SL 1.2% × lev 4 is allowed (not the old 0.25%×10 blow-up).
+	//   TP≈0.8% / SL≈1.0–1.2% / lev 4–5 on actual paths (not predicted peak).
+	//   Entry = predicted SIDE with fee-floor peak (OLS peaks are tiny — do NOT
+	//   require peak≥0.8% or that the predicted path hits TP 0.8%, or we get ~13 trades/year).
 	PathTakeFrac      = 0.70
-	PathMinPeakPct    = 0.08 // fee floor only; real gate is PathTargetTPPct
+	PathMinPeakPct    = 0.08 // fee-area floor for having a side
 	PathTargetTPPct   = 0.80 // analyze best: tp_pct 0.8
-	PathSLLoPct       = 1.00 // analyze band
+	PathSLLoPct       = 1.00
 	PathSLHiPct       = 1.20
-	PathMinStopPct    = 0.25 // legacy floor; formula uses PathSLLoPct
+	PathMinStopPct    = 0.25
 	PathSkewMaxLev    = 1.0
 	PathMinTpSlRatio  = 0.50
 	PathLiveMaxLev    = 10.0
 	PathWinRateTarget = 0.80
 	PathMinHorizonH   = 4
-	PathTargetRiskPct = 5.0 // allow lev 4–5 with SL ~1–1.2%
+	PathTargetRiskPct = 5.0
 	PathPreferLevLo   = 4
 	PathPreferLevHi   = 5
 	DefaultTradeDays  = 30

@@ -71,7 +71,7 @@ OLS return features per bar size, optionally runs per-trade TP/SL:
 |-------|------|
 | **IS (TRAIN)** | All dates **before** `trade_start` (fit OLS); origin = latest IS bar |
 | **N / H** | Walk back from origin: lookback **N** + forward **H** with mean err &lt; `--max-rel-err` (from data, not fixed) |
-| **Combo** | From OOS analyze: sit out if peak &lt; **0.8%**; **TP 0.8%**, **SL 1.0–1.2%** (path/noise inside band), prefer **lev 4–5** (risk ≤ 5%) |
+| **Combo** | From OOS analyze: enter on predicted **side** (fee-floor peak — not peak≥0.8%); exits **TP 0.8% / SL 1.0–1.2% / lev 4–5** (empirical on actuals; OLS peaks stay tiny) |
 | **OOS trade** | Predict **H** from older bar → enter **after** → realize on actuals |
 | **After exit** | **Append** entry→exit actual candles → re-validate **H** + re-pick TP/SL/lev; widen **N** only if H collapses; continue until `trade_end` (loss does not halt) |
 
