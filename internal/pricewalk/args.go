@@ -21,30 +21,30 @@ const (
 	StepBTC                  = 0.0001
 	ReplayBalance            = 1e9
 
-	// Live predicted bot (mode 2) — confirmed IS/OOS loop:
-	//  Each entry: FIND lookback N + under-1% H → PREDICT → SCORE TP×SL×lev on
-	//  recent TRAIN actuals inside the analyze band → trade (never starve the book).
-	//  Analyze OOS winners: TP≈0.7 / SL≈1.0 / lev 4–5 (~+2.7k on same entries).
-	PathTakeFrac      = 0.70
-	PathMinPeakPct    = 0.08 // fee-area floor for a directional side
-	PathMinStopPct    = 0.25
-	PathSkewMaxLev    = 1.0
-	PathMinTpSlRatio  = 0.50
-	PathLiveMaxLev    = 10.0
-	PathWinRateTarget = 0.80
-	PathMinHorizonH   = 4
-	PathTargetRiskPct = 5.0
-	PathTrainSamples  = 64
-	// Score ONLY this band (no coarse outside exploration — that caused weird losers).
-	PathScoreTPLo     = 0.40
-	PathScoreTPHi     = 1.20
-	PathScoreSLLo     = 0.70
-	PathScoreSLHi     = 1.50
-	// Fallback when train is thin — exact analyze best-fixed-by-PnL shape.
-	PathFallbackTP    = 0.70
-	PathFallbackSL    = 1.00
-	PathFallbackLev   = 5.0
-	DefaultTradeDays  = 30
+	// Live predicted bot (mode 2):
+	//  re-find N/H → re-predict → ENTRY filter (skip weak/dir-fragile peaks) →
+	//  SCORE TP×SL×lev on recent TRAIN actuals (dynamic every origin, not static) →
+	//  trade only if some combo has +train PnL → append → repeat.
+	PathTakeFrac         = 0.70
+	PathMinPeakPct       = 0.08 // absolute fee-area floor
+	PathEntryMinPeakPct  = 0.25 // live entry: skip fee-floor wiggles (dir_wrong cluster)
+	PathEntryMinPeakAdv  = 1.00 // require peak ≥ predicted adverse
+	PathMinStopPct       = 0.25
+	PathSkewMaxLev       = 1.0
+	PathMinTpSlRatio     = 0.50
+	PathLiveMaxLev       = 10.0
+	PathWinRateTarget    = 0.80
+	PathMinHorizonH      = 4
+	PathTargetRiskPct    = 5.0
+	PathTrainSamples     = 64
+	PathTrainMinWR       = 0.55 // reject combos that lose often on train
+	PathTrainMinTPHit    = 0.35 // prefer shapes that actually hit TP on train
+	// Score band (still searched dynamically — not a frozen single combo).
+	PathScoreTPLo        = 0.40
+	PathScoreTPHi        = 1.20
+	PathScoreSLLo        = 0.70
+	PathScoreSLHi        = 1.50
+	DefaultTradeDays     = 30
 )
 
 var errHelp = errors.New("help")

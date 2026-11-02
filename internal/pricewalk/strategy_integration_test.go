@@ -513,24 +513,30 @@ func TestBetterTrainPickPrefersMostPnL(t *testing.T) {
 	}
 }
 
-func TestFallbackAnalyzeExitsUsesBand(t *testing.T) {
-	entry := 100.0
-	path := make([]float64, 12)
-	for i := range path {
-		path[i] = entry * 1.01
+func TestPredEntryOKFiltersWeakAndAdverse(t *testing.T) {
+	if !predEntryOK(0.40, 0.20, 0.25) {
+		t.Fatal("strong peak vs adverse should pass")
 	}
-	best := fallbackAnalyzeExits(true, entry, path, []uint32{1, 2, 3, 4, 5}, 500, 5, 0.0005, 0.0002)
-	if best == nil {
-		t.Fatal("expected fallback")
+	if predEntryOK(0.20, 0.05, 0.25) {
+		t.Fatal("peak below entry min must sit out")
 	}
-	if math.Abs(firstTargetPct(best.Exits)-PathFallbackTP) > 1e-9 {
-		t.Fatalf("tp=%v want %v", firstTargetPct(best.Exits), PathFallbackTP)
+	if predEntryOK(0.30, 0.40, 0.25) {
+		t.Fatal("adverse > peak must sit out")
 	}
-	if math.Abs(best.Exits.StopPct-PathFallbackSL) > 1e-9 {
-		t.Fatalf("sl=%v want %v", best.Exits.StopPct, PathFallbackSL)
+}
+
+func TestPickExitsRequiresPositiveTrainPnL(t *testing.T) {
+	// Paths that only dump → no combo should clear +train PnL gate.
+	samples := make([]trainSample, 0, 12)
+	for i := 0; i < 12; i++ {
+		samples = append(samples, trainSample{
+			Long: true, Entry: 100, Peak: 0.4,
+			Act: []float64{99.7, 99.4, 99.0, 98.8},
+		})
 	}
-	if math.Abs(best.Lev-PathFallbackLev) > 1e-9 {
-		t.Fatalf("lev=%.0f want %.0f", best.Lev, PathFallbackLev)
+	goodBand := scoreComboOnSamples(samples, exits.Exits{StopPct: 1.0, Targets: [][2]float64{{0.7, 1}}}, 5, 500, 5, 0.0005, 0.0002)
+	if goodBand.PnL > 0 {
+		t.Fatalf("dump paths should not print +train PnL, got %.2f", goodBand.PnL)
 	}
 }
 
