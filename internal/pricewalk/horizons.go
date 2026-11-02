@@ -112,12 +112,29 @@ func evalPriceHorizons(
 	}
 	fitN := len(models) - 1
 
-	// Example path from just before TRADE (older tape date) — NOT post-tape / last candle.
-	// Strategy look-ahead is per-origin until |pred−actual|≥maxRelErr; keep all fitted models.
+	// IS check: last candle BEFORE trade_start (end of TRAIN). Discover lookback N
+	// and how many forward candles H stay under maxRelErr — this is the skill proof,
+	// not the OOS Forecasts dump (those are every TRADE bar's h=1 chart point).
 	pathExample, pathUnder := buildForwardPath(bars, models, barMs, tradeStartMs, fitN, oosHorizon, maxRelErr)
 	if pathExample != nil {
-		pathExample["kind"] = "example_from_trade_start"
-		pathExample["note"] = "illustrative under-1% path from before TRADE; each real trade recomputes length until err≥1%"
+		originIdx := -1
+		for t := 1; t < len(bars); t++ {
+			if bars[t].TimeMs < tradeStartMs {
+				originIdx = t
+			}
+		}
+		lookbackN, horizonH := 0, pathUnder
+		if originIdx >= 2 {
+			lookbackN, horizonH = discoverLookbackNH(models, bars, originIdx, maxRelErr, oosHorizon)
+		}
+		pathExample["kind"] = "is_end_under_1pct_check"
+		pathExample["phase"] = "IS"
+		pathExample["lookback_n"] = lookbackN
+		pathExample["horizon_h"] = horizonH
+		pathExample["max_rel_err"] = maxRelErr
+		pathExample["note"] = "IS end: from last TRAIN candle, lookback N → forward H while |pred−actual|/actual < max_rel_err. OOS trades re-find N/H the same way. Forecasts tab ≠ this path."
+		logx.Infof("    IS check @%s: lookback N=%d → under-%.2f%% forward H=%d (path_under_1pct steps=%d)",
+			pathExample["origin"], lookbackN, maxRelErr*100, horizonH, pathUnder)
 	}
 
 	return horizonEval{

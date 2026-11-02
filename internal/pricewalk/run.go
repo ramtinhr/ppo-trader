@@ -456,8 +456,9 @@ func runOnePriceBar(
 	if horizons.PathExample != nil {
 		if steps, ok := horizons.PathExample["steps"].([]map[string]any); ok && len(steps) > 0 {
 			fwdN := len(steps)
-			logx.Infof("  %s under-1%% EXAMPLE from before TRADE %v (close %v) → %d steps (under-1%%=%d). Real trades: each origin predicts until err≥1%%, then enters AFTER that origin through %s→%s",
+			logx.Infof("  %s IS check from last TRAIN %v (close %v) · N=%v H=%v → %d forward steps (under-1%%=%d). OOS TRADE %s→%s re-finds N/H per entry. Forecasts tab = every OOS h=1 chart point (not under-1%% paths).",
 				label, horizons.PathExample["origin"], horizons.PathExample["origin_close"],
+				horizons.PathExample["lookback_n"], horizons.PathExample["horizon_h"],
 				fwdN, horizons.PathUnder1Pct, utc(tradeStart), utc(tradeEnd))
 			show := func(s map[string]any) {
 				spot := "n/a (future)"

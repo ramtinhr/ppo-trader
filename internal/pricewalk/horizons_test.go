@@ -72,6 +72,18 @@ func TestTradeModelsKeepPathUnder1Pct(t *testing.T) {
 	if ev.PathUnder1Pct < 1 {
 		t.Fatalf("expected path_under_1pct≥1, got %d", ev.PathUnder1Pct)
 	}
+	if ev.PathExample == nil {
+		t.Fatal("expected IS path_example")
+	}
+	if ev.PathExample["kind"] != "is_end_under_1pct_check" {
+		t.Fatalf("kind=%v", ev.PathExample["kind"])
+	}
+	if ev.PathExample["phase"] != "IS" {
+		t.Fatalf("phase=%v", ev.PathExample["phase"])
+	}
+	if _, ok := ev.PathExample["lookback_n"].(int); !ok {
+		t.Fatalf("lookback_n missing: %v", ev.PathExample["lookback_n"])
+	}
 	want := ev.PathUnder1Pct
 	if ev.Horizon > want {
 		want = ev.Horizon

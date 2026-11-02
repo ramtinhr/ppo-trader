@@ -69,8 +69,8 @@ OLS return features per bar size, optionally runs per-trade TP/SL:
 
 | Phase | Rule |
 |-------|------|
-| **IS (TRAIN)** | All dates **before** `trade_start` (fit OLS) |
-| **N / H** | At **each entry** origin: walk back lookback **N** + forward **H** with mean err &lt; `--max-rel-err` (from past data only — includes appended actuals). Not frozen after trade 1 |
+| **IS (TRAIN)** | All dates **before** `trade_start` (fit OLS). Report **IS check**: last TRAIN candle → discover lookback **N** → forward **H** while err &lt; `--max-rel-err` (Horizons tab). Forecasts tab rows are OOS h=1 chart points, **not** that under-1% path |
+| **N / H** | At **each OOS entry** origin: same discover — walk back **N** + forward **H** with mean err &lt; `--max-rel-err` (past only, includes appended actuals). Not frozen after trade 1 |
 | **Predict** | Fresh every origin from `bars[i-1]` features; enter at `bars[i].Open` (never reuse the prior path) |
 | **Combo** | **Entry:** fee-floor peak only (trade the year — no sit-out starve). **Exits:** score TP×SL×lev on the **predicted path** with fee floor + ±errBand (1%) adverse — must hit TP on mid; pick max mid gain then least risk / no liquid |
 | **OOS trade** | Predict **H** → enter **after** → realize on actuals |
