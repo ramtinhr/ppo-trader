@@ -631,9 +631,8 @@ func collectTrainSamples(
 	return out
 }
 
-// trainScoreGrid always densely covers the analyze sweet spot (TP≈0.4–1.2,
-// SL≈0.7–1.5) so stride on a 0.1–10 CLI grid can never skip TP0.7/SL1.0.
-// Outside the band, keep a coarse sample for exploration.
+// trainScoreGrid scores ONLY the analyze sweet spot (TP 0.4–1.2, SL 0.7–1.5).
+// Outside-band coarse exploration previously picked weird losers and starved the book.
 func trainScoreGrid(stops, targets []float64) (scoreStops, scoreTPs []float64) {
 	inBand := func(x, lo, hi float64) bool { return x+1e-12 >= lo && x <= hi+1e-12 }
 	seenS, seenT := map[float64]bool{}, map[float64]bool{}
@@ -653,14 +652,12 @@ func trainScoreGrid(stops, targets []float64) (scoreStops, scoreTPs []float64) {
 		seenT[x] = true
 		scoreTPs = append(scoreTPs, x)
 	}
-	// Dense band — synthesize 0.1 steps even if CLI grid is coarse.
 	for x := PathScoreSLLo; x <= PathScoreSLHi+1e-9; x += 0.1 {
 		addS(x)
 	}
 	for x := PathScoreTPLo; x <= PathScoreTPHi+1e-9; x += 0.1 {
 		addT(x)
 	}
-	// Pull every CLI value inside the band (in case of non-0.1 spacing).
 	for _, s := range stops {
 		if inBand(s, PathScoreSLLo, PathScoreSLHi) {
 			addS(s)
@@ -671,24 +668,8 @@ func trainScoreGrid(stops, targets []float64) (scoreStops, scoreTPs []float64) {
 			addT(t)
 		}
 	}
-	// Coarse exploration outside the band (stride large grids).
-	stopStride, tpStride := 1, 1
-	if len(stops) > 30 {
-		stopStride = (len(stops) + 14) / 15
-	}
-	if len(targets) > 30 {
-		tpStride = (len(targets) + 14) / 15
-	}
-	for i := 0; i < len(stops); i += stopStride {
-		if !inBand(stops[i], PathScoreSLLo, PathScoreSLHi) {
-			addS(stops[i])
-		}
-	}
-	for i := 0; i < len(targets); i += tpStride {
-		if !inBand(targets[i], PathScoreTPLo, PathScoreTPHi) {
-			addT(targets[i])
-		}
-	}
+	addS(PathFallbackSL)
+	addT(PathFallbackTP)
 	sort.Float64s(scoreStops)
 	sort.Float64s(scoreTPs)
 	return scoreStops, scoreTPs
@@ -741,15 +722,10 @@ func trainWR(s trainScore) float64 {
 	return float64(s.Wins) / float64(s.N)
 }
 
-// betterTrainPick: high train WR first (gate), then most train PnL, then WR, then lev.
+// betterTrainPick: most train PnL (analyze objective), then WR, then higher lev.
 func betterTrainPick(cand, best *trainPick) bool {
 	if best == nil {
 		return true
-	}
-	candOK := cand.TrainWR+1e-12 >= PathTrainMinWR
-	bestOK := best.TrainWR+1e-12 >= PathTrainMinWR
-	if candOK != bestOK {
-		return candOK
 	}
 	if cand.TrainPnL > best.TrainPnL+1e-9 {
 		return true
@@ -769,12 +745,70 @@ func betterTrainPick(cand, best *trainPick) bool {
 	if math.Abs(cand.PathPnL-best.PathPnL) > 1e-9 {
 		return false
 	}
-	// Same gain → prefer higher lev (analyze winners sit at lev 4–5 under risk cap).
 	return cand.Lev > best.Lev+1e-12
 }
 
-// pickExitsByTrainGain scores TP×SL×lev on recent TRAIN actuals and returns the
-// combo with the most train PnL among high-WR candidates. Re-run every origin.
+// fallbackAnalyzeExits — when train is empty/thin, use analyze best-fixed shape
+// (TP 0.7 / SL 1.0 / lev 5 under risk) so we still trade instead of sitting out.
+func fallbackAnalyzeExits(
+	long bool, entry float64, pickPath []float64,
+	levs []uint32, balance, maxRiskPct, taker, maker float64,
+) *trainPick {
+	targetRisk := maxRiskPct
+	if PathTargetRiskPct > 0 && PathTargetRiskPct < targetRisk {
+		targetRisk = PathTargetRiskPct
+	}
+	stop, tp := PathFallbackSL, PathFallbackTP
+	ex := exits.Exits{StopPct: stop, Targets: [][2]float64{{tp, 1}}}
+	advShock := adversePath(pickPath, long, 0.01)
+	var best *trainPick
+	for _, levU := range levs {
+		lev := float64(levU)
+		riskPct := impliedRiskPct(stop, lev)
+		if riskPct > targetRisk+1e-12 || comboCanLiquid(stop, lev) {
+			continue
+		}
+		steps := sizeForLeverage(balance, lev, entry)
+		if steps <= 0 || ex.Validate(steps) != nil {
+			continue
+		}
+		if pathAdversePct(advShock, entry, long) >= liquidPctAtLev(lev)*0.85 {
+			continue
+		}
+		mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
+		pathR := mid.PnL / math.Max(balance*riskPct/100, 1e-9)
+		cand := trainPick{
+			pathPick: pathPick{
+				Exits: ex, RiskPct: riskPct, Steps: steps, Lev: lev,
+				PathPnL: mid.PnL, WorstPnL: mid.PnL, PathR: pathR,
+				LiquidDist: liquidDistancePct(stop, lev), ExitH: mid.ExitH,
+			},
+			TrainPnL: 0, TrainN: 0, TrainWins: 0, TrainWR: 0,
+		}
+		if cand.ExitH < 1 {
+			cand.ExitH = 1
+		}
+		// Prefer lev closest to PathFallbackLev, else higher under risk.
+		better := best == nil
+		if !better {
+			dNew := math.Abs(lev - PathFallbackLev)
+			dOld := math.Abs(best.Lev - PathFallbackLev)
+			if dNew < dOld-1e-12 {
+				better = true
+			} else if math.Abs(dNew-dOld) <= 1e-12 && lev > best.Lev+1e-12 {
+				better = true
+			}
+		}
+		if better {
+			cp := cand
+			best = &cp
+		}
+	}
+	return best
+}
+
+// pickExitsByTrainGain scores TP×SL×lev inside the analyze band on recent TRAIN
+// actuals (most train PnL). Falls back to TP0.7/SL1.0/lev≈5 when train is thin.
 func pickExitsByTrainGain(
 	bars []candles.Candle,
 	models []pricemodel.Model,
@@ -784,78 +818,77 @@ func pickExitsByTrainGain(
 	balance, maxRiskPct, minPeak, taker, maker float64,
 ) *trainPick {
 	samples := collectTrainSamples(bars, models, lookbackStart, origin, hWin, minPeak)
-	if len(samples) == 0 {
-		return nil
-	}
-	minN := 8
-	if len(samples) < 8 {
-		minN = len(samples)
-		if minN < 1 {
-			minN = 1
-		}
-	}
 	targetRisk := maxRiskPct
 	if PathTargetRiskPct > 0 && PathTargetRiskPct < targetRisk {
 		targetRisk = PathTargetRiskPct
 	}
-	scoreStops, scoreTPs := trainScoreGrid(stops, targets)
-	advShock := adversePath(pickPath, long, 0.01)
-	minTP := minPeak * PathTakeFrac
+	minN := 5
+	if len(samples) < 5 {
+		minN = len(samples)
+	}
 	var best *trainPick
-	for _, stop := range scoreStops {
-		if stop+1e-12 < PathMinStopPct {
-			continue
-		}
-		for _, tp := range scoreTPs {
-			if tp+1e-12 < minTP {
+	if len(samples) > 0 && minN >= 1 {
+		scoreStops, scoreTPs := trainScoreGrid(stops, targets)
+		advShock := adversePath(pickPath, long, 0.01)
+		minTP := minPeak * PathTakeFrac
+		for _, stop := range scoreStops {
+			if stop+1e-12 < PathMinStopPct {
 				continue
 			}
-			if tp/stop+1e-12 < PathMinTpSlRatio {
-				continue
-			}
-			ex := exits.Exits{StopPct: stop, Targets: [][2]float64{{tp, 1}}}
-			for _, levU := range levs {
-				lev := float64(levU)
-				riskPct := impliedRiskPct(stop, lev)
-				if riskPct > targetRisk+1e-12 {
+			for _, tp := range scoreTPs {
+				if tp+1e-12 < minTP {
 					continue
 				}
-				if comboCanLiquid(stop, lev) {
+				if tp/stop+1e-12 < PathMinTpSlRatio {
 					continue
 				}
-				steps := sizeForLeverage(balance, lev, entry)
-				if steps <= 0 || ex.Validate(steps) != nil {
-					continue
-				}
-				if pathAdversePct(advShock, entry, long) >= liquidPctAtLev(lev)*0.85 {
-					continue
-				}
-				sc := scoreComboOnSamples(samples, ex, lev, balance, targetRisk, taker, maker)
-				if sc.N < minN {
-					continue
-				}
-				wr := trainWR(sc)
-				mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
-				pathR := mid.PnL / math.Max(balance*riskPct/100, 1e-9)
-				cand := trainPick{
-					pathPick: pathPick{
-						Exits: ex, RiskPct: riskPct, Steps: steps, Lev: lev,
-						PathPnL: mid.PnL, WorstPnL: sc.PnL, PathR: pathR,
-						LiquidDist: liquidDistancePct(stop, lev), ExitH: mid.ExitH,
-					},
-					TrainPnL: sc.PnL, TrainN: sc.N, TrainWins: sc.Wins, TrainWR: wr,
-				}
-				if cand.ExitH < 1 {
-					cand.ExitH = 1
-				}
-				if betterTrainPick(&cand, best) {
-					cp := cand
-					best = &cp
+				ex := exits.Exits{StopPct: stop, Targets: [][2]float64{{tp, 1}}}
+				for _, levU := range levs {
+					lev := float64(levU)
+					riskPct := impliedRiskPct(stop, lev)
+					if riskPct > targetRisk+1e-12 {
+						continue
+					}
+					if comboCanLiquid(stop, lev) {
+						continue
+					}
+					steps := sizeForLeverage(balance, lev, entry)
+					if steps <= 0 || ex.Validate(steps) != nil {
+						continue
+					}
+					if pathAdversePct(advShock, entry, long) >= liquidPctAtLev(lev)*0.85 {
+						continue
+					}
+					sc := scoreComboOnSamples(samples, ex, lev, balance, targetRisk, taker, maker)
+					if sc.N < minN {
+						continue
+					}
+					wr := trainWR(sc)
+					mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
+					pathR := mid.PnL / math.Max(balance*riskPct/100, 1e-9)
+					cand := trainPick{
+						pathPick: pathPick{
+							Exits: ex, RiskPct: riskPct, Steps: steps, Lev: lev,
+							PathPnL: mid.PnL, WorstPnL: sc.PnL, PathR: pathR,
+							LiquidDist: liquidDistancePct(stop, lev), ExitH: mid.ExitH,
+						},
+						TrainPnL: sc.PnL, TrainN: sc.N, TrainWins: sc.Wins, TrainWR: wr,
+					}
+					if cand.ExitH < 1 {
+						cand.ExitH = 1
+					}
+					if betterTrainPick(&cand, best) {
+						cp := cand
+						best = &cp
+					}
 				}
 			}
 		}
 	}
-	return best
+	if best != nil {
+		return best
+	}
+	return fallbackAnalyzeExits(long, entry, pickPath, levs, balance, maxRiskPct, taker, maker)
 }
 
 func actualCloses(bars []candles.Candle, entryBar, hMax int) []float64 {
@@ -1270,7 +1303,6 @@ func runRollingPredicted(
 	skippedNoCombo := 0
 	skippedFlat := 0
 	skippedDisagree := 0
-	skippedLowTrainWR := 0
 	origins := 0
 	inBandN, inBandLoss := 0, 0
 
@@ -1388,12 +1420,6 @@ func runRollingPredicted(
 			i++
 			continue
 		}
-		// Sit out when recent train cannot clear WR floor — protects against dir-wrong bleed.
-		if best.TrainN >= 8 && best.TrainWR+1e-12 < PathTrainEnterWR {
-			skippedLowTrainWR++
-			i++
-			continue
-		}
 
 		realSim := simulateExitsOnPath(long, entry, best.Exits, best.Steps, actPath, taker, maker)
 		pathSimR := simulateExitsOnPath(long, entry, best.Exits, best.Steps, pickPath, taker, maker)
@@ -1437,9 +1463,13 @@ func runRollingPredicted(
 				"fee": round2(f.Fee), "h": f.H,
 			})
 		}
+		srcNote := "train_score"
+		if best.TrainN < 1 {
+			srcNote = "fallback_analyze"
+		}
 		note := fmt.Sprintf(
-			"re-find N=%d H=%d predict@%s → peak=%.3f%% → train_score %s train_pnl=%+.2f wr=%.0f%% n=%d lev=%.0f mid=%+.2f → entry=%.2f → append %d actuals; in_band=%v max_dev=%.3f%%",
-			lookbackN, liveH, utc(predOriginMs), peak, best.Exits.Label(), best.TrainPnL, 100*best.TrainWR, best.TrainN, best.Lev, best.PathPnL, entry, exitH, inBand, bandDev*100,
+			"re-find N=%d H=%d predict@%s → peak=%.3f%% → %s %s train_pnl=%+.2f wr=%.0f%% n=%d lev=%.0f mid=%+.2f → entry=%.2f → append %d actuals; in_band=%v max_dev=%.3f%%",
+			lookbackN, liveH, utc(predOriginMs), peak, srcNote, best.Exits.Label(), best.TrainPnL, 100*best.TrainWR, best.TrainN, best.Lev, best.PathPnL, entry, exitH, inBand, bandDev*100,
 		)
 		tradesJSON = append(tradesJSON, map[string]any{
 			"side": side,
@@ -1479,16 +1509,17 @@ func runRollingPredicted(
 	if n > 0 {
 		winRate = round2(100 * float64(wins) / float64(n))
 	}
-	logx.Infof("  %s rolling-predicted done: %d trades · PnL %+.2f · origins=%d · win_rate=%.1f%% · N=%d H=%d · flat≈%d · no_combo≈%d · low_train_wr≈%d · liquid≈%d · N_refind=%d · in_band=%d in_band_loss=%d",
-		label, n, running, origins, winRate, lookbackN, liveH, skippedFlat, skippedNoCombo, skippedLowTrainWR, skippedLiquid, nRediscover, inBandN, inBandLoss)
+	logx.Infof("  %s rolling-predicted done: %d trades · PnL %+.2f · origins=%d · win_rate=%.1f%% · N=%d H=%d · flat≈%d · no_combo≈%d · liquid≈%d · N_refind=%d · in_band=%d in_band_loss=%d",
+		label, n, running, origins, winRate, lookbackN, liveH, skippedFlat, skippedNoCombo, skippedLiquid, nRediscover, inBandN, inBandLoss)
 	if n == 0 {
-		logx.Warnf("  %s live predicted: 0 trades (flat_peak<%.2f%% → %d · no_combo=%d · low_train_wr=%d). Sitting out weak forecasts is correct for live.",
-			label, minPeak, skippedFlat, skippedNoCombo, skippedLowTrainWR)
+		logx.Warnf("  %s live predicted: 0 trades (flat_peak<%.2f%% → %d · no_combo=%d). Sitting out flat forecasts is correct for live.",
+			label, minPeak, skippedFlat, skippedNoCombo)
 	}
 
 	rule := fmt.Sprintf(
-		"each entry: re-find N + under-%.2f%% H → re-predict → side (peak≥%.2f%%) → SCORE TP×SL×lev on recent TRAIN (prefer WR≥%.0f%% then max PnL; sit out WR<%.0f%%) → append (last N=%d H=%d)",
-		errBand*100, minPeak, 100*PathTrainMinWR, 100*PathTrainEnterWR, lookbackN, liveH,
+		"each entry: re-find N + under-%.2f%% H → re-predict → side (peak≥%.2f%%) → SCORE band TP%.1f–%.1f/SL%.1f–%.1f max train PnL (fallback TP%.1f/SL%.1f/lev≈%.0f) → append (last N=%d H=%d)",
+		errBand*100, minPeak, PathScoreTPLo, PathScoreTPHi, PathScoreSLLo, PathScoreSLHi,
+		PathFallbackTP, PathFallbackSL, PathFallbackLev, lookbackN, liveH,
 	)
 	return map[string]any{
 		"selection_rule": rule,
@@ -1511,7 +1542,7 @@ func runRollingPredicted(
 		},
 		"skips": map[string]any{
 			"liquid": skippedLiquid, "tp_floor": 0, "robust": skippedNoCombo, "flat": skippedFlat,
-			"h1_disagree": skippedDisagree, "n_rediscover": nRediscover, "low_train_wr": skippedLowTrainWR,
+			"h1_disagree": skippedDisagree, "n_rediscover": nRediscover,
 		},
 		"trades": tradesJSON,
 	}, nil

@@ -495,20 +495,42 @@ func TestTrainScoreGridIncludesAnalyzeBand(t *testing.T) {
 	}
 }
 
-func TestBetterTrainPickPrefersHighWRThenPnL(t *testing.T) {
-	lowWR := &trainPick{TrainPnL: 100, TrainWR: 0.40, TrainN: 20, pathPick: pathPick{Lev: 5, PathPnL: 1}}
-	highWR := &trainPick{TrainPnL: 80, TrainWR: 0.90, TrainN: 20, pathPick: pathPick{Lev: 5, PathPnL: 1}}
-	if !betterTrainPick(highWR, lowWR) {
-		t.Fatal("WR≥75% must beat fat PnL with bad WR")
+func TestBetterTrainPickPrefersMostPnL(t *testing.T) {
+	// Most train PnL wins even if WR is lower (analyze objective = gain).
+	fat := &trainPick{TrainPnL: 100, TrainWR: 0.40, TrainN: 20, pathPick: pathPick{Lev: 5, PathPnL: 1}}
+	thin := &trainPick{TrainPnL: 80, TrainWR: 0.90, TrainN: 20, pathPick: pathPick{Lev: 5, PathPnL: 1}}
+	if !betterTrainPick(fat, thin) {
+		t.Fatal("higher train PnL must win")
 	}
-	betterPnL := &trainPick{TrainPnL: 120, TrainWR: 0.90, TrainN: 20, pathPick: pathPick{Lev: 5, PathPnL: 1}}
-	if !betterTrainPick(betterPnL, highWR) {
-		t.Fatal("among high WR, higher train PnL wins")
+	tiedHiWR := &trainPick{TrainPnL: 100, TrainWR: 0.90, TrainN: 20, pathPick: pathPick{Lev: 5, PathPnL: 1}}
+	if !betterTrainPick(tiedHiWR, fat) {
+		t.Fatal("tied PnL → higher WR")
 	}
-	hiLev := &trainPick{TrainPnL: 120, TrainWR: 0.90, TrainN: 20, pathPick: pathPick{Lev: 5, PathPnL: 1}}
-	loLev := &trainPick{TrainPnL: 120, TrainWR: 0.90, TrainN: 20, pathPick: pathPick{Lev: 3, PathPnL: 1}}
+	hiLev := &trainPick{TrainPnL: 100, TrainWR: 0.90, TrainN: 20, pathPick: pathPick{Lev: 5, PathPnL: 1}}
+	loLev := &trainPick{TrainPnL: 100, TrainWR: 0.90, TrainN: 20, pathPick: pathPick{Lev: 3, PathPnL: 1}}
 	if !betterTrainPick(hiLev, loLev) {
 		t.Fatal("tied gain → prefer higher lev")
+	}
+}
+
+func TestFallbackAnalyzeExitsUsesBand(t *testing.T) {
+	entry := 100.0
+	path := make([]float64, 12)
+	for i := range path {
+		path[i] = entry * 1.01
+	}
+	best := fallbackAnalyzeExits(true, entry, path, []uint32{1, 2, 3, 4, 5}, 500, 5, 0.0005, 0.0002)
+	if best == nil {
+		t.Fatal("expected fallback")
+	}
+	if math.Abs(firstTargetPct(best.Exits)-PathFallbackTP) > 1e-9 {
+		t.Fatalf("tp=%v want %v", firstTargetPct(best.Exits), PathFallbackTP)
+	}
+	if math.Abs(best.Exits.StopPct-PathFallbackSL) > 1e-9 {
+		t.Fatalf("sl=%v want %v", best.Exits.StopPct, PathFallbackSL)
+	}
+	if math.Abs(best.Lev-PathFallbackLev) > 1e-9 {
+		t.Fatalf("lev=%.0f want %.0f", best.Lev, PathFallbackLev)
 	}
 }
 
