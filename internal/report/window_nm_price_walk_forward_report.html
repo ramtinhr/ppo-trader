@@ -106,7 +106,7 @@
     <div class="table-wrap"><table id="trades"><thead></thead><tbody></tbody></table></div>
   </section>
   <section class="tab" data-tab="horizons">
-    <p class="note">Top table = OOS <b>mean</b> error by horizon h (aggregate). Bottom path = <b>IS skill check</b>: last TRAIN candle → lookback N → forward candles while error &lt; 1%. That is the real under-1% proof — not the Forecasts tab.</p>
+    <p class="note">Top table = OOS <b>mean</b> error by horizon h. <b>OOS n</b> = how many TRADE samples went into that mean (≈ year of 15m bars) — not “candles we can predict under 1%”. <b>Scroll down</b> for the IS path (N/H + OHLC + Err%). That bottom table is the real under-1% proof.</p>
     <div class="table-wrap" style="max-height:none"><table id="horizons"><thead></thead><tbody></tbody></table></div>
     <div class="chart-card" id="path-card" style="display:none;margin-top:14px">
       <div class="chart-title" id="path-title">IS check: under-1% forward path</div>
@@ -263,13 +263,17 @@ if (PE && PE.steps && PE.steps.length) {
   const under = PE.path_under_1pct ?? M.path_under_1pct;
   const nLab = PE.lookback_n != null ? PE.lookback_n : '—';
   const hLab = PE.horizon_h != null ? PE.horizon_h : under;
-  $('#path-title').textContent = `IS check · origin ${PE.origin || '?'} (close ${fmt(PE.origin_close, 2)}) · lookback N=${nLab} → under-1% forward H≈${hLab} (path steps under 1%=${under ?? '—'})`;
-  $('#path-note').textContent = `This is the skill proof at end of TRAIN (not a trade list). From last TRAIN candle we measure how far |pred−actual|/actual stays < ${((M.max_rel_err ?? 0.01)*100).toFixed(0)}%. OOS trading re-does the same N/H discover per entry. TRADE window ${M.trade_start || '?'} → ${M.trade_end || '?'}.`;
-  $('#path-ex thead').innerHTML = `<tr><th>h</th><th>Time</th><th>Predicted</th><th>Actual</th><th>Source</th><th>Err%</th><th>Under 1%?</th></tr>`;
+  $('#path-title').textContent = `IS check · origin ${PE.origin || '?'} O=${fmt(PE.origin_open,2)} H=${fmt(PE.origin_high,2)} L=${fmt(PE.origin_low,2)} C=${fmt(PE.origin_close, 2)} · lookback N=${nLab} → under-1% forward H≈${hLab} (path under 1%=${under ?? '—'})`;
+  $('#path-note').textContent = `Scroll here for the real under-1% proof (not the OOS mean table above). Origin = last TRAIN candle OHLC. Each row = one forward candle: predicted close vs actual OHLC + Err%. Last “yes” before breach = how many candles under 1%. TRADE ${M.trade_start || '?'} → ${M.trade_end || '?'}.`;
+  $('#path-ex thead').innerHTML = `<tr><th>h</th><th>Time</th><th>Predicted</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Source</th><th>Err%</th><th>Under 1%?</th></tr>`;
   $('#path-ex tbody').innerHTML = PE.steps.map((s) => {
-    const spot = s.spot == null ? 'n/a' : fmt(s.spot, 2);
+    const close = s.close != null ? s.close : s.spot;
     return `<tr style="${s.in_under_1pct_path ? '' : (s.over_1pct ? 'opacity:.7' : '')}">
-      <td>+${s.h}</td><td>${s.at||''}</td><td>${fmt(s.predicted,2)}</td><td>${spot}</td>
+      <td>+${s.h}</td><td>${s.at||''}</td><td>${fmt(s.predicted,2)}</td>
+      <td>${s.open == null ? '—' : fmt(s.open,2)}</td>
+      <td>${s.high == null ? '—' : fmt(s.high,2)}</td>
+      <td>${s.low == null ? '—' : fmt(s.low,2)}</td>
+      <td>${close == null ? 'n/a' : fmt(close,2)}</td>
       <td>${s.actual_source || (s.beyond_tape ? '—' : 'tape')}</td>
       <td>${s.err_pct == null ? '—' : fmt(s.err_pct,3)}</td>
       <td>${s.in_under_1pct_path ? 'yes' : (s.over_1pct ? 'breach' : '—')}</td>

@@ -175,23 +175,25 @@ func buildForwardPath(
 		okxAt[c.TimeMs] = c.Close
 	}
 
-	spotAt := func(h int, futureMs int64) (float64, string, bool) {
+	spotAt := func(h int, futureMs int64) (float64, string, bool, candles.Candle) {
 		if originT+h < len(bars) {
-			return bars[originT+h].Close, "tape", true
+			c := bars[originT+h]
+			return c.Close, "tape", true, c
 		}
 		if px, ok := okxAt[futureMs]; ok {
-			return px, "okx", true
+			return px, "okx", true, candles.Candle{}
 		}
-		return 0, "none", false
+		return 0, "none", false, candles.Candle{}
 	}
 
+	originBar := bars[originT]
 	var steps []map[string]any
 	under := 0
 	breached := false
 	for h := 1; h <= fitN; h++ {
 		pred := models[h].PredictClose(refPx, feat)
 		futureMs := originMs + int64(h)*barMs
-		spot, source, has := spotAt(h, futureMs)
+		spot, source, has, bar := spotAt(h, futureMs)
 		var errPct, baseErrPct any
 		over := false
 		if has {
@@ -213,15 +215,25 @@ func buildForwardPath(
 			}
 		}
 		var spotJSON any
-		if has {
-			spotJSON = round2(spot)
-		}
-		steps = append(steps, map[string]any{
-			"h": h, "at": utc(futureMs), "spot": spotJSON, "predicted": round2(pred),
+		step := map[string]any{
+			"h": h, "at": utc(futureMs), "predicted": round2(pred),
 			"ref": round2(refPx), "err_pct": errPct, "base_err_pct": baseErrPct,
 			"beyond_tape": source != "tape", "actual_source": source,
 			"over_1pct": over, "in_under_1pct_path": h <= under,
-		})
+		}
+		if has {
+			spotJSON = round2(spot)
+			step["spot"] = spotJSON
+			if source == "tape" && bar.Open > 0 {
+				step["open"] = round2(bar.Open)
+				step["high"] = round2(bar.High)
+				step["low"] = round2(bar.Low)
+				step["close"] = round2(bar.Close)
+			} else {
+				step["close"] = spotJSON
+			}
+		}
+		steps = append(steps, step)
 		if breached && h >= under+3 {
 			break
 		}
@@ -232,6 +244,8 @@ func buildForwardPath(
 	}
 	return map[string]any{
 		"origin": utc(originMs), "origin_close": round2(refPx),
+		"origin_open": round2(originBar.Open), "origin_high": round2(originBar.High),
+		"origin_low": round2(originBar.Low),
 		"kind": "forward_from_last_candle", "path_under_1pct": under,
 		"oos_trading_horizon": oosHorizon, "steps": steps,
 	}, under
