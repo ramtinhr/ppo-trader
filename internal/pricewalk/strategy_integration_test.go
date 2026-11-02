@@ -363,21 +363,25 @@ func TestPathFormulaTPAndSLFromPeakAndNoise(t *testing.T) {
 	}
 }
 
-func TestBestLevMaximizesMidGain(t *testing.T) {
+func TestBestLevCapsRiskNotMaxMidPnL(t *testing.T) {
 	entry := 100.0
 	path := make([]float64, 16)
 	for i := range path {
 		path[i] = entry * 1.02
 	}
-	ex := exits.Exits{StopPct: 0.5, Targets: [][2]float64{{1.4, 1}}}
+	ex := exits.Exits{StopPct: 0.25, Targets: [][2]float64{{1.4, 1}}}
 	adv := adversePath(path, true, 0.01)
-	best := bestLevOnPath(true, entry, ex, path, adv, []uint32{1, 2, 3, 4, 5}, 500, 5, 0.0005, 0.0002)
+	// maxRisk 5% would allow 0.25×20 — but PathTargetRiskPct=1% → lev ≤ 4.
+	best := bestLevOnPath(true, entry, ex, path, adv, []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, 500, 5, 0.0005, 0.0002)
 	if best == nil {
 		t.Fatal("expected lev pick")
 	}
-	// stop 0.5 × lev ≤ 5 → lev≤10, but liquid-safe + mid TP; expect higher lev than 1.
-	if best.Lev < 2 {
-		t.Fatalf("expected gain-seeking lev≥2, got %.0f pnl=%.2f", best.Lev, best.PathPnL)
+	if best.RiskPct > PathTargetRiskPct+1e-9 {
+		t.Fatalf("risk %.2f%% > target %.2f%% (lev=%.0f) — this was the −$17 stop bug", best.RiskPct, PathTargetRiskPct, best.Lev)
 	}
-	t.Logf("lev=%.0f mid=%.2f sl=%.2f tp=%.2f", best.Lev, best.PathPnL, best.Exits.StopPct, firstTargetPct(best.Exits))
+	stopLossUSD := 500 * best.RiskPct / 100
+	if stopLossUSD > 6 {
+		t.Fatalf("stop $ loss budget too fat: $%.2f with lev=%.0f sl=%.2f", stopLossUSD, best.Lev, best.Exits.StopPct)
+	}
+	t.Logf("lev=%.0f risk=%.2f%% mid=%.2f stop≈$%.2f", best.Lev, best.RiskPct, best.PathPnL, stopLossUSD)
 }

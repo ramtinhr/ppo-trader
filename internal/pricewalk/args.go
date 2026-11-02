@@ -32,18 +32,20 @@ const (
 	//  - losing timeout capped at SL; skewed TP≪SL → lev ≤ PathSkewMaxLev
 	// Per-trade formula (not a collapsing grid):
 	//   TP = take_frac × predicted peak (≤ peak)
-	//   SL = max(path_adverse×1.25, recent_range×frac, min_stop)  — lowest loss that clears noise
+	//   SL = max(path_adverse×1.25, recent_range×frac, min_stop)
 	//   sit out if TP/SL < PathMinTpSlRatio or SL too wide for target WR
-	//   Lev = max liquid-safe L with stop×L ≤ max_risk that still hits TP on mid path
-	PathTakeFrac      = 0.70
-	PathMinPeakPct    = 0.08 // fee-area floor; sit out only true dust
-	PathMinStopPct    = 0.25
-	PathSkewMaxLev    = 1.0
-	PathMinTpSlRatio  = 0.50 // TP ≥ half SL or sit out
-	PathLiveMaxLev    = 10.0
-	PathWinRateTarget = 0.80
-	PathMinHorizonH   = 4
-	DefaultTradeDays  = 30
+	//   Lev from target risk (NOT max mid-$): stop×lev ≈ PathTargetRiskPct
+	//   so one stop can't print −$17 on a $500 book. Rank by pathR (gain per risk $).
+	PathTakeFrac       = 0.70
+	PathMinPeakPct     = 0.08
+	PathMinStopPct     = 0.25
+	PathSkewMaxLev     = 1.0
+	PathMinTpSlRatio   = 0.50
+	PathLiveMaxLev     = 10.0
+	PathWinRateTarget  = 0.80
+	PathMinHorizonH    = 4
+	PathTargetRiskPct  = 1.0 // max ~1% of balance lost on a stop (lowest lossable)
+	DefaultTradeDays   = 30
 )
 
 var errHelp = errors.New("help")

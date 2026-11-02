@@ -635,17 +635,22 @@ func exitsFromPredictedPath(peakPct, adversePct, errBand, taker, maker float64) 
 	return ex
 }
 
-// bestLevOnPath: highest gain (mid PnL) among liquid-safe lev with stop×lev ≤ maxRisk
-// that hits TP on the predicted path; tie-break lowest adverse loss.
+// bestLevOnPath sizes leverage for gain-per-risk, not max absolute mid $.
+// Old bug: max mid.PnL always picked max lev → SL 0.25%×10x ≈ −$12..$18 stops.
+// Now: stop×lev ≤ min(maxRisk, PathTargetRiskPct); rank by pathR then lower risk.
 func bestLevOnPath(
 	long bool, entry float64, ex exits.Exits, pickPath, advShock []float64,
 	levs []uint32, balance, maxRiskPct, taker, maker float64,
 ) *pathPick {
+	targetRisk := maxRiskPct
+	if PathTargetRiskPct > 0 && PathTargetRiskPct < targetRisk {
+		targetRisk = PathTargetRiskPct
+	}
 	var best *pathPick
 	for _, levU := range levs {
 		lev := float64(levU)
 		riskPct := impliedRiskPct(ex.StopPct, lev)
-		if riskPct > maxRiskPct+1e-12 {
+		if riskPct > targetRisk+1e-12 {
 			continue
 		}
 		steps := sizeForLeverage(balance, lev, entry)
@@ -669,10 +674,21 @@ func bestLevOnPath(
 			PathPnL: mid.PnL, WorstPnL: advSim.PnL, PathR: pathR,
 			LiquidDist: liquidDistancePct(ex.StopPct, lev), ExitH: mid.ExitH,
 		}
-		better := best == nil ||
-			mid.PnL > best.PathPnL+1e-9 ||
-			(math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && advSim.PnL > best.WorstPnL+1e-9) ||
-			(math.Abs(mid.PnL-best.PathPnL) <= 1e-9 && math.Abs(advSim.PnL-best.WorstPnL) <= 1e-9 && lev < best.Lev-1e-12)
+		// Highest gain per risk $ → lowest risk $ (lowest lossable) → lower lev.
+		better := best == nil
+		if !better {
+			if pathR > best.PathR+1e-9 {
+				better = true
+			} else if math.Abs(pathR-best.PathR) <= 1e-9 && riskPct < best.RiskPct-1e-12 {
+				better = true
+			} else if math.Abs(pathR-best.PathR) <= 1e-9 && math.Abs(riskPct-best.RiskPct) <= 1e-12 &&
+				advSim.PnL > best.WorstPnL+1e-9 {
+				better = true
+			} else if math.Abs(pathR-best.PathR) <= 1e-9 && math.Abs(riskPct-best.RiskPct) <= 1e-12 &&
+				math.Abs(advSim.PnL-best.WorstPnL) <= 1e-9 && lev < best.Lev-1e-12 {
+				better = true
+			}
+		}
 		if better {
 			cp := cand
 			best = &cp
@@ -1191,10 +1207,10 @@ func runRollingPredicted(
 		predOriginMs := bars[i-1].TimeMs
 		predOriginPx := refPx
 
-		// Formula (per origin — not a grid that collapses to one SL):
+		// Formula (per origin):
 		//   TP = 0.70 × peak
-		//   SL = max(path_adverse×1.25, recent_range×frac, min_stop)
-		//   Lev = max safe L that still hits TP on mid (highest gain)
+		//   SL = max(path_adverse×1.25, mean_bar_range×frac, min_stop)
+		//   Lev from ~PathTargetRiskPct (gain per risk $) — never max-lev a 0.25% SL
 		advPct := pathAdversePct(pickPath, entry, long)
 		rangePct := recentMeanBarRangePct(bars, i, entry)
 		ex, ok := exitsFromPathFormula(peak, advPct, rangePct, taker, maker)
@@ -1301,8 +1317,8 @@ func runRollingPredicted(
 	}
 
 	rule := fmt.Sprintf(
-		"IS origin → N=%d under-%.2f%% H → formula TP=%.0f%%×peak, SL=max(path_adv,range,min), lev≤%.0fx max mid gain (TP/SL≥%.2f or sit out) → append → re-validate H until trade_end",
-		lookbackN, errBand*100, PathTakeFrac*100, liveMaxLev, PathMinTpSlRatio,
+		"IS origin → N=%d under-%.2f%% H → formula TP=%.0f%%×peak, SL=max(path_adv,bar_range,min), lev from ≤%.2f%% risk (pathR, not max mid $; TP/SL≥%.2f or sit out) → append → re-validate H until trade_end",
+		lookbackN, errBand*100, PathTakeFrac*100, PathTargetRiskPct, PathMinTpSlRatio,
 	)
 	return map[string]any{
 		"selection_rule": rule,
