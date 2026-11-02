@@ -444,21 +444,96 @@ func TestPickExitsByTrainGainMostPnL(t *testing.T) {
 }
 
 func TestScoreComboPrefersWinningTP(t *testing.T) {
+	// Up to ~0.7% then dump through −1% — reachable 0.5 TP wins; unreachable 5% TP stops out.
 	samples := []trainSample{
-		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.6, 100.8, 100.5}}, // +0.8% MFE
-		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.5, 100.9, 100.4}},
-		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.4, 100.7, 100.6}},
-		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.3, 100.85, 100.5}},
-		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.55, 100.75, 100.4}},
+		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.4, 100.7, 99.2, 99.0}},
+		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.3, 100.6, 99.1, 98.9}},
+		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.5, 100.65, 99.3, 99.0}},
+		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.35, 100.55, 99.0, 98.8}},
+		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.45, 100.7, 99.2, 99.1}},
+		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.5, 100.8, 99.0, 98.7}},
+		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.2, 100.6, 99.15, 99.0}},
+		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.4, 100.75, 99.05, 98.9}},
 	}
 	good := exits.Exits{StopPct: 1.0, Targets: [][2]float64{{0.5, 1}}}
-	bad := exits.Exits{StopPct: 1.0, Targets: [][2]float64{{5.0, 1}}} // unreachable → timeout/SL
-	gp, gn := scoreComboOnSamples(samples, good, 3, 500, 5, 0.0005, 0.0002)
-	bp, bn := scoreComboOnSamples(samples, bad, 3, 500, 5, 0.0005, 0.0002)
-	if gn < 5 || bn < 5 {
-		t.Fatalf("coverage good=%d bad=%d", gn, bn)
+	bad := exits.Exits{StopPct: 1.0, Targets: [][2]float64{{5.0, 1}}}
+	gs := scoreComboOnSamples(samples, good, 3, 500, 5, 0.0005, 0.0002)
+	bs := scoreComboOnSamples(samples, bad, 3, 500, 5, 0.0005, 0.0002)
+	if gs.N < 5 || bs.N < 5 {
+		t.Fatalf("coverage good=%d bad=%d", gs.N, bs.N)
 	}
-	if gp <= bp {
-		t.Fatalf("reachable TP should score higher: good=%.4f bad=%.4f", gp, bp)
+	if gs.PnL <= bs.PnL {
+		t.Fatalf("reachable TP should score higher: good=%.4f bad=%.4f", gs.PnL, bs.PnL)
+	}
+	if trainWR(gs) <= trainWR(bs) {
+		t.Fatalf("reachable TP should win more often: goodWR=%.2f badWR=%.2f", trainWR(gs), trainWR(bs))
+	}
+}
+
+func TestTrainScoreGridIncludesAnalyzeBand(t *testing.T) {
+	// Default CLI 0.1-10 stride used to skip TP0.7 / SL1.0 — must always be present.
+	stops, _ := ParseRange("0.1-10/0.1")
+	targets, _ := ParseRange("0.1-10/0.1")
+	ss, tt := trainScoreGrid(stops, targets)
+	has := func(xs []float64, want float64) bool {
+		for _, x := range xs {
+			if math.Abs(x-want) < 1e-9 {
+				return true
+			}
+		}
+		return false
+	}
+	for _, want := range []float64{0.7, 0.9, 1.0, 1.2} {
+		if !has(ss, want) {
+			t.Fatalf("score stops missing %.1f (got %v)", want, ss)
+		}
+	}
+	for _, want := range []float64{0.5, 0.6, 0.7, 0.8} {
+		if !has(tt, want) {
+			t.Fatalf("score tps missing %.1f (got %v)", want, tt)
+		}
+	}
+}
+
+func TestBetterTrainPickPrefersHighWRThenPnL(t *testing.T) {
+	lowWR := &trainPick{TrainPnL: 100, TrainWR: 0.40, TrainN: 20, pathPick: pathPick{Lev: 5, PathPnL: 1}}
+	highWR := &trainPick{TrainPnL: 80, TrainWR: 0.90, TrainN: 20, pathPick: pathPick{Lev: 5, PathPnL: 1}}
+	if !betterTrainPick(highWR, lowWR) {
+		t.Fatal("WR≥75% must beat fat PnL with bad WR")
+	}
+	betterPnL := &trainPick{TrainPnL: 120, TrainWR: 0.90, TrainN: 20, pathPick: pathPick{Lev: 5, PathPnL: 1}}
+	if !betterTrainPick(betterPnL, highWR) {
+		t.Fatal("among high WR, higher train PnL wins")
+	}
+	hiLev := &trainPick{TrainPnL: 120, TrainWR: 0.90, TrainN: 20, pathPick: pathPick{Lev: 5, PathPnL: 1}}
+	loLev := &trainPick{TrainPnL: 120, TrainWR: 0.90, TrainN: 20, pathPick: pathPick{Lev: 3, PathPnL: 1}}
+	if !betterTrainPick(hiLev, loLev) {
+		t.Fatal("tied gain → prefer higher lev")
+	}
+}
+
+func TestPickExitsFindsAnalyzeLikeCombo(t *testing.T) {
+	// Most paths hit ~0.75% then fade a bit (still above −1% SL). Tight SL0.5×TP2 gets stopped.
+	samples := make([]trainSample, 0, 20)
+	for i := 0; i < 16; i++ {
+		entry := 100.0
+		act := []float64{entry * 1.004, entry * 1.0075, entry * 1.006, entry * 1.005}
+		if i%4 == 0 {
+			// Occasional deep dip — tight SL dies, 1% SL survives then TP.
+			act = []float64{entry * 1.003, entry * 0.996, entry * 1.007, entry * 1.008}
+		}
+		samples = append(samples, trainSample{Long: true, Entry: entry, Peak: 0.2, Act: act})
+	}
+	good := scoreComboOnSamples(samples, exits.Exits{StopPct: 1.0, Targets: [][2]float64{{0.7, 1}}}, 5, 500, 5, 0.0005, 0.0002)
+	bad := scoreComboOnSamples(samples, exits.Exits{StopPct: 0.5, Targets: [][2]float64{{2.0, 1}}}, 5, 500, 5, 0.0005, 0.0002)
+	if good.N < 10 {
+		t.Fatalf("good coverage %d", good.N)
+	}
+	if trainWR(good) < 0.85 {
+		t.Fatalf("analyze-like combo WR=%.2f want ≥0.85 pnl=%.2f", trainWR(good), good.PnL)
+	}
+	if good.PnL <= bad.PnL {
+		t.Fatalf("0.7/1.0/5 should dominate sucker: good pnl=%.2f wr=%.2f bad pnl=%.2f wr=%.2f",
+			good.PnL, trainWR(good), bad.PnL, trainWR(bad))
 	}
 }

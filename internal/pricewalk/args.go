@@ -23,23 +23,26 @@ const (
 
 	// Live predicted bot (mode 2) — confirmed IS/OOS loop:
 	//  Each entry: FIND lookback N + under-1% H from past → PREDICT H again →
-	//  SCORE TP×SL×lev on TRAIN lookback (most train PnL) → trade at bar open →
-	//  APPEND actuals → next entry RE-FINDS N and PREDICTS again (until trade_end).
-	//  - sit out only when peak cannot clear fees
-	//  - no invented / h1-extrapolated / span-floor paths
-	//  - never reuse a prior predicted path / entry after a fill
-	//  - exits NOT static — re-scored every origin for most train gain
-	PathTakeFrac      = 0.70
-	PathMinPeakPct    = 0.08 // fee-area floor for a directional side
-	PathMinStopPct    = 0.25
-	PathSkewMaxLev    = 1.0
-	PathMinTpSlRatio  = 0.50 // reject sucker TP≪SL
-	PathLiveMaxLev    = 10.0
-	PathWinRateTarget = 0.80
-	PathMinHorizonH   = 4
-	PathTargetRiskPct = 5.0 // stop×lev cap while scoring
-	PathTrainSamples  = 32  // ~N train origins scored per combo
-	DefaultTradeDays  = 30
+	//  SCORE TP×SL×lev on recent TRAIN actuals (max PnL among high train WR) →
+	//  trade at bar open → APPEND → RE-FIND N + PREDICT again.
+	//  Dense score band always includes analyze winners (TP≈0.7 / SL≈1.0 / lev 4–5).
+	PathTakeFrac       = 0.70
+	PathMinPeakPct     = 0.08 // fee-area floor for a directional side
+	PathMinStopPct     = 0.25
+	PathSkewMaxLev     = 1.0
+	PathMinTpSlRatio   = 0.50 // reject sucker TP≪SL
+	PathLiveMaxLev     = 10.0
+	PathWinRateTarget  = 0.80
+	PathMinHorizonH    = 4
+	PathTargetRiskPct  = 5.0  // stop×lev cap while scoring
+	PathTrainSamples   = 64   // most-recent train origins (walk backward)
+	PathScoreTPLo      = 0.40 // dense band always scored (analyze sweet spot)
+	PathScoreTPHi      = 1.20
+	PathScoreSLLo      = 0.70
+	PathScoreSLHi      = 1.50
+	PathTrainMinWR     = 0.75 // prefer combos clearing this on train
+	PathTrainEnterWR   = 0.60 // sit out when best train WR below this
+	DefaultTradeDays   = 30
 )
 
 var errHelp = errors.New("help")
