@@ -584,16 +584,17 @@ func exitsFromPredictedPath(peakPct, adversePct, errBand, taker, maker float64) 
 	return exits.Exits{StopPct: round2(sl), Targets: [][2]float64{{round2(tp), 1}}}
 }
 
-// betterPathPick: max mid gain → best adverse (1% shock) → better TP/SL →
-// earlier TP → lower risk (safer lev) → more liquid room.
+// betterPathPick: risk-adjusted mid gain (path_r) → survive adverse → better
+// TP/SL → earlier TP → lower risk → more liquid room.
+// Absolute $ mid PnL is NOT first (it blindly maxes leverage on dust edges).
 func betterPathPick(cand, best *pathPick) bool {
 	if best == nil {
 		return true
 	}
-	if cand.PathPnL > best.PathPnL+1e-9 {
+	if cand.PathR > best.PathR+1e-9 {
 		return true
 	}
-	if math.Abs(cand.PathPnL-best.PathPnL) > 1e-9 {
+	if math.Abs(cand.PathR-best.PathR) > 1e-9 {
 		return false
 	}
 	if cand.WorstPnL > best.WorstPnL+1e-9 {
@@ -602,8 +603,14 @@ func betterPathPick(cand, best *pathPick) bool {
 	if math.Abs(cand.WorstPnL-best.WorstPnL) > 1e-9 {
 		return false
 	}
-	cRatio := firstTargetPct(cand.Exits) / cand.Exits.StopPct
-	bRatio := firstTargetPct(best.Exits) / best.Exits.StopPct
+	if cand.PathPnL > best.PathPnL+1e-9 {
+		return true
+	}
+	if math.Abs(cand.PathPnL-best.PathPnL) > 1e-9 {
+		return false
+	}
+	cRatio := firstTargetPct(cand.Exits) / math.Max(cand.Exits.StopPct, 1e-12)
+	bRatio := firstTargetPct(best.Exits) / math.Max(best.Exits.StopPct, 1e-12)
 	if cRatio > bRatio+1e-9 {
 		return true
 	}
@@ -626,11 +633,10 @@ func betterPathPick(cand, best *pathPick) bool {
 }
 
 // pickExitsByPredictedPath scores TP×SL×lev on the predicted path every origin:
-//   • TP above fee floor and ≤ predicted peak (must hit TP on mid path)
-//   • SL / adverse ranked with ±errBand shock (1% when --max-rel-err=0.01)
-//   • lev liquid-safe, risk-capped; prefer max mid gain then least risk
-// Does not sit out the year book — only skips a combo, not the whole origin,
-// unless no combo clears the path.
+//   • TP above fee floor and ≤ predicted peak; must hit TP on mid
+//   • must survive ±errBand adverse (WorstPnL≥0) — kills 0.3%×10x losers
+//   • SL ≥ PathMinStopPct; TP/SL ≥ PathMinTpSlRatio; lev risk-capped
+//   • rank by path_r then adverse, not raw $ (no max-lev dust)
 func pickExitsByPredictedPath(
 	long bool, entry float64, pickPath []float64, peak float64,
 	stops, targets []float64, exitGrid []exits.Exits, levs []uint32,
@@ -648,8 +654,12 @@ func pickExitsByPredictedPath(
 	}
 	minTP := minPeak * PathTakeFrac
 	feePct := (taker + maker) * 100
-	if minTP < feePct+0.02 {
-		minTP = feePct + 0.02
+	if minTP < feePct+0.05 {
+		minTP = feePct + 0.05
+	}
+	// Need enough predicted peak to clear a healthy TP vs min stop.
+	if peak+1e-12 < minTP || peak*PathTakeFrac/PathMinStopPct+1e-12 < PathMinTpSlRatio {
+		return nil
 	}
 
 	searchGrid := make([]exits.Exits, 0, len(exitGrid)+len(stops)*4)
@@ -665,8 +675,7 @@ func pickExitsByPredictedPath(
 	for _, ex := range exitGrid {
 		add(ex)
 	}
-	// Peak-tied TPs so the predicted move itself is always a candidate.
-	for _, tp := range []float64{round2(peak * PathTakeFrac), round2(peak * 0.95), round2(peak)} {
+	for _, tp := range []float64{round2(peak * PathTakeFrac), round2(peak * 0.85), round2(peak * 0.95)} {
 		if tp+1e-12 < minTP || tp > peak+1e-9 {
 			continue
 		}
@@ -686,7 +695,6 @@ func pickExitsByPredictedPath(
 	advShock := adversePath(pickPath, long, errBand)
 	var best *pathPick
 	for _, ex := range searchGrid {
-		// Fee/noise floor only — do not starve when path adverse is wide.
 		if ex.StopPct+1e-12 < PathMinStopPct {
 			continue
 		}
@@ -697,8 +705,18 @@ func pickExitsByPredictedPath(
 		if tp/ex.StopPct+1e-12 < PathMinTpSlRatio {
 			continue
 		}
+		// At target WR, SL must not dominate TP (EV band).
+		if PathWinRateTarget > 0 && PathWinRateTarget < 1 {
+			maxSL := tp * (PathWinRateTarget / (1 - PathWinRateTarget))
+			if ex.StopPct > maxSL+1e-12 {
+				continue
+			}
+		}
 		for _, levU := range levs {
 			lev := float64(levU)
+			if lev > PathLiveMaxLev+1e-12 {
+				continue
+			}
 			riskPct := impliedRiskPct(ex.StopPct, lev)
 			if riskPct > targetRisk+1e-12 {
 				continue
@@ -714,12 +732,14 @@ func pickExitsByPredictedPath(
 				continue
 			}
 			mid := simulateExitsOnPath(long, entry, ex, steps, pickPath, taker, maker)
-			// On the predicted path TP must actually hit (otherwise the forecast
-			// does not support this target).
 			if mid.PnL <= 0 || mid.Reason != "tp" {
 				continue
 			}
 			advSim := simulateExitsOnPath(long, entry, ex, steps, advShock, taker, maker)
+			// Must not die on the 1% adverse shock — otherwise live book prints stops.
+			if advSim.PnL < -1e-9 {
+				continue
+			}
 			pathR := mid.PnL / math.Max(balance*riskPct/100, 1e-9)
 			cand := pathPick{
 				Exits: ex, RiskPct: riskPct, Steps: steps, Lev: lev,
