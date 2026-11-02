@@ -23,31 +23,23 @@ const (
 
 	// Live predicted bot (mode 2) — confirmed IS/OOS loop:
 	//  Origin at latest IS → discover lookback N + under-1% H from data →
-	//  best TP×SL×lev on that predicted path (TP≤peak, SL≥err_band, no liquid) →
+	//  SCORE TP×SL×lev on expanding TRAIN lookback (most train PnL on actuals) →
 	//  trade AFTER origin → APPEND actual entry→exit candles →
-	//  re-validate H + re-pick combo (stable expanding/rolling N; widen N only
+	//  re-validate H + re-score combo (stable expanding/rolling N; widen N only
 	//  if H collapses) → repeat until trade_end (~1y with --trade-days 365).
 	//  - sit out only when peak cannot clear fees
 	//  - no invented / h1-extrapolated / span-floor paths
-	//  - losing timeout capped at SL; skewed TP≪SL → lev ≤ PathSkewMaxLev
-	// Live exits from price-analyze winners on 2025 OOS report:
-	//   TP≈0.8% / SL≈1.0–1.2% / lev 4–5 on actual paths (not predicted peak).
-	//   Entry = predicted SIDE with fee-floor peak (OLS peaks are tiny — do NOT
-	//   require peak≥0.8% or that the predicted path hits TP 0.8%, or we get ~13 trades/year).
+	//  - exits NOT static — re-scored every origin for most train gain
 	PathTakeFrac      = 0.70
-	PathMinPeakPct    = 0.08 // fee-area floor for having a side
-	PathTargetTPPct   = 0.80 // analyze best: tp_pct 0.8
-	PathSLLoPct       = 1.00
-	PathSLHiPct       = 1.20
+	PathMinPeakPct    = 0.08 // fee-area floor for a directional side
 	PathMinStopPct    = 0.25
 	PathSkewMaxLev    = 1.0
-	PathMinTpSlRatio  = 0.50
+	PathMinTpSlRatio  = 0.50 // reject sucker TP≪SL
 	PathLiveMaxLev    = 10.0
 	PathWinRateTarget = 0.80
 	PathMinHorizonH   = 4
-	PathTargetRiskPct = 5.0
-	PathPreferLevLo   = 4
-	PathPreferLevHi   = 5
+	PathTargetRiskPct = 5.0 // stop×lev cap while scoring
+	PathTrainSamples  = 32  // ~N train origins scored per combo
 	DefaultTradeDays  = 30
 )
 

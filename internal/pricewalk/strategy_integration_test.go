@@ -129,8 +129,11 @@ func TestRollingMonthPredictTradeRefresh(t *testing.T) {
 			t.Fatalf("trade missing horizon_h: %+v", tr)
 		}
 		note, _ := tr["oracle_note"].(string)
-		if note == "" || !strings.Contains(note, "formula") || !strings.Contains(note, "N=") {
-			t.Fatalf("note should mention N + formula, got %q", note)
+		if note == "" || !strings.Contains(note, "train_score") || !strings.Contains(note, "N=") {
+			t.Fatalf("note should mention N + train_score, got %q", note)
+		}
+		if _, ok := tr["train_pnl"]; !ok {
+			t.Fatalf("trade missing train_pnl: %+v", tr)
 		}
 		eb, _ := tr["entry_bar"].(int)
 		eh, _ := tr["exit_h"].(int)
@@ -139,8 +142,8 @@ func TestRollingMonthPredictTradeRefresh(t *testing.T) {
 		}
 		prevEnd = eb + eh
 		src, _ := tr["path_source"].(string)
-		if src != "path_formula_tp_sl_lev" {
-			t.Fatalf("path_source=%q want path_formula_tp_sl_lev", src)
+		if src != "train_score_tp_sl_lev" {
+			t.Fatalf("path_source=%q want train_score_tp_sl_lev", src)
 		}
 	}
 }
@@ -175,7 +178,7 @@ func TestRollingRetestsGridEachTrade(t *testing.T) {
 	if sum["pick_mode"] != "rolling-predicted" {
 		t.Fatalf("mode=%v", sum["pick_mode"])
 	}
-	if sum["exits_mode"] != "path_formula" {
+	if sum["exits_mode"] != "train_score" {
 		t.Fatalf("exits_mode=%v", sum["exits_mode"])
 	}
 	if n == 0 {
@@ -295,14 +298,15 @@ func TestPathDirectionPicksFavorableSide(t *testing.T) {
 	}
 }
 
-func TestExitsFromPredictedPathHighWRShape(t *testing.T) {
+func TestExitsFromPredictedPathGeometry(t *testing.T) {
 	e := exitsFromPredictedPath(1.5, 0.05, 0.01, 0.0005, 0.0002)
 	tp := e.Targets[0][0]
-	if math.Abs(tp-PathTargetTPPct) > 0.05 {
-		t.Fatalf("TP want %.2f got %v", PathTargetTPPct, tp)
+	wantTP := 1.5 * PathTakeFrac
+	if math.Abs(tp-wantTP) > 0.05 {
+		t.Fatalf("TP want ≈%.2f got %v", wantTP, tp)
 	}
-	if e.StopPct < PathSLLoPct-1e-9 || e.StopPct > PathSLHiPct+1e-9 {
-		t.Fatalf("SL out of analyze band: tp=%.3f sl=%.3f", tp, e.StopPct)
+	if e.StopPct+1e-12 < PathMinStopPct {
+		t.Fatalf("SL below floor: %.3f", e.StopPct)
 	}
 }
 
@@ -336,42 +340,73 @@ func TestRollingGridFindsTinyTP(t *testing.T) {
 	}
 }
 
-func TestPathFormulaAnalyzeBackedShape(t *testing.T) {
-	// Tiny predicted peak still gets TP 0.8% (analyze used actuals, not pred peak).
-	ex, ok := exitsFromPathFormula(0.20, 0.05, 0.40, 0.0005, 0.0002)
+func TestPickExitsByTrainGainMostPnL(t *testing.T) {
+	const barMs = int64(15 * 60_000)
+	start := int64(1_700_000_000_000)
+	start = start - (start % barMs)
+	// Strong up-drift: train scoring should prefer a reachable TP + moderate SL/lev.
+	minutes := synthMinutes(160, barMs, start)
+	bars := candles.Aggregate(minutes, barMs)
+	h1 := pricemodel.Model{Alphas: [4]float64{8.0, 0, 0, 0}}
+	models := []pricemodel.Model{pricemodel.ColdStart(), h1}
+	for h := 2; h <= 40; h++ {
+		models = append(models, pricemodel.Model{Alphas: [4]float64{8.0, 0, 0, 0}})
+	}
+	origin := 80
+	if origin >= len(bars) {
+		t.Fatalf("need bars, got %d", len(bars))
+	}
+	feat, ok := pricemodel.CandleFeatures(bars[origin-1], bars[origin-2].Close)
 	if !ok {
-		t.Fatal("expected formula ok even with tiny predicted peak")
+		t.Fatal("features")
 	}
-	tp := firstTargetPct(ex)
-	if math.Abs(tp-PathTargetTPPct) > 0.05 {
-		t.Fatalf("TP want %.2f got %.3f", PathTargetTPPct, tp)
+	entry := bars[origin].Open
+	raw := predictedCloses(models, bars[origin-1].Close, feat)
+	pickPath := truncatePath(raw, 20)
+	long, peak := pathDirection(pickPath, entry)
+	if peak < 0.05 {
+		t.Fatalf("need directional peak, got %.4f", peak)
 	}
-	if ex.StopPct < PathSLLoPct-1e-9 || ex.StopPct > PathSLHiPct+1e-9 {
-		t.Fatalf("SL want %.2f–%.2f got %.3f", PathSLLoPct, PathSLHiPct, ex.StopPct)
-	}
-	// Noise needing SL > 1.2% → sit out.
-	if _, ok := exitsFromPathFormula(0.20, 0.05, 4.0, 0.0005, 0.0002); ok {
-		t.Fatal("fat noise above SL hi must sit out")
-	}
-}
-
-func TestBestLevPrefersAnalyzeBand(t *testing.T) {
-	entry := 100.0
-	path := make([]float64, 16)
-	for i := range path {
-		path[i] = entry * 1.02 // clears TP 0.8%
-	}
-	ex := exits.Exits{StopPct: 1.2, Targets: [][2]float64{{0.8, 1}}}
-	adv := adversePath(path, true, 0.01)
-	best := bestLevOnPath(true, entry, ex, path, adv, []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, 500, 5, 0.0005, 0.0002)
+	best := pickExitsByTrainGain(
+		bars, models, 10, origin, 20,
+		long, entry, pickPath,
+		[]float64{0.5, 1.0, 1.5, 2.0},
+		[]float64{0.1, 0.5, 1.0, 1.5},
+		[]uint32{1, 2, 3, 4, 5},
+		500, 5, 0.08, 0.0005, 0.0002,
+	)
 	if best == nil {
-		t.Fatal("expected lev pick")
+		t.Fatal("expected train-scored combo")
 	}
-	if best.Lev < float64(PathPreferLevLo)-1e-9 || best.Lev > float64(PathPreferLevHi)+1e-9 {
-		t.Fatalf("want lev %d–%d got %.0f", PathPreferLevLo, PathPreferLevHi, best.Lev)
+	if best.TrainN < 1 {
+		t.Fatalf("train_n=%d", best.TrainN)
+	}
+	if best.Lev < 1 {
+		t.Fatalf("lev=%.0f", best.Lev)
 	}
 	if best.RiskPct > PathTargetRiskPct+1e-9 {
 		t.Fatalf("risk %.2f%% > %.2f%%", best.RiskPct, PathTargetRiskPct)
 	}
-	t.Logf("lev=%.0f risk=%.2f%% mid=%.2f", best.Lev, best.RiskPct, best.PathPnL)
+	t.Logf("pick %s lev=%.0f train_pnl=%.2f n=%d mid=%.2f",
+		best.Exits.Label(), best.Lev, best.TrainPnL, best.TrainN, best.PathPnL)
+}
+
+func TestScoreComboPrefersWinningTP(t *testing.T) {
+	samples := []trainSample{
+		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.6, 100.8, 100.5}}, // +0.8% MFE
+		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.5, 100.9, 100.4}},
+		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.4, 100.7, 100.6}},
+		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.3, 100.85, 100.5}},
+		{Long: true, Entry: 100, Peak: 0.2, Act: []float64{100.55, 100.75, 100.4}},
+	}
+	good := exits.Exits{StopPct: 1.0, Targets: [][2]float64{{0.5, 1}}}
+	bad := exits.Exits{StopPct: 1.0, Targets: [][2]float64{{5.0, 1}}} // unreachable → timeout/SL
+	gp, gn := scoreComboOnSamples(samples, good, 3, 500, 5, 0.0005, 0.0002)
+	bp, bn := scoreComboOnSamples(samples, bad, 3, 500, 5, 0.0005, 0.0002)
+	if gn < 5 || bn < 5 {
+		t.Fatalf("coverage good=%d bad=%d", gn, bn)
+	}
+	if gp <= bp {
+		t.Fatalf("reachable TP should score higher: good=%.4f bad=%.4f", gp, bp)
+	}
 }

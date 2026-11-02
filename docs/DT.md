@@ -61,8 +61,8 @@ OLS return features per bar size, optionally runs per-trade TP/SL:
 - `--price-strategy 1` / `oracle` — peek actual future closes (research ceiling → `nm_price_walk_forward.html`)
 - `--price-strategy 2` / `predicted` — **confirmed IS/OOS loop**:
   origin at latest IS → discover lookback **N** + under-1% **H** from data →
-  best TP×SL×lev on that predicted path → trade after origin → **append actuals** →
-  re-validate **H** + re-pick combo (stable expanding/rolling **N**; widen N only if
+  **score** TP×SL×lev on expanding TRAIN lookback (most train PnL) → trade after origin → **append actuals** →
+  re-validate **H** + re-score combo (stable expanding/rolling **N**; widen N only if
   H collapses) until `trade_end`. (`nm_price_walk_forward_predicted.html`)
 
 ### Master loop: IS origin → N/H under 1% → trade → append → re-validate
@@ -71,9 +71,9 @@ OLS return features per bar size, optionally runs per-trade TP/SL:
 |-------|------|
 | **IS (TRAIN)** | All dates **before** `trade_start` (fit OLS); origin = latest IS bar |
 | **N / H** | Walk back from origin: lookback **N** + forward **H** with mean err &lt; `--max-rel-err` (from data, not fixed) |
-| **Combo** | From OOS analyze: enter on predicted **side** (fee-floor peak — not peak≥0.8%); exits **TP 0.8% / SL 1.0–1.2% / lev 4–5** (empirical on actuals; OLS peaks stay tiny) |
+| **Combo** | Enter on predicted **side** (fee-floor peak). Exits: **score TP×SL×lev on TRAIN lookback actuals each origin** — pick the combo with the most train PnL (not static 0.8/1.2/4–5) |
 | **OOS trade** | Predict **H** from older bar → enter **after** → realize on actuals |
-| **After exit** | **Append** entry→exit actual candles → re-validate **H** + re-pick TP/SL/lev; widen **N** only if H collapses; continue until `trade_end` (loss does not halt) |
+| **After exit** | **Append** entry→exit actual candles → re-validate **H** + re-score TP/SL/lev; widen **N** only if H collapses; continue until `trade_end` (loss does not halt) |
 
 Defaults for a **1-month** smoke test: `--reserve-trade-days 30 --trade-days 30`.
 Year run: `--reserve-trade-days 365 --trade-days 365`. Short scan → shrink TRAIN, keep TRADE.
